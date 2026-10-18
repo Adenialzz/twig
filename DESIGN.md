@@ -35,9 +35,9 @@ remote 名称和 URL 由 Git 实际配置管理。用户级登记表提供初始
 
 ## 架构与事实来源
 
-一个 Cargo 包，依赖 `clap`、`clap_complete`、`serde`、`serde_json`、`toml` 和 `anyhow`；测试使用 `tempfile`。通过 `std::process::Command` 调用 Git、tmux、ps，参数分别传入。错误补充操作上下文，失败不静默降级。
+一个 Cargo 包，依赖 `clap`、`clap_complete`、`serde`、`serde_json`、`toml`、`anyhow` 和 `tempfile`；`tempfile` 用于测试隔离与 PR/MR 正文临时文件。通过 `std::process::Command` 调用 Git、tmux、ps、gh、glab，参数分别传入。错误补充操作上下文，失败不静默降级。
 
-Makefile 仅封装 Cargo 命令：`make build`（默认目标）构建 release，`make install` 安装或更新并打印 Zsh 补全配置提示，`make check` 依次执行格式检查、Clippy 和测试。不自动修改用户 Shell 配置。
+Makefile 中 `make build`（默认目标）构建 release，`make install` 先检查 PATH 中的 gh/glab，通过 Homebrew 安装缺少的工具，再安装或更新 twig 并打印 Zsh 补全和平台登录提示。缺少工具且没有 Homebrew 时直接报错，用户可手动安装依赖，或用 `cargo install --path . --locked` 只安装 twig。不自动安装包管理器、登录平台或修改用户 Shell 配置。`make check` 依次执行格式检查、Clippy 和测试。
 
 | 文件 | 职责 |
 | --- | --- |
@@ -45,11 +45,13 @@ Makefile 仅封装 Cargo 命令：`make build`（默认目标）构建 release�
 | `src/completion.rs` | 复用 CLI 定义解析补全上下文，只读查询项目、任务、分支和 remote 候选 |
 | `src/completion.zsh` | Zsh 候选展示：普通值与选项分别分组，普通值优先 |
 | `src/registry.rs` | 用户级 TOML 登记表、路径解析、remote 登记和 clone |
+| `src/pr.rs` | 任务识别、remote/平台选择、显式推送及草稿 PR/MR 查找与创建 |
 | `src/config.rs` | 共享 Git 目录中的项目配置、任务记录、锁、名称和 Session 标识 |
 | `src/git.rs` | 外部命令执行及 Git 分支、合并关系、Worktree 查询 |
 | `src/tmux.rs` | Session/Window 归属、窗口恢复、进程检查、进入和切换 |
 | `tests/workflow.rs` | 临时仓库及独立 tmux server 上的集成测试 |
 | `tests/completion.rs` | 临时登记表与仓库中的补全协议测试，以及 Zsh 脚本加载验证 |
+| `tests/pr.rs` | 模拟 gh/glab 与真实本地 bare remote 上的 PR/MR 流程测试 |
 
 配置与状态分为两层：
 
@@ -78,7 +80,13 @@ Session 名由仓库共享 Git 目录的绝对路径哈希生成，并使用 `@t
 
 ## 已完成与未承诺的功能
 
-已完成：`init`、`new`、`ls`、`open`、`stop`、`rm`、`config add/list/show/remove`、`config remote add/remove/default`、`clone`、全局 `--repo` 和 `--config`，以及 Zsh 动态补全。具体参数与限制见 README。
+已完成：`init`、`new`、`ls`、`open`、`stop`、`rm`、`config add/list/show/remove`、`config remote add/remove/default`、`clone`、`pr`、全局 `--repo` 和 `--config`，以及 Zsh 动态补全。具体参数与限制见 README。
+
+`pr [任务名]` 是用户明确批准新增的联网命令，统一封装 GitHub PR 与 GitLab MR。省略任务名时按调用者所在 Worktree 识别，保留 `--repo` 切换前的调用目录用于任务识别和正文相对路径。remote 优先级为显式参数、分支 upstream、唯一 remote；平台按公共域名判断，自建域名通过 `--provider` 指定。不新增项目配置项。
+
+只复用同仓库、同源/目标分支的开放请求；否则创建草稿。upstream remote 对应的源分支尊重其 `branch.*.merge` 映射。目标默认项目 `target`。没有 `--push` 时已有请求只返回链接；创建前以 `ls-remote` 验证目标存在及源分支提交与本地一致，不依赖陈旧的 remote-tracking 引用。`--push` 使用显式单分支 refspec 并设置 upstream，不强推、不附带 tag。fetch/push 仓库不一致或存在多个 URL 时拒绝操作，跨 Fork 暂不支持。
+
+GitHub 创建显式传 `--head` 禁止 CLI 自动推送/创建 Fork；GitLab 显式指定同一个 `--repo`/`--head` 并使用 `--push=false`。标题默认最新提交标题，正文默认最新完整提交说明，允许标题和正文文件覆盖。多行正文通过临时文件传递，避免 Shell 插值。外部 CLI 失败不按“无请求”处理；推送或创建部分成功不回滚远端提交。创建与查询期间沿用项目锁，避免其他 twig 命令同时清理正在操作的 Worktree。平台认证沿用官方 CLI，Git 推送沿用 Git 认证。
 
 补全采用 `clap_complete` 的 `unstable-dynamic` 接口，复用现有命令定义，在普通命令解析与执行之前分流。Zsh 通过 `source <(COMPLETE=zsh twig)` 加载；因上游协议尚未稳定，Shell 每次启动时重新生成接入脚本，不保存长期静态副本。上下文只解析光标前的完整参数，支持全局参数位于子命令前后以及等号写法。项目名和 remote 来自登记表，任务来自共享状态，本地分支通过 Git 查询。补全不获取锁、不写状态、不联网、不调用 tmux；查询失败输出 stderr 诊断并返回空候选，生成的 Zsh 脚本隐藏诊断以免打断输入。当前文档与验收范围为 Zsh，其他 Shell 尚未验证。
 
@@ -90,7 +98,7 @@ Zsh 展示通过自定义 `EnvCompleter` 注册脚本，候选生成与转义继
 
 - `status`：详细提交、文件变化、ahead/behind 等信息。
 - `doctor`：诊断配置、Worktree 与 tmux 状态不一致。
-- 交互选择、fzf、TUI、PR 状态集成。
+- 交互选择、fzf、TUI、PR 状态展示、跨 Fork PR/MR。
 - 允许 `--base origin/main`，以及显式 `--fetch`。当前均未实现，后续需先讨论语义。
 
 原始需求中的 Codex `resume` 和 Turn 完成通知属于早期想法。由于最终不管理 Codex 生命周期，它们不在当前范围内，不能直接当作“第二阶段必做功能”。
@@ -100,10 +108,11 @@ Linux 实机、真实 SSH 断线重连、真实终端 attach 的键盘和显示�
 ## 交接快照：2026-10-18
 
 - 已在 macOS 上使用 Rust/Cargo 1.93.1、Git 2.50.1、tmux 3.6a 构建和验证。
-- 本次增加 Zsh 动态补全，并修正任务与选项的展示和选择顺序。通过 `make check` 执行格式检查、Clippy 和测试，5 组补全测试和原有 13 组工作流测试全部通过。
+- 当前已增加 Zsh 动态补全与统一 `pr` 命令。通过 `make check` 执行格式检查、Clippy 和测试：1 组 URL 解析单元测试、5 组补全测试、8 组 PR/MR 集成测试、13 组工作流测试全部通过。
 - 测试使用临时 Git 仓库、独立 tmux socket 和临时登记表。clone 测试用本地 Git remote，没有测试真实服务商认证。跨 Session 切换使用真实 tmux control-mode 客户端验证。
 - 本次已构建 debug 二进制，验证带空格和引号的可执行文件路径、Zsh 脚本加载，以及真实 Tab/ZLE 的展示和选择顺序；未自动安装新版 twig 或修改用户 Shell 配置。启用补全前按 README 安装并重新加载配置。
-- 本次在 `autocomplete` Worktree 开发，开始时工作区干净，基线提交为 `d15e3f9`；补全改动尚未提交。后续仍须重新检查 Git 状态。
+- 补全与 Makefile 已提交为 `1040f76`，通过 PR #1 合入 main（`d484f4f`）。PR/MR 功能继续在 `autocomplete` Worktree 开发，分支已改名为 `feature/pr`，twig 任务名仍为 `autocomplete`。后续仍须重新检查 Git 状态。
+- 当前环境已有 `gh`，尚未安装 `glab`。平台调用按官方文档与源码核对，并通过模拟 CLI 验证参数和错误行为；自动化测试的 push/ls-remote 使用真实本地 bare remote。GitHub 仓库 API 认证已验证，GitLab 实际认证与服务端创建仍待验证。Makefile 的依赖安装通过六种模拟场景验证，未在测试中实际安装软件。
 - 未为用户创建或填入真实 `~/.twig/config.toml`。它由首次登记命令创建，项目 URL 和路径须由用户提供。
 - 最初开发曾使用临时构建副本，但后续开发以本仓库为准，不依赖 `/tmp` 文件或上一段聊天上下文。
 

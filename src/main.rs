@@ -1,6 +1,7 @@
 mod completion;
 mod config;
 mod git;
+mod pr;
 mod registry;
 mod tmux;
 
@@ -58,6 +59,8 @@ enum Action {
     },
     /// 列出由 twig 管理的任务及实际状态
     Ls,
+    /// 查找或创建草稿 PR/MR；仅 --push 才推送提交
+    Pr(pr::Args),
     /// 进入任务窗口；窗口丢失时重建 Shell
     Open {
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
@@ -92,6 +95,7 @@ fn main() {
 }
 
 fn execute(cli: Cli) -> Result<()> {
+    let invocation_dir = std::env::current_dir()?;
     let action = match cli.command {
         Action::Config { command } => {
             ensure!(
@@ -141,6 +145,7 @@ fn execute(cli: Cli) -> Result<()> {
     match action {
         Action::New { name, base } => new(&project, &config, &mut state, &name, base),
         Action::Ls => list(&project, &config, &state),
+        Action::Pr(args) => pr::execute(&config, &state, &invocation_dir, args),
         Action::Open { name } => {
             let feature = feature(&state, &name)?;
             ensure!(
