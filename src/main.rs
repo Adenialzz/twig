@@ -42,6 +42,9 @@ enum Action {
     },
     /// 初始化项目（不修改 Git 分支，不拉取远端）
     Init {
+        /// 全局登记别名，默认使用主仓库目录名
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
         /// 默认合并目标，默认与基础分支相同
@@ -115,8 +118,13 @@ fn execute(cli: Cli) -> Result<()> {
         }
         action => action,
     };
-    let registered = if let Some(name) = cli.repo {
-        let entry = registry::entry(&registry::location(cli.config)?, &name)?;
+    let registry_path = if cli.repo.is_some() || matches!(action, Action::Init { .. }) {
+        Some(registry::location(cli.config)?)
+    } else {
+        None
+    };
+    let registered = if let Some(name) = &cli.repo {
+        let entry = registry::entry(registry_path.as_ref().unwrap(), name)?;
         let path = registry::expand(&entry.path)?;
         std::env::set_current_dir(&path).with_context(|| {
             format!(
@@ -134,11 +142,26 @@ fn execute(cli: Cli) -> Result<()> {
         None
     };
     let project = Project::discover()?;
+    if matches!(action, Action::Init { .. }) && project.dir.join("config.json").try_exists()? {
+        println!("当前项目已经初始化，无需重复执行。");
+        return Ok(());
+    }
     let lock = project.lock()?;
-    if let Action::Init { base, target, root } = action {
+    if let Action::Init {
+        name,
+        base,
+        target,
+        root,
+    } = action
+    {
         let base = base.or_else(|| registered.as_ref().map(|r| r.main.clone()));
         let target = target.or_else(|| registered.as_ref().map(|r| r.main.clone()));
-        return init(&project, base, target, root);
+        return registry::initialize(
+            registry_path.as_ref().unwrap(),
+            name.or(cli.repo),
+            &project,
+            || init(&project, base, target, root),
+        );
     }
     let config = project.config()?;
     let mut state = project.state()?;
@@ -251,7 +274,9 @@ fn init(
         session: config::session(&project.common),
     };
     project.save("config.json", &config)?;
-    tmux::ensure_session(&config, project).context("配置已保存；修复 tmux 后重新执行 twig init")?;
+    tmux::ensure_session(&config, project).context(
+        "配置已保存；修复 tmux 后可通过 new/open 创建窗口；全局登记缺失时请手动补充登记表",
+    )?;
     println!(
         "已初始化：{}\nWorktree 根目录：{}\ntmux Session：{}",
         project.dir.display(),

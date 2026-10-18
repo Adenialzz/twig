@@ -78,7 +78,9 @@ pub struct Registry {
 pub struct Entry {
     pub path: PathBuf,
     pub main: String,
-    pub default_remote: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_remote: Option<String>,
+    #[serde(default)]
     pub remotes: BTreeMap<String, String>,
 }
 
@@ -125,11 +127,12 @@ impl Entry {
         )
         .context("主分支名无效")?;
         ensure!(!self.main.starts_with('-'), "主分支名不能以 - 开头");
-        ensure!(
-            self.remotes.contains_key(&self.default_remote),
-            "default_remote 不在 remotes 中：{}",
-            self.default_remote
-        );
+        if let Some(remote) = &self.default_remote {
+            ensure!(
+                self.remotes.contains_key(remote),
+                "default_remote 不在 remotes 中：{remote}"
+            );
+        }
         for (name, url) in &self.remotes {
             config::name(name)?;
             ensure!(!url.trim().is_empty(), "remote {name} 的 URL 不能为空");
@@ -154,7 +157,7 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
                     "{name}\t{}\t{}\t{}",
                     entry.path.display(),
                     entry.main,
-                    entry.default_remote
+                    entry.default_remote.as_deref().unwrap_or("-")
                 );
             }
             return Ok(());
@@ -186,7 +189,7 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
             let entry = Entry {
                 path: expand(&repo_path)?,
                 main,
-                default_remote: remote.clone(),
+                default_remote: Some(remote.clone()),
                 remotes: BTreeMap::from([(remote, url)]),
             };
             entry.validate()?;
@@ -214,11 +217,14 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
                         !entry.remotes.contains_key(&name),
                         "remote {name} 已登记；请编辑配置或先移除"
                     );
+                    if entry.default_remote.is_none() {
+                        entry.default_remote = Some(name.clone());
+                    }
                     entry.remotes.insert(name, url);
                 }
                 RemoteAction::Remove { name, .. } => {
                     ensure!(
-                        name != entry.default_remote,
+                        Some(&name) != entry.default_remote.as_ref(),
                         "请先设置其他 default remote，再移除 {name}"
                     );
                     ensure!(
@@ -226,23 +232,32 @@ pub fn execute(path: &Path, action: Action) -> Result<()> {
                         "remote {name} 不存在"
                     );
                 }
-                RemoteAction::Default { name, .. } => entry.default_remote = name,
+                RemoteAction::Default { name, .. } => entry.default_remote = Some(name),
             }
             entry.validate()?;
         }
         Action::List | Action::Show { .. } => unreachable!(),
     }
+    save(path, &registry)?;
+    println!("登记表已保存：{}", path.display());
+    Ok(())
+}
+
+fn save(path: &Path, registry: &Registry) -> Result<()> {
     let temp = path.with_extension("toml.tmp");
     fs::write(&temp, toml::to_string_pretty(&registry)?)?;
     fs::rename(temp, path)?;
-    println!("登记表已保存：{}", path.display());
     Ok(())
 }
 
 pub fn clone(entry: &Entry) -> Result<()> {
     let path = expand(&entry.path)?;
     let cwd = std::env::current_dir()?;
-    let url = &entry.remotes[&entry.default_remote];
+    let remote = entry
+        .default_remote
+        .as_ref()
+        .context("项目未配置默认 remote；请先使用 twig config remote add/default 配置克隆来源")?;
+    let url = &entry.remotes[remote];
     // 只接续归属完全匹配的仓库，绝不覆盖已有目录或重写 remote。
     if fs::symlink_metadata(&path).is_ok() {
         let root = git(&path, &["rev-parse", "--show-toplevel"])
@@ -251,14 +266,7 @@ pub fn clone(entry: &Entry) -> Result<()> {
             Path::new(&root).canonicalize()? == path.canonicalize()?,
             "目标路径不是仓库根目录，未覆盖"
         );
-        let existing = git(
-            &path,
-            &[
-                "config",
-                "--get",
-                &format!("remote.{}.url", entry.default_remote),
-            ],
-        )?;
+        let existing = git(&path, &["config", "--get", &format!("remote.{remote}.url")])?;
         ensure!(
             existing == *url,
             "默认 remote URL 与登记不符，未覆盖：{existing}"
@@ -271,7 +279,7 @@ pub fn clone(entry: &Entry) -> Result<()> {
             .args([
                 "clone",
                 "--origin",
-                &entry.default_remote,
+                remote,
                 "--branch",
                 &entry.main,
                 "--",
@@ -324,5 +332,67 @@ pub fn clone(entry: &Entry) -> Result<()> {
         None,
     )
     .context("仓库和 remote 已保留，修复后可重试 twig clone")?;
+    Ok(())
+}
+
+/// 持有登记表锁，先检查冲突，再初始化；只有初始化成功才写入新登记。
+pub fn initialize(
+    path: &Path,
+    requested: Option<String>,
+    project: &config::Project,
+    initialize_project: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let main = crate::git::worktrees(&std::env::current_dir()?)?
+        .first()
+        .context("未找到主工作目录")?
+        .0
+        .canonicalize()?;
+    fs::create_dir_all(path.parent().context("配置路径缺少父目录")?)?;
+    let _lock = config::Lock::acquire(path.with_extension("lock"))?;
+    let mut registry = load(path)?;
+    let mut existing = None;
+    for (name, entry) in &registry.projects {
+        let entry_path = expand(&entry.path)?;
+        let same =
+            entry_path == main || (entry_path.try_exists()? && entry_path.canonicalize()? == main);
+        if requested.as_ref() == Some(name) {
+            ensure!(
+                same,
+                "项目别名 {name} 已指向其他路径；请使用 init --name 指定其他别名"
+            );
+        }
+        if same && (existing.is_none() || requested.as_ref() == Some(name)) {
+            existing = Some(name.clone());
+        }
+    }
+    let name = match existing.as_ref().or(requested.as_ref()) {
+        Some(name) => name.clone(),
+        None => main
+            .file_name()
+            .and_then(|s| s.to_str())
+            .context("无法取得仓库目录名，请使用 init --name")?
+            .to_owned(),
+    };
+    config::name(&name)
+        .context("项目别名无效；请使用 init --name 指定字母、数字、横线或下划线组成的别名")?;
+    ensure!(
+        existing.is_some() || !registry.projects.contains_key(&name),
+        "项目别名 {name} 已指向其他路径；请使用 init --name 指定其他别名"
+    );
+    initialize_project()?;
+    if existing.is_none() {
+        let config = project.config()?;
+        registry.projects.insert(
+            name.clone(),
+            Entry {
+                path: main,
+                main: config.base,
+                default_remote: None,
+                remotes: BTreeMap::new(),
+            },
+        );
+        save(path, &registry).context("项目已初始化，但全局登记保存失败；请手动补充登记表")?;
+    }
+    println!("项目别名：{name}（{}）", path.display());
     Ok(())
 }
