@@ -28,8 +28,8 @@
 remote 名称和 URL 由 Git 实际配置管理。用户级登记表提供初始化信息，不是持续同步服务：
 
 - `config` 命令只读写登记表，既不克隆，也不改已有仓库的 remote。
-- `init` 成功后自动登记主仓库，默认别名取目录名，可用 `--name` 指定。同一路径复用已有登记，别名冲突提前报错；登记表锁覆盖检查、初始化和保存。遵循 `--config`，相对路径在切换仓库前解析。
-- 本地登记允许省略 `default_remote` 和 `remotes`；`init` 不导入 Git remote，新登记主分支取项目 base。首次添加 remote 自动设为默认，`clone` 缺少默认 remote 时报错。重复 `init` 保留项目配置，不再套用登记主分支。
+- 首次 `init` 成功后自动登记主仓库，默认别名取目录名，可用 `--name` 指定。同一路径复用已有登记，别名冲突提前报错；登记表锁覆盖检查、初始化和保存。遵循 `--config`，相对路径在切换仓库前解析。
+- 本地登记允许省略 `default_remote` 和 `remotes`；`init` 不导入 Git remote，新登记主分支取项目 base。首次添加 remote 自动设为默认，`clone` 缺少默认 remote 时报错。重复 `init` 在获取项目锁之前检查共享目录的 `config.json`，存在则仅提示并成功退出，不读取项目配置、不补登记、不操作 tmux、不处理初始化参数。`clone` 的接续流程保持不变。
 - `clone` 使用默认 remote，检出登记的主分支，添加其他 remote，再初始化 twig；其他 remote 不自动 fetch。
 - 重试 `clone` 时核对现有目录、remote URL、主分支和 twig 配置，不覆盖冲突；可添加缺少的 remote，不删除额外 remote，也不更新已有分支。
 - `default_remote` 用于克隆来源，不是所有分支的统一推送目标。分支的 pull/push upstream 继续由 Git 管理。
@@ -122,4 +122,4 @@ Linux 实机、真实 SSH 断线重连、真实终端 attach 的键盘和显示�
 
 ### 本次更新：init 自动登记（2026-10-18）
 
-已实现 `init --name`、全局自动登记、同路径复用与重名保护、本地无 remote 登记及失败重试。测试覆盖主仓库/关联 Worktree、任意目录通过别名访问、配置损坏、tmux 失败后重试，以及 base/target 不同情况下的重复初始化。
+已实现 `init --name`、首次初始化全局自动登记、同路径复用与重名保护、本地无 remote 登记。重复 `init` 改为仅提示退出；若首次初始化在配置保存后失败，不再通过重复 `init` 补登记或恢复 Session，需要手动补充登记表并通过 `new`/`open` 创建窗口。测试覆盖主仓库/关联 Worktree、任意目录通过别名访问、配置损坏、部分失败，以及存在锁、缺失登记表和 Session 时重复初始化无写入。

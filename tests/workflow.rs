@@ -623,9 +623,8 @@ fn registered_init_and_failed_clone_initialization_can_resume() {
     success(f.registered(&["clone", "app"]));
     success(f.registered(&["--repo", "app", "init"]));
     assert!(
-        !f.registered(&["--repo", "app", "init", "--base", "other"])
-            .status
-            .success()
+        success(f.registered(&["--repo", "app", "init", "--base", "other"]))
+            .contains("当前项目已经初始化")
     );
 }
 
@@ -706,7 +705,7 @@ fn init_checks_registration_before_creating_resources() {
 }
 
 #[test]
-fn init_retries_registration_after_tmux_failure_and_preserves_project_defaults() {
+fn repeated_init_after_partial_failure_does_not_register_or_restore_session() {
     let f = Fixture::new();
     let repo = f._temp.path().join("fresh");
     f.git(&["clone", f.repo.to_str().unwrap(), repo.to_str().unwrap()]);
@@ -733,9 +732,47 @@ fn init_retries_registration_after_tmux_failure_and_preserves_project_defaults()
     assert_eq!(fs::read(f.registry_path()).unwrap(), before);
     fs::write(wrapper, original).unwrap();
     success(f.command(&repo).args(["init"]).output().unwrap());
-    success(f.registered(&["--repo", "fresh", "init"]));
+    assert_eq!(fs::read(f.registry_path()).unwrap(), before);
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(repo.join(".git/twig/config.json")).unwrap()).unwrap();
     assert_eq!(config["base"], "develop");
     assert_eq!(config["target"], "main");
+}
+
+#[test]
+fn repeated_init_is_read_only_even_with_missing_registry_and_session() {
+    let f = Fixture::new();
+    f.ok(&["new", "task"]);
+    let config_path = f.repo.join(".git/twig/config.json");
+    let before = fs::read(&config_path).unwrap();
+    f.mux(&["kill-server"]);
+    fs::remove_dir_all(f.registry_path().parent().unwrap()).unwrap();
+    // 锁已存在仍须直接退出，不能尝试获取锁或读取配置内容。
+    let lock = f.repo.join(".git/twig/lock");
+    fs::write(&lock, "existing lock").unwrap();
+    fs::write(f.bin.join("tmux"), "#!/bin/sh\nexit 71\n").unwrap();
+    let unused_root = f._temp.path().join("unused");
+    for cwd in [&f.repo, &f.root.join("task")] {
+        let out = success(
+            f.command(cwd)
+                .args([
+                    "init",
+                    "--name",
+                    "bad name",
+                    "--base",
+                    "missing",
+                    "--target",
+                    "missing",
+                    "--root",
+                    unused_root.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap(),
+        );
+        assert!(out.contains("当前项目已经初始化，无需重复执行。"));
+    }
+    assert_eq!(fs::read(config_path).unwrap(), before);
+    assert_eq!(fs::read_to_string(lock).unwrap(), "existing lock");
+    assert!(!f.registry_path().parent().unwrap().exists());
+    assert!(!unused_root.exists());
 }

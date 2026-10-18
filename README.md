@@ -138,11 +138,11 @@ projects/
     └── search/
 ```
 
-`init` 成功后自动写入 `~/.twig/config.toml`（或 `--config` 指定的文件），默认用主仓库目录名作为别名，此后可在任意目录使用 `twig --repo myapp ...`。目录名不符合项目命名规则或与其他路径重名时，用 `init --name myapp` 指定别名。冲突会在创建项目配置、Worktree 根目录和 Session 前报错。
+首次 `init` 成功后自动写入 `~/.twig/config.toml`（或 `--config` 指定的文件），默认用主仓库目录名作为别名，此后可在任意目录使用 `twig --repo myapp ...`。目录名不符合项目命名规则或与其他路径重名时，用 `init --name myapp` 指定别名。冲突会在创建项目配置、Worktree 根目录和 Session 前报错。
 
-同一路径已经登记时复用原别名和登记内容，不新增别名、不覆盖主分支或 remote；在关联 Worktree 内执行也登记主仓库。重复 `init` 可以补登记旧项目。新登记的 `main` 取项目基础分支，remote 留空，不自动导入 Git remote；首次 `config remote add` 会同时设为默认 remote，未配置默认 remote 时 `clone` 会明确报错。
+同一路径已经登记时复用原别名和登记内容，不新增别名、不覆盖主分支或 remote；在关联 Worktree 内执行也登记主仓库。已有项目配置时，重复 `init` 只提示“当前项目已经初始化，无需重复执行。”并成功退出，不补登记、不操作 tmux、不创建锁，也不处理传入的初始化参数。新登记的 `main` 取项目基础分支，remote 留空，不自动导入 Git remote；首次 `config remote add` 会同时设为默认 remote，未配置默认 remote 时 `clone` 会明确报错。
 
-初始化失败时不写入新登记；已创建的项目资源保留，修复后重试 `init` 即可。全局登记保存失败也会提示重试。
+初始化失败时不写入新登记，已创建的项目资源保留。若尚未保存项目配置，可修复后重试 `init`；若 `config.json` 已存在，重复 `init` 也只提示退出。此时缺失的全局登记需手动补充登记表，tmux 修复后可用 `new`/`open` 创建窗口。全局登记保存失败时也需手动补充登记表。
 
 可在初始化时自定义：
 
@@ -194,7 +194,7 @@ twig pr --title '修复登录超时' --body-file ./pr.md
 | `twig stop NAME [-y]` | 确认后关闭窗口并终止其进程，保留代码和分支 |
 | `twig rm NAME [--target BRANCH] [--keep-branch] [-y]` | 检查安全条件后移除任务 |
 
-重复 `init` 复用配置，重复 `new` 复用已登记资源，重复 `stop`/`rm` 不会创建资源。不会接管外部已有的同名分支或 Worktree。修改已有初始化配置需要编辑下述 `config.json`，不是重新传 `init` 参数。
+重复 `init` 只提示已初始化并退出，重复 `new` 复用已登记资源，重复 `stop`/`rm` 不会创建资源。不会接管外部已有的同名分支或 Worktree。修改已有初始化配置需要编辑下述 `config.json`，不是重新传 `init` 参数。
 
 `ls` 中 `Open` 只表示窗口存在，不表示 Codex 正在运行。`Missing` 表示 Worktree 未创建或已移除，`Mismatch` 表示目录丢失、分支变化等需要人工检查的状态。
 

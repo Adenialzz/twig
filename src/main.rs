@@ -142,6 +142,10 @@ fn execute(cli: Cli) -> Result<()> {
         None
     };
     let project = Project::discover()?;
+    if matches!(action, Action::Init { .. }) && project.dir.join("config.json").try_exists()? {
+        println!("当前项目已经初始化，无需重复执行。");
+        return Ok(());
+    }
     let lock = project.lock()?;
     if let Action::Init {
         name,
@@ -150,17 +154,8 @@ fn execute(cli: Cli) -> Result<()> {
         root,
     } = action
     {
-        let initialized = project.dir.join("config.json").exists();
-        let base = base.or_else(|| {
-            (!initialized)
-                .then(|| registered.as_ref().map(|r| r.main.clone()))
-                .flatten()
-        });
-        let target = target.or_else(|| {
-            (!initialized)
-                .then(|| registered.as_ref().map(|r| r.main.clone()))
-                .flatten()
-        });
+        let base = base.or_else(|| registered.as_ref().map(|r| r.main.clone()));
+        let target = target.or_else(|| registered.as_ref().map(|r| r.main.clone()));
         return registry::initialize(
             registry_path.as_ref().unwrap(),
             name.or(cli.repo),
@@ -279,7 +274,9 @@ fn init(
         session: config::session(&project.common),
     };
     project.save("config.json", &config)?;
-    tmux::ensure_session(&config, project).context("配置已保存；修复 tmux 后重新执行 twig init")?;
+    tmux::ensure_session(&config, project).context(
+        "配置已保存；修复 tmux 后可通过 new/open 创建窗口；全局登记缺失时请手动补充登记表",
+    )?;
     println!(
         "已初始化：{}\nWorktree 根目录：{}\ntmux Session：{}",
         project.dir.display(),

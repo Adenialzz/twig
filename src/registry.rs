@@ -391,8 +391,7 @@ pub fn initialize(
                 remotes: BTreeMap::new(),
             },
         );
-        save(path, &registry)
-            .context("项目已初始化，但全局登记保存失败；修复后重新执行 twig init")?;
+        save(path, &registry).context("项目已初始化，但全局登记保存失败；请手动补充登记表")?;
     }
     println!("项目别名：{name}（{}）", path.display());
     Ok(())
