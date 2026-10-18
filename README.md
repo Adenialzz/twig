@@ -111,16 +111,16 @@ twig config remove myapp                   # 仅取消登记，保留仓库、re
 
 目标路径已存在时，只允许接续默认 remote URL 完全匹配、主分支存在的仓库；登记表中已存在的 remote 都会先核对 URL。不会覆盖目录、改写不同的 URL、切换已有分支或拉取更新。额外的 Git remote 会保留。若初始化失败，仓库保留，可修复原因后重新执行 `twig clone myapp`。仓库已有 twig 配置但基础/目标分支与登记的主分支冲突时，会报错而不覆盖。
 
-已有本地仓库可以只登记，再执行 `twig --repo myapp init`；此时不需要 `clone`，也不会修改 Git remote。登记主分支只作为初始化默认值；初始化后，任务仍以项目自身配置和实际 Git 状态为准。更新登记表不会自动同步到已有仓库；显式重试 `clone` 会核对 remote 并添加缺少的 remote，不删除其他 remote。
+已有本地仓库可以只登记，再执行 `twig --repo myapp init`；此时不需要 `clone`，也不会修改 Git remote。登记主分支只作为首次初始化默认值；初始化后，任务仍以项目自身配置和实际 Git 状态为准。更新登记表不会自动同步到已有仓库；显式重试 `clone` 会核对 remote 并添加缺少的 remote，不删除其他 remote。
 
-需要独立登记表时可用 `twig --config /path/to/config.toml ...`，例如用于测试或不同机器配置；不带 `--repo` 的原有任务命令仍按当前目录识别项目，不依赖登记表。
+需要独立登记表时可用 `twig --config /path/to/config.toml ...`，例如用于测试或不同机器配置；不带 `--repo` 的任务命令仍按当前目录识别项目；`init` 会向选定的登记表自动登记。
 
 ### 直接使用当前仓库
 
 在已有、至少有一个提交的普通 Git 仓库中运行：
 
 ```bash
-twig init                         # 优先 main，其次 master
+twig init                         # 优先 main，其次 master；自动登记项目
 twig new auth                     # 创建 feature/auth 和 Shell 窗口，不自动进入
 twig new search
 twig ls
@@ -138,10 +138,16 @@ projects/
     └── search/
 ```
 
+`init` 成功后自动写入 `~/.twig/config.toml`（或 `--config` 指定的文件），默认用主仓库目录名作为别名，此后可在任意目录使用 `twig --repo myapp ...`。目录名不符合项目命名规则或与其他路径重名时，用 `init --name myapp` 指定别名。冲突会在创建项目配置、Worktree 根目录和 Session 前报错。
+
+同一路径已经登记时复用原别名和登记内容，不新增别名、不覆盖主分支或 remote；在关联 Worktree 内执行也登记主仓库。重复 `init` 可以补登记旧项目。新登记的 `main` 取项目基础分支，remote 留空，不自动导入 Git remote；首次 `config remote add` 会同时设为默认 remote，未配置默认 remote 时 `clone` 会明确报错。
+
+初始化失败时不写入新登记；已创建的项目资源保留，修复后重试 `init` 即可。全局登记保存失败也会提示重试。
+
 可在初始化时自定义：
 
 ```bash
-twig init --base develop --target main --root ../my-worktrees
+twig init --name myapp --base develop --target main --root ../my-worktrees
 twig new payment --base feature/auth
 ```
 
@@ -180,7 +186,7 @@ twig pr --title '修复登录超时' --body-file ./pr.md
 | `twig config add/list/show/remove` | 登记、查看和取消登记项目，不联网 |
 | `twig config remote add/remove/default` | 管理项目的多个 remote 和默认克隆来源 |
 | `twig clone NAME` | 克隆或接续已登记项目，配置 remote 并初始化 twig |
-| `twig init [--base BRANCH] [--target BRANCH] [--root PATH]` | 保存项目配置并创建主 Session |
+| `twig init [--name NAME] [--base BRANCH] [--target BRANCH] [--root PATH]` | 保存项目配置、创建主 Session 并自动登记 |
 | `twig new NAME [--base BRANCH]` | 创建或接续任务环境，不自动启动任何 AI 工具 |
 | `twig ls` | 列出 twig 登记的任务、实际 Git 状态与窗口状态 |
 | `twig pr [NAME] [--push] [--remote REMOTE] [--target BRANCH] [--provider github\|gitlab]` | 联网查找或创建草稿 PR/MR；推送必须显式指定 |

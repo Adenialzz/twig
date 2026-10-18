@@ -42,6 +42,9 @@ enum Action {
     },
     /// 初始化项目（不修改 Git 分支，不拉取远端）
     Init {
+        /// 全局登记别名，默认使用主仓库目录名
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
         /// 默认合并目标，默认与基础分支相同
@@ -115,8 +118,13 @@ fn execute(cli: Cli) -> Result<()> {
         }
         action => action,
     };
-    let registered = if let Some(name) = cli.repo {
-        let entry = registry::entry(&registry::location(cli.config)?, &name)?;
+    let registry_path = if cli.repo.is_some() || matches!(action, Action::Init { .. }) {
+        Some(registry::location(cli.config)?)
+    } else {
+        None
+    };
+    let registered = if let Some(name) = &cli.repo {
+        let entry = registry::entry(registry_path.as_ref().unwrap(), name)?;
         let path = registry::expand(&entry.path)?;
         std::env::set_current_dir(&path).with_context(|| {
             format!(
@@ -135,10 +143,30 @@ fn execute(cli: Cli) -> Result<()> {
     };
     let project = Project::discover()?;
     let lock = project.lock()?;
-    if let Action::Init { base, target, root } = action {
-        let base = base.or_else(|| registered.as_ref().map(|r| r.main.clone()));
-        let target = target.or_else(|| registered.as_ref().map(|r| r.main.clone()));
-        return init(&project, base, target, root);
+    if let Action::Init {
+        name,
+        base,
+        target,
+        root,
+    } = action
+    {
+        let initialized = project.dir.join("config.json").exists();
+        let base = base.or_else(|| {
+            (!initialized)
+                .then(|| registered.as_ref().map(|r| r.main.clone()))
+                .flatten()
+        });
+        let target = target.or_else(|| {
+            (!initialized)
+                .then(|| registered.as_ref().map(|r| r.main.clone()))
+                .flatten()
+        });
+        return registry::initialize(
+            registry_path.as_ref().unwrap(),
+            name.or(cli.repo),
+            &project,
+            || init(&project, base, target, root),
+        );
     }
     let config = project.config()?;
     let mut state = project.state()?;

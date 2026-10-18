@@ -28,7 +28,7 @@
 ## 产品与安全边界
 
 - `new` 和 `open` 只准备 Shell，不自动启动 Codex 或恢复对话。不依赖 Codex Desktop，也不管理 Agent 生命周期。
-- 用户级登记表默认在 `~/.twig/config.toml`；项目配置与任务状态仍在共享 Git 目录。
+- 用户级登记表默认在 `~/.twig/config.toml`；`init` 成功后自动登记主仓库，遵循 `--config`，同路径复用、别名冲突不覆盖。本地登记允许没有 remote；项目配置与任务状态仍在共享 Git 目录。
 - 登记命令不联网。显式 `clone` 可克隆仓库并配置 remote；普通任务命令不隐式 fetch、pull 或 push。
 - `pr` 是显式联网命令，GitHub/GitLab 分别通过 `gh`/`glab` 操作。只有 `--push` 才允许推送，明确指定仓库与分支，不让平台 CLI 隐式推送或创建 Fork；不自动合并或清理。
 - Shell 补全必须只读，不创建配置/锁、不调用 tmux；复用 CLI 定义解析参数，不执行正在补全的命令。

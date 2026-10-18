@@ -53,11 +53,18 @@ impl Fixture {
         f.git(&["config", "user.name", "Twig Test"]);
         f.git(&["config", "commit.gpgsign", "false"]);
         f.git(&["commit", "--allow-empty", "-m", "initial"]);
-        f.ok(&["init", "--root", f.root.to_str().unwrap()]);
+        f.ok(&[
+            "init",
+            "--name",
+            "local",
+            "--root",
+            f.root.to_str().unwrap(),
+        ]);
         f
     }
     fn command(&self, cwd: &Path) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_twig"));
+        c.arg("--config").arg(self.registry_path());
         c.current_dir(cwd)
             .env(
                 "PATH",
@@ -75,12 +82,7 @@ impl Fixture {
         self._temp.path().join("user-config/config.toml")
     }
     fn registered(&self, args: &[&str]) -> Output {
-        self.command(self._temp.path())
-            .arg("--config")
-            .arg(self.registry_path())
-            .args(args)
-            .output()
-            .unwrap()
+        self.command(self._temp.path()).args(args).output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> String {
         success(self.run(args))
@@ -625,4 +627,115 @@ fn registered_init_and_failed_clone_initialization_can_resume() {
             .status
             .success()
     );
+}
+
+#[test]
+fn init_registers_local_projects_and_reuses_worktree_registration() {
+    let f = Fixture::new();
+    let before = fs::read(f.registry_path()).unwrap();
+    f.ok(&["init"]);
+    assert_eq!(fs::read(f.registry_path()).unwrap(), before);
+    success(f.registered(&["--repo", "local", "ls"]));
+    f.ok(&["new", "task"]);
+    success(
+        f.command(&f.root.join("task"))
+            .args(["init"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(fs::read(f.registry_path()).unwrap(), before);
+    f.fail(&["clone", "local"], "未配置默认 remote");
+    success(f.registered(&[
+        "config",
+        "remote",
+        "add",
+        "local",
+        "origin",
+        f.repo.to_str().unwrap(),
+    ]));
+    assert!(
+        success(f.registered(&["config", "show", "local"])).contains("default_remote = \"origin\"")
+    );
+
+    let repo = f._temp.path().join("fresh");
+    f.git(&["clone", f.repo.to_str().unwrap(), repo.to_str().unwrap()]);
+    success(f.command(&repo).args(["init"]).output().unwrap());
+    let entry = success(f.registered(&["config", "show", "fresh"]));
+    assert!(entry.contains("main = \"main\""));
+    assert!(!entry.contains("default_remote"));
+    success(f.registered(&["--repo", "fresh", "ls"]));
+}
+
+#[test]
+fn init_checks_registration_before_creating_resources() {
+    let f = Fixture::new();
+    let repo = f._temp.path().join("local");
+    f.git(&["clone", f.repo.to_str().unwrap(), repo.to_str().unwrap()]);
+    let before = fs::read(f.registry_path()).unwrap();
+    let out = f.command(&repo).args(["init"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("已指向其他路径"));
+    assert!(!repo.join(".git/twig/config.json").exists());
+    assert!(!f._temp.path().join("local.worktrees").exists());
+    assert_eq!(fs::read(f.registry_path()).unwrap(), before);
+    let out = f
+        .command(&repo)
+        .args(["init", "--name", "bad name"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(!repo.join(".git/twig/config.json").exists());
+    fs::write(f.registry_path(), "invalid = [").unwrap();
+    assert!(
+        !f.command(&repo)
+            .args(["init", "--name", "other"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(!repo.join(".git/twig/config.json").exists());
+    fs::write(f.registry_path(), before).unwrap();
+    success(
+        f.command(&repo)
+            .args(["init", "--name", "other"])
+            .output()
+            .unwrap(),
+    );
+    success(f.registered(&["--repo", "other", "ls"]));
+}
+
+#[test]
+fn init_retries_registration_after_tmux_failure_and_preserves_project_defaults() {
+    let f = Fixture::new();
+    let repo = f._temp.path().join("fresh");
+    f.git(&["clone", f.repo.to_str().unwrap(), repo.to_str().unwrap()]);
+    success(
+        Command::new("git")
+            .current_dir(&repo)
+            .args(["branch", "develop"])
+            .output()
+            .unwrap(),
+    );
+    let wrapper = f.bin.join("tmux");
+    let original = fs::read(&wrapper).unwrap();
+    fs::write(&wrapper, "#!/bin/sh\necho injected-failure >&2\nexit 71\n").unwrap();
+    let before = fs::read(f.registry_path()).unwrap();
+    assert!(
+        !f.command(&repo)
+            .args(["init", "--base", "develop", "--target", "main"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(repo.join(".git/twig/config.json").exists());
+    assert_eq!(fs::read(f.registry_path()).unwrap(), before);
+    fs::write(wrapper, original).unwrap();
+    success(f.command(&repo).args(["init"]).output().unwrap());
+    success(f.registered(&["--repo", "fresh", "init"]));
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.join(".git/twig/config.json")).unwrap()).unwrap();
+    assert_eq!(config["base"], "develop");
+    assert_eq!(config["target"], "main");
 }
