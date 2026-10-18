@@ -1,0 +1,19 @@
+[package]
+name = "twig-cli"
+version = "0.1.0"
+edition = "2024"
+description = "用 Git Worktree 和 tmux 管理独立任务环境"
+
+[[bin]]
+name = "twig"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
