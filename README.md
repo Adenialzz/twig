@@ -16,7 +16,9 @@ make install
 twig --help
 ```
 
-`make install` 用于安装或更新 twig，成功后打印 Zsh 补全启用提示，不修改 Shell 配置。没有 Make 时也可以直接执行 `cargo install --path . --locked`。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
+`make install` 先检查 `gh` 和 `glab`，通过 Homebrew 安装缺少的工具，已在 PATH 中的工具直接跳过；缺少工具且没有 Homebrew 时停止并提示手动安装。随后安装或更新 twig，成功后打印 Zsh 补全和平台登录提示，不修改 Shell 配置、不自动登录。使用 PR/MR 前按需运行 `gh auth login` / `glab auth login`。
+
+只安装 twig，或不使用 Make/Homebrew 时，可以直接执行 `cargo install --path . --locked`，平台 CLI 按需自行安装。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
 
 仅构建而不安装：
 
@@ -44,6 +46,7 @@ source <(COMPLETE=zsh twig)
 | 输入后按 Tab | 候选来源 |
 | --- | --- |
 | `twig open ` / `stop ` / `rm ` / `new ` | 项目已有任务；`new` 仍可输入新名称 |
+| `twig pr `、`twig pr --remote `、`twig pr --provider ` | 已有任务、本地 Git remote、GitHub/GitLab 平台 |
 | `twig --repo `、`twig clone ` | 用户登记表中的项目名 |
 | `twig config show ` / `remove `、`twig config remote add/remove/default ` | 已登记项目名 |
 | `twig config remote remove demo ` / `default demo ` | demo 登记的 remote 名 |
@@ -146,6 +149,30 @@ twig new payment --base feature/auth
 
 Worktree 根目录必须与主工作目录分离，不能相互包含。任务名为 1–64 位 ASCII 字母、数字、`-` 或 `_`，首位为字母或数字；`main` 保留给主窗口。
 
+### 提交 GitHub PR / GitLab MR
+
+统一使用 `twig pr`，分别调用已安装并登录的 [GitHub CLI `gh`](https://cli.github.com/manual/gh_pr_create) 或 [GitLab CLI `glab`](https://docs.gitlab.com/cli/mr/create/)。Git 推送仍使用 Git 自身的认证；twig 不保存凭据。
+
+```bash
+twig pr                         # 在任务 Worktree（或其子目录）查找或创建草稿
+twig pr auth --push              # 推送 auth 的已提交内容，再查找或创建
+twig --repo myapp pr auth --push  # 从任意目录操作已登记项目
+twig pr --remote origin --target main
+twig pr --provider gitlab        # 自建 GitLab；自建 GitHub 使用 github
+twig pr --title '修复登录超时' --body-file ./pr.md
+```
+
+- 省略任务名时按调用目录识别已登记的任务 Worktree；在主工作目录或其他目录需指定任务名。操作前验证 Worktree 归属和分支。
+- remote 优先使用显式 `--remote`，否则使用任务分支的 upstream remote；没有 upstream 时仅在存在唯一 remote 的情况下自动选择。登记表的 `default_remote` 只用于 clone，不决定 PR/MR 的 remote。
+- 若选中 upstream remote，源分支使用 upstream 对应的远端分支名；否则使用任务分支的同名远端分支。目标默认为项目配置的 `target`，可用 `--target` 覆盖。
+- 根据 remote URL 自动识别 `github.com` / `gitlab.com`；其他域名必须指定 `--provider`。支持常见 HTTPS、HTTP、`git@host:group/repo.git` 和 `ssh://git@host:port/group/repo.git`，以及 GitLab 多级 subgroup。SSH 端口不作为平台 API 端口；不解析 SSH 主机别名、IPv6 地址或本地路径 remote。
+- 查找同仓库、同源分支、同目标分支的**开放中** PR/MR。已有时输出链接，不重复创建，也不修改标题、正文或草稿状态；已关闭或合并的请求不复用。不带 `--push` 的已有请求查询不会同步本地新提交。
+- 没有匹配请求时创建草稿。默认标题为任务最新提交标题，正文为该提交的完整说明；可用 `--title` / `--body-file` 提供正式内容。正文文件路径相对于调用目录，保留换行和特殊字符，不通过 Shell 插值。
+- 创建前联网查询远端分支：目标分支须存在；不带 `--push` 时，远端源分支须与任务当前提交一致。带 `--push` 时只推送该任务分支，并设置 upstream；即使已有 PR/MR 也会先推送，再输出链接。不强推、不自动提交文件，也不顺带推送其他分支或 tag。
+- 首版只支持同一远程仓库内的分支；fetch/push URL 指向不同仓库或 remote 存在多个 URL 时拒绝操作。跨 Fork PR/MR 请直接使用 `gh` / `glab`。
+
+`pr` 是显式联网命令；`new/open/ls/stop/rm` 不因此增加联网行为。查找、认证或解析失败时直接报错；推送失败不创建请求。推送成功但创建失败时保留远端提交，可排除错误后重试。不会自动合并、关闭任务窗口、删除 Worktree 或本地分支。
+
 ## 命令
 
 | 命令 | 行为 |
@@ -156,6 +183,7 @@ Worktree 根目录必须与主工作目录分离，不能相互包含。任务�
 | `twig init [--base BRANCH] [--target BRANCH] [--root PATH]` | 保存项目配置并创建主 Session |
 | `twig new NAME [--base BRANCH]` | 创建或接续任务环境，不自动启动任何 AI 工具 |
 | `twig ls` | 列出 twig 登记的任务、实际 Git 状态与窗口状态 |
+| `twig pr [NAME] [--push] [--remote REMOTE] [--target BRANCH] [--provider github\|gitlab]` | 联网查找或创建草稿 PR/MR；推送必须显式指定 |
 | `twig open NAME` | 进入窗口；缺失时重建 Shell，不恢复进程或对话 |
 | `twig stop NAME [-y]` | 确认后关闭窗口并终止其进程，保留代码和分支 |
 | `twig rm NAME [--target BRANCH] [--keep-branch] [-y]` | 检查安全条件后移除任务 |
@@ -210,7 +238,7 @@ twig/
 - 异常退出遗留锁：确认没有其他 twig 命令运行后，手动删除错误提示中的 lock 文件。锁只协调 twig，无法阻止其他程序同时修改 Git 或启动进程；清理期间应停止其他写入。
 - 主工作目录或仓库迁移、裸仓库、非 UTF-8 路径不在 MVP 支持范围内。
 - Git Worktree 不隔离端口、数据库、Git 配置、hooks 和外部缓存，需要用户自行安排。
-- 尚未提供 `status`、`doctor`、TUI 或 PR 集成，这些是候选增强，不是已确定的实现计划。Codex `resume` 不在当前环境管理范围内。
+- 尚未提供 `status`、`doctor`、TUI、跨 Fork PR/MR 或自动合并，这些不是已确定的实现计划。Codex `resume` 不在当前环境管理范围内。
 
 ## 开发与验证
 
@@ -229,3 +257,5 @@ cargo test --locked
 跨 Session 切换通过真实 tmux control-mode 客户端验证。普通终端 attach 需要 TTY；自动化测试验证非交互失败时已重建窗口，真实终端 attach 的显示与键盘交互仍需手动验收。
 
 补全测试需要 Zsh（含 `zpty`、`zselect` 模块），使用临时登记表和 Git 仓库，覆盖命令/选项/路径、项目/任务/remote/本地分支、跨 Worktree、全局参数位置和等号形式、缺失/损坏配置的只读行为，以及生成脚本在 Zsh 中的加载与调用。真实 Tab/ZLE 测试验证任务优先展示和选中、前缀过滤及带空格目录补全。
+
+PR/MR 测试使用模拟 `gh` / `glab` 和本地临时 bare remote，真实执行本地 push/ls-remote，覆盖两平台参数、重复调用、upstream 映射、remote 选择、自建域名、正文保真、错误和非快进推送保护。测试不创建真实 PR/MR、不使用托管平台凭据；实际平台认证与创建仍待实机验证，需要安装支持上述参数的 `gh` / `glab`。
