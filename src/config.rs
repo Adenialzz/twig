@@ -33,9 +33,11 @@ pub struct Project {
 
 impl Project {
     pub fn discover() -> Result<Self> {
-        let cwd = std::env::current_dir()?;
+        Self::discover_at(&std::env::current_dir()?)
+    }
+    pub fn discover_at(cwd: &Path) -> Result<Self> {
         let common = PathBuf::from(git(
-            &cwd,
+            cwd,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )?)
         .canonicalize()?;

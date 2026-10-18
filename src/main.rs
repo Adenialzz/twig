@@ -1,3 +1,4 @@
+mod completion;
 mod config;
 mod git;
 mod registry;
@@ -5,6 +6,7 @@ mod tmux;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
+use clap_complete::ArgValueCompleter;
 use config::{Config, Feature, Project, State};
 use git::git;
 use std::{
@@ -16,7 +18,7 @@ use std::{
 #[command(name = "twig", version, about = "Git Worktree + tmux 任务环境管理")]
 struct Cli {
     /// 在任意目录操作已登记项目
-    #[arg(long, global = true)]
+    #[arg(long, global = true, add = ArgValueCompleter::new(completion::projects))]
     repo: Option<String>,
     /// 使用其他登记表（默认 ~/.twig/config.toml）
     #[arg(long, global = true)]
@@ -33,39 +35,48 @@ enum Action {
         command: registry::Action,
     },
     /// 克隆登记的项目、添加 remotes 并初始化 twig
-    Clone { name: String },
+    Clone {
+        #[arg(add = ArgValueCompleter::new(completion::projects))]
+        name: String,
+    },
     /// 初始化项目（不修改 Git 分支，不拉取远端）
     Init {
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
         /// 默认合并目标，默认与基础分支相同
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         target: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::DirPath)]
         root: Option<PathBuf>,
     },
     /// 创建任务分支、Worktree 和 Shell 窗口；重复执行接续已有环境
     New {
+        #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
     },
     /// 列出由 twig 管理的任务及实际状态
     Ls,
     /// 进入任务窗口；窗口丢失时重建 Shell
-    Open { name: String },
+    Open {
+        #[arg(add = ArgValueCompleter::new(completion::tasks))]
+        name: String,
+    },
     /// 关闭窗口及其中的进程，保留 Worktree 和分支
     Stop {
+        #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
         #[arg(short = 'y', long)]
         yes: bool,
     },
     /// 安全移除 Worktree 和已合并分支
     Rm {
+        #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
         #[arg(long)]
         keep_branch: bool,
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         target: Option<String>,
         #[arg(short = 'y', long)]
         yes: bool,
@@ -73,6 +84,7 @@ enum Action {
 }
 
 fn main() {
+    completion::complete();
     if let Err(error) = execute(Cli::parse()) {
         eprintln!("错误：{error:#}");
         std::process::exit(1);

@@ -35,16 +35,21 @@ remote 名称和 URL 由 Git 实际配置管理。用户级登记表提供初始
 
 ## 架构与事实来源
 
-一个 Cargo 包，依赖 `clap`、`serde`、`serde_json`、`toml` 和 `anyhow`；测试使用 `tempfile`。通过 `std::process::Command` 调用 Git、tmux、ps，参数分别传入。错误补充操作上下文，失败不静默降级。
+一个 Cargo 包，依赖 `clap`、`clap_complete`、`serde`、`serde_json`、`toml` 和 `anyhow`；测试使用 `tempfile`。通过 `std::process::Command` 调用 Git、tmux、ps，参数分别传入。错误补充操作上下文，失败不静默降级。
+
+Makefile 仅封装 Cargo 命令：`make build`（默认目标）构建 release，`make install` 安装或更新并打印 Zsh 补全配置提示，`make check` 依次执行格式检查、Clippy 和测试。不自动修改用户 Shell 配置。
 
 | 文件 | 职责 |
 | --- | --- |
 | `src/main.rs` | CLI 路由、项目初始化、任务创建/进入/停止/清理流程 |
+| `src/completion.rs` | 复用 CLI 定义解析补全上下文，只读查询项目、任务、分支和 remote 候选 |
+| `src/completion.zsh` | Zsh 候选展示：普通值与选项分别分组，普通值优先 |
 | `src/registry.rs` | 用户级 TOML 登记表、路径解析、remote 登记和 clone |
 | `src/config.rs` | 共享 Git 目录中的项目配置、任务记录、锁、名称和 Session 标识 |
 | `src/git.rs` | 外部命令执行及 Git 分支、合并关系、Worktree 查询 |
 | `src/tmux.rs` | Session/Window 归属、窗口恢复、进程检查、进入和切换 |
 | `tests/workflow.rs` | 临时仓库及独立 tmux server 上的集成测试 |
+| `tests/completion.rs` | 临时登记表与仓库中的补全协议测试，以及 Zsh 脚本加载验证 |
 
 配置与状态分为两层：
 
@@ -73,13 +78,19 @@ Session 名由仓库共享 Git 目录的绝对路径哈希生成，并使用 `@t
 
 ## 已完成与未承诺的功能
 
-已完成：`init`、`new`、`ls`、`open`、`stop`、`rm`、`config add/list/show/remove`、`config remote add/remove/default`、`clone`、全局 `--repo` 和 `--config`。具体参数与限制见 README。
+已完成：`init`、`new`、`ls`、`open`、`stop`、`rm`、`config add/list/show/remove`、`config remote add/remove/default`、`clone`、全局 `--repo` 和 `--config`，以及 Zsh 动态补全。具体参数与限制见 README。
+
+补全采用 `clap_complete` 的 `unstable-dynamic` 接口，复用现有命令定义，在普通命令解析与执行之前分流。Zsh 通过 `source <(COMPLETE=zsh twig)` 加载；因上游协议尚未稳定，Shell 每次启动时重新生成接入脚本，不保存长期静态副本。上下文只解析光标前的完整参数，支持全局参数位于子命令前后以及等号写法。项目名和 remote 来自登记表，任务来自共享状态，本地分支通过 Git 查询。补全不获取锁、不写状态、不联网、不调用 tmux；查询失败输出 stderr 诊断并返回空候选，生成的 Zsh 脚本隐藏诊断以免打断输入。当前文档与验收范围为 Zsh，其他 Shell 尚未验证。
+
+Zsh 展示通过自定义 `EnvCompleter` 注册脚本，候选生成与转义继续委托 Clap。普通值、目录和选项分组注册，确保任务先展示、先选中，避免 Zsh 将带说明的选项移到无说明的任务之前。无需设置全局 Zsh 样式。回归测试通过 Zsh `zpty` 驱动真实 Tab 和 ZLE，检查显示顺序及最终选中的输入，不能仅凭候选协议输出顺序判断菜单顺序。
+
+传入 Rust 前使用 Zsh 的 `Q` 参数标志去除词中的引号和转义，不执行变量或命令替换。展示脚本仅将未转义的冒号视为说明分隔符，并先识别目录，再识别选项，避免 `--root=PATH/` 被追加空格。真实交互测试覆盖配置路径的三种引用形式及空格/冒号目录的连续两级补全。
 
 下列事项仅是讨论过的候选，不是已授权的实现队列，也没有确定优先级：
 
 - `status`：详细提交、文件变化、ahead/behind 等信息。
 - `doctor`：诊断配置、Worktree 与 tmux 状态不一致。
-- 交互选择、fzf、Shell 补全、TUI、PR 状态集成。
+- 交互选择、fzf、TUI、PR 状态集成。
 - 允许 `--base origin/main`，以及显式 `--fetch`。当前均未实现，后续需先讨论语义。
 
 原始需求中的 Codex `resume` 和 Turn 完成通知属于早期想法。由于最终不管理 Codex 生命周期，它们不在当前范围内，不能直接当作“第二阶段必做功能”。
@@ -89,10 +100,10 @@ Linux 实机、真实 SSH 断线重连、真实终端 attach 的键盘和显示�
 ## 交接快照：2026-10-18
 
 - 已在 macOS 上使用 Rust/Cargo 1.93.1、Git 2.50.1、tmux 3.6a 构建和验证。
-- 最新功能实现完成时，13 组集成测试、`cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings` 均通过，release 构建成功。本次仅补文档，没有重复执行代码测试。
+- 本次增加 Zsh 动态补全，并修正任务与选项的展示和选择顺序。通过 `make check` 执行格式检查、Clippy 和测试，5 组补全测试和原有 13 组工作流测试全部通过。
 - 测试使用临时 Git 仓库、独立 tmux socket 和临时登记表。clone 测试用本地 Git remote，没有测试真实服务商认证。跨 Session 切换使用真实 tmux control-mode 客户端验证。
-- `target/release/twig` 已生成，属于被忽略的本机构建产物。交接检查中当前 Shell 的 `command -v twig` 未找到命令；不能据此断言其他 Shell 或路径一定未安装。安装方法见 README。
-- Git 仓库已初始化，尚无首次提交，项目文件仍未跟踪；尚未配置本工具仓库的 Git remote。后续不能把这份历史说明当作跳过工作区检查的依据。
+- 本次已构建 debug 二进制，验证带空格和引号的可执行文件路径、Zsh 脚本加载，以及真实 Tab/ZLE 的展示和选择顺序；未自动安装新版 twig 或修改用户 Shell 配置。启用补全前按 README 安装并重新加载配置。
+- 本次在 `autocomplete` Worktree 开发，开始时工作区干净，基线提交为 `d15e3f9`；补全改动尚未提交。后续仍须重新检查 Git 状态。
 - 未为用户创建或填入真实 `~/.twig/config.toml`。它由首次登记命令创建，项目 URL 和路径须由用户提供。
 - 最初开发曾使用临时构建副本，但后续开发以本仓库为准，不依赖 `/tmp` 文件或上一段聊天上下文。
 
