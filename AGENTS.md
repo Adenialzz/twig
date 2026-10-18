@@ -30,6 +30,7 @@
 - `new` 和 `open` 只准备 Shell，不自动启动 Codex 或恢复对话。不依赖 Codex Desktop，也不管理 Agent 生命周期。
 - 用户级登记表默认在 `~/.twig/config.toml`；项目配置与任务状态仍在共享 Git 目录。
 - 登记命令不联网。显式 `clone` 可克隆仓库并配置 remote；普通任务命令不隐式 fetch、pull 或 push。
+- Shell 补全必须只读，不创建配置/锁、不调用 tmux；复用 CLI 定义解析参数，不执行正在补全的命令。
 - 现有 remote URL 以 Git 为准，登记表不自动同步或覆盖已有仓库；配置冲突报错。
 - 清理流程不得默认强制删除；部分失败应保留资源与可诊断记录，不能为“回滚干净”而删除用户工作。
 - 不把窗口存在等同于 Codex 正在运行；不把本地 upstream 引用等同于远端实时状态。
@@ -38,5 +39,6 @@
 
 - 涉及生命周期或清理时，在临时仓库和独立 tmux socket 上测试，禁止使用真实项目测试删除。
 - 登记表测试使用 `--config` 指向临时文件，不读写真实用户配置。远程相关测试优先使用本地临时 Git remote。
+- 补全测试需要 Zsh（含 `zpty`、`zselect` 模块）；升级 `clap_complete` 后验证动态协议和生成的 Zsh 接入脚本。展示或排序变更须用真实 Tab/ZLE 验证，不能只检查候选输出顺序。
 - 验证范围应与改动匹配；纯文档更新检查一致性和链接，不必重复运行完整代码测试。
 - 代码变更提交前执行 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`。

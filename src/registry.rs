@@ -1,6 +1,7 @@
 use crate::{config, git::git};
 use anyhow::{Context, Result, ensure};
 use clap::Subcommand;
+use clap_complete::ArgValueCompleter;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -16,7 +17,7 @@ pub enum Action {
         name: String,
         #[arg(long)]
         url: String,
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::DirPath)]
         path: PathBuf,
         #[arg(long, default_value = "main")]
         main: String,
@@ -26,9 +27,15 @@ pub enum Action {
     /// 列出已登记项目
     List,
     /// 显示项目 TOML 配置
-    Show { name: String },
+    Show {
+        #[arg(add = ArgValueCompleter::new(crate::completion::projects))]
+        name: String,
+    },
     /// 只取消登记，保留本地仓库和任务
-    Remove { name: String },
+    Remove {
+        #[arg(add = ArgValueCompleter::new(crate::completion::projects))]
+        name: String,
+    },
     /// 管理登记表中的多个 remote；不覆盖已有仓库配置
     Remote {
         #[command(subcommand)]
@@ -39,17 +46,22 @@ pub enum Action {
 #[derive(Subcommand)]
 pub enum RemoteAction {
     Add {
+        #[arg(add = ArgValueCompleter::new(crate::completion::projects))]
         project: String,
         name: String,
         url: String,
     },
     Remove {
+        #[arg(add = ArgValueCompleter::new(crate::completion::projects))]
         project: String,
+        #[arg(add = ArgValueCompleter::new(crate::completion::remotes))]
         name: String,
     },
     /// 设置首次 clone 使用的 remote
     Default {
+        #[arg(add = ArgValueCompleter::new(crate::completion::projects))]
         project: String,
+        #[arg(add = ArgValueCompleter::new(crate::completion::remotes))]
         name: String,
     },
 }

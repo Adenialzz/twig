@@ -12,18 +12,51 @@
 
 ```bash
 cd /path/to/twig
-cargo install --path . --locked
+make install
 twig --help
 ```
 
-本地源码目录也可以直接执行 `cargo install --path . --locked`。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用，不需要修改 Shell 配置文件。
+`make install` 用于安装或更新 twig，成功后打印 Zsh 补全启用提示，不修改 Shell 配置。没有 Make 时也可以直接执行 `cargo install --path . --locked`。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
 
 仅构建而不安装：
 
 ```bash
-cargo build --release --locked
+make build
 ./target/release/twig --help
 ```
+
+直接运行 `make` 也会构建 release 版本，等价于 `cargo build --release --locked`。
+
+### Zsh 自动补全
+
+安装或更新 twig 后，在 `~/.zshrc` 中加入：
+
+```zsh
+autoload -Uz compinit
+compinit
+source <(COMPLETE=zsh twig)
+```
+
+如果 Oh My Zsh 等配置已经运行 `compinit`，只需在它之后加入最后一行。重新打开终端，或在当前 Zsh 中执行上述配置即可启用。每次启动 Shell 都重新生成补全接入脚本，升级 twig 后重新打开终端即可。
+
+支持命令、选项及以下动态值：
+
+| 输入后按 Tab | 候选来源 |
+| --- | --- |
+| `twig open ` / `stop ` / `rm ` / `new ` | 项目已有任务；`new` 仍可输入新名称 |
+| `twig --repo `、`twig clone ` | 用户登记表中的项目名 |
+| `twig config show ` / `remove `、`twig config remote add/remove/default ` | 已登记项目名 |
+| `twig config remote remove demo ` / `default demo ` | demo 登记的 remote 名 |
+| `twig new auth --base `、`twig init --base ` / `--target `、`twig rm auth --target ` | 已有本地分支，不含远端跟踪分支 |
+| `--config `、`--root `、`config add` 的 `--path ` | 文件或目录路径 |
+
+动态候选按已输入前缀过滤，并识别光标前的 `--repo NAME`、`--config PATH`（也支持 `--repo=NAME`、`--config=PATH`）。例如 `twig --repo myapp open <Tab>` 可以在任意目录补全该项目的任务。关联 Worktree 共用任务候选。
+
+带空格的配置路径可使用单引号、双引号或反斜杠转义。目录补全支持空格、冒号及 `--root=PATH` 写法，保留末尾 `/`，可以继续输入并补全子目录。
+
+`twig open <Tab>`（以及 `new`、`stop`、`rm`）先展示任务名，再展示带说明的选项；Tab 选择也优先任务名。任务按名称字典序排列。输入 `twig open a<Tab>` 只匹配该前缀的任务，输入 `twig open --<Tab>` 只显示选项。升级后在当前 Zsh 重新执行 `source <(COMPLETE=zsh twig)` 即可加载新的展示规则。
+
+补全只读本地数据，不联网、不创建配置或锁、不调用 tmux，也不执行正在输入的任务命令。非仓库目录、未初始化项目或未登记项目可能没有相应候选；配置损坏时不会修改或覆盖文件。
 
 ## 使用
 
@@ -177,9 +210,11 @@ twig/
 - 异常退出遗留锁：确认没有其他 twig 命令运行后，手动删除错误提示中的 lock 文件。锁只协调 twig，无法阻止其他程序同时修改 Git 或启动进程；清理期间应停止其他写入。
 - 主工作目录或仓库迁移、裸仓库、非 UTF-8 路径不在 MVP 支持范围内。
 - Git Worktree 不隔离端口、数据库、Git 配置、hooks 和外部缓存，需要用户自行安排。
-- 尚未提供 `status`、`doctor`、补全、TUI 或 PR 集成，这些是候选增强，不是已确定的实现计划。Codex `resume` 不在当前环境管理范围内。
+- 尚未提供 `status`、`doctor`、TUI 或 PR 集成，这些是候选增强，不是已确定的实现计划。Codex `resume` 不在当前环境管理范围内。
 
 ## 开发与验证
+
+运行 `make check`，依次执行以下检查，任一步失败即停止：
 
 ```bash
 cargo fmt --check
@@ -192,3 +227,5 @@ cargo test --locked
 登记和克隆测试使用独立配置文件与本地临时 Git remote，覆盖多个 remote、自定义默认 remote/主分支、任意目录操作、重复克隆、克隆后初始化失败重试、目录及 URL 冲突、默认 remote 删除保护、配置错误不覆盖，以及取消登记后保留仓库。不读写真实 `~/.twig/config.toml`，未进行真实托管平台的网络认证测试。
 
 跨 Session 切换通过真实 tmux control-mode 客户端验证。普通终端 attach 需要 TTY；自动化测试验证非交互失败时已重建窗口，真实终端 attach 的显示与键盘交互仍需手动验收。
+
+补全测试需要 Zsh（含 `zpty`、`zselect` 模块），使用临时登记表和 Git 仓库，覆盖命令/选项/路径、项目/任务/remote/本地分支、跨 Worktree、全局参数位置和等号形式、缺失/损坏配置的只读行为，以及生成脚本在 Zsh 中的加载与调用。真实 Tab/ZLE 测试验证任务优先展示和选中、前缀过滤及带空格目录补全。
