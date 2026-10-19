@@ -11,8 +11,7 @@ pub fn run(program: &str, args: &[&OsStr], cwd: Option<&Path>) -> Result<Output>
     if let Some(dir) = cwd {
         command.current_dir(dir);
     }
-    command
-        .output()
+    crate::console::query::output(&mut command)
         .with_context(|| format!("无法运行 {program}，请检查是否已安装"))
 }
 

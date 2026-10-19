@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub version: u32,
     pub main: PathBuf,
@@ -26,6 +26,7 @@ pub struct Feature {
 
 pub type State = BTreeMap<String, Feature>;
 
+#[derive(Clone)]
 pub struct Project {
     pub common: PathBuf,
     pub dir: PathBuf,
@@ -109,6 +110,15 @@ pub fn name(value: &str) -> Result<()> {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
         bail!("名称须为 1–64 位 ASCII 字母、数字、横线或下划线，且以字母或数字开头");
+    }
+    Ok(())
+}
+
+pub fn task_name(value: &str) -> Result<()> {
+    if value.len() > 64 || value.split('/').any(|part| name(part).is_err()) {
+        bail!(
+            "任务名称须为 1–64 位 ASCII 字母、数字、横线、下划线或 /；每段以字母或数字开头，不允许空段"
+        );
     }
     Ok(())
 }

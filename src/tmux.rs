@@ -62,6 +62,13 @@ pub fn ensure_session(config: &Config, project: &Project) -> Result<()> {
             &format!("{}:", config.session),
             "@twig-repo",
             project.common.to_str().unwrap(),
+            ";",
+            "set-option",
+            "-w",
+            "-t",
+            &format!("{}:main", config.session),
+            "@twig-feature",
+            "main",
         ])?;
     }
     Ok(())
@@ -136,6 +143,41 @@ pub fn ensure_window(
     ])?;
     window(config, project, name)?
         .ok_or_else(|| anyhow::anyhow!("窗口创建后未找到，请重试 twig open {name}"))
+}
+
+// 初版 init 的主窗口没有 @twig-feature；仅在已验证的 Session 内，
+// 同时核对 main 名称和启动目录，才能复用该历史主窗口。
+pub fn ensure_main_window(config: &Config, project: &Project) -> Result<String> {
+    ensure_session(config, project)?;
+    let output = tmux(&[
+        "list-windows",
+        "-t",
+        &format!("={}", config.session),
+        "-F",
+        "#{window_id}\t#{window_name}\t#{@twig-feature}\t#{pane_start_path}",
+    ])?;
+    let mut found = None;
+    let mut collision = false;
+    for line in output.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        ensure!(fields.len() == 4, "无法解析主窗口信息");
+        if fields[2] == "main"
+            || (fields[1] == "main"
+                && fields[2].is_empty()
+                && Path::new(fields[3]).canonicalize().ok().as_deref()
+                    == Some(config.main.as_path()))
+        {
+            ensure!(found.is_none(), "多个窗口标记为 main，请手动检查");
+            found = Some(fields[0].to_owned());
+        } else if fields[1] == "main" {
+            collision = true;
+        }
+    }
+    if let Some(id) = found {
+        return Ok(id);
+    }
+    ensure!(!collision, "存在无法确认归属的 main 窗口，请先重命名");
+    ensure_window(config, project, "main", &config.main)
 }
 
 // 窗口中只有空闲 Shell 才允许 rm；包含后台任务、exec 后的程序或未知状态均阻止。

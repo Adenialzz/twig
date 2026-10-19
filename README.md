@@ -61,6 +61,58 @@ source <(COMPLETE=zsh twig)
 
 补全只读本地数据，不联网、不创建配置或锁、不调用 tmux，也不执行正在输入的任务命令。非仓库目录、未初始化项目或未登记项目可能没有相应候选；配置损坏时不会修改或覆盖文件。
 
+## 全局 Console（控制台）
+
+完整操作说明见 [Console 使用指南](docs/console-usage.md)，包含项目登记、界面操作、状态含义、历史查询、快捷键及常见问题。
+
+在任意目录执行 `twig` 或 `twig console`，浏览全局登记的项目和任务，查看 Git、tmux 与 Codex 会话状态，并进入相应 Shell。
+
+```bash
+twig                          # 全局面板；按当前目录定位项目/任务
+twig --repo myapp              # 选中 myapp，仍显示其他项目
+twig --config ./config.toml    # 指定登记表
+```
+
+宽终端左侧为项目列表，右侧从上到下依次为任务列表、Codex 会话列表、详情，共四个可见区域。`Tab` 只在项目、任务、会话三个列表之间切换；详情不单独获取焦点，用 `PgUp/PgDn` 滚动。窄终端按焦点切换页面，会话页同时显示列表与详情。项目内包含「主工作目录」和已登记任务，项目/任务按名称稳定排列。主窗口和任务窗口缺失时，Enter 按现有 `open` 语义准备 Shell，再进入；缺失 Worktree、错误归属和同名窗口冲突会明确报错。
+
+| 按键 | 操作 |
+| --- | --- |
+| `↑/↓` 或 `j/k` | 选择项目、任务或会话 |
+| `gg` / `G` | 跳到当前列表顶部 / 底部（尊重搜索筛选） |
+| `Tab` / `Shift+Tab` | 切换区域；窄终端切页 |
+| `Ctrl-W` 后按 `h/j/k/l` | 按方向切换项目、任务、会话列表 |
+| `Enter` | 项目区切到任务列表并选中主工作目录，任务区进入 Shell，会话区展开最近轮次 |
+| `/`、`Esc` | 搜索并显示命令候选；输入中取消并恢复原选择，输入结束后清空筛选/返回 |
+| `h` | 切换已加载会话与历史会话 |
+| `n` | 项目区登记已有仓库；任务区新建任务；会话区历史下一页 |
+| `a` | 历史查询切换包含子目录；逐页扫描并显示进度 |
+| `PgUp/PgDn` | 滚动详情 |
+| `r`、`?`、`q` / `Ctrl+C` | 刷新、帮助、退出 |
+
+在项目区按 `n`，填写已有 Git 仓库路径和别名，未初始化时自动初始化，已初始化时补登记；同路径复用、别名冲突不覆盖，不要求 remote。在任务区按 `n`，填写任务名及起点分支（默认项目配置，允许填写其他已有本地分支）。登记表单在路径字段按 `Enter` 校验路径并自动填入目录名作为别名，再按 `Enter` 提交；别名可修改。任务表单按 `Enter` 提交。`Tab` 切字段、`Esc` 取消，长错误用 `PgUp/PgDn` 滚动。项目路径输入支持本地目录候选：上下选择，有候选时 `Tab` 补全并保留 `/`，无候选时切字段；`Shift+Tab` 始终切字段。支持 `~/`、相对路径和空格路径，不创建目录。
+
+创建成功后选中新项目/任务并留在控制台，按 `Enter` 再进入 Shell。执行期间显示进度提示，等待操作结束，不强制取消；失败保留输入和已创建资源，修正后可重试。新建空仓库与远程克隆暂未纳入表单。
+
+从普通终端进入 tmux 后，detach 会返回 Console，保留项目、任务选择和焦点；从 tmux 内进入时切换到目标窗口，Console 留在原窗口，切回即可继续使用。退出面板保留原有 Shell 和 Agent。非交互环境明确报错，脚本继续使用 `config list`、`--repo NAME ls` 等子命令。
+
+`/` 默认实时搜索当前列表，同时显示 `/new`、`/refresh`、`/help`、`/quit` 的前缀匹配候选，不默认选中。用上下键选择、`Tab` 补全、`Enter` 执行选中项；没有选中时，只有完整关键字触发命令，否则确认搜索。`//new` 强制搜索文本 `new`。`Esc` 取消输入，命令执行和取消都会恢复输入前的筛选与选择。`/new` 按原焦点打开项目登记或任务表单，会话区只提示切区。
+
+**Codex 为可选观察功能**：需要 PATH 中的 Codex CLI 和已经运行的本机 app-server，首个验证版本为 0.163.0。面板通过 `codex app-server daemon version` 发现 socket，使用 Unix socket 上的 WebSocket 只读查询；不启动服务、不恢复会话、不提交审批或提示词，也不读取 Codex 私有数据库。基础项目导航不依赖 Codex 是否可用。
+
+一个目录可对应多个会话，按路径组件和最深工作目录关联，支持从子目录启动。状态区分运行中、等待审批、等待输入、空闲、当前服务未加载、会话错误和未知。空闲不是任务完成；最近轮次的完成/失败/中断单独展示。CLI/VS Code 来源标签不代表当前所在 Pane，选择会话只查看详情。
+
+默认隐藏 Codex 标记为 `ephemeral=true` 的临时会话，已加载列表、历史列表和状态统计均不包含它们；不会删除或关闭这些会话。
+
+历史查询默认精确匹配工作目录；`a` 扩大到子目录后，使用 `n` 继续扫描。列表使用数据库只读查询，不触发历史文件修复；源数据尚未登记到 Codex 数据库的记录可能不可见。只观察当前服务可见会话，其他服务或 `codex --no-daemon` 实例不保证能显示实时状态。多 Pane 会话不按目录猜测对应 Pane。
+
+项目/任务记录约每 10 秒、tmux/Codex 约每 2 秒、选中项目 Git 约每 5 秒刷新（间隔从上一轮完成后计算）。浏览时单个查询有 2 秒超时，不堆积请求；错误和过期结果明确标记。历史与最新轮次按需读取，`r` 可更新已展开的轮次。会话创建、更新时间以北京时间（UTC+8）显示。Git「干净」不包含 ignored 文件，也不表示可以安全删除。
+
+浏览不创建登记表、配置、锁或窗口，不执行 fetch/pull/push。空登记表显示初始化提示；坏项目和 Codex 断连不阻止浏览其他项目。完整设计与验证记录见 [Console 方案](docs/console.md)。
+
+正常刷新时不显示秒数；Git 或 Codex 状态超过 30 秒未成功更新时显示固定的「状态过期」提示，查询失败时直接提示异常。可按 `r` 刷新。
+
+任务列表使用带表头的对齐表格；区域较窄时将任务/分支、Git/窗口分别合并为两行，保留 Codex 列。过长内容在列内截断。
+
 ## 使用
 
 ### 登记常用项目与多个 remote
@@ -121,7 +173,7 @@ twig config remove myapp                   # 仅取消登记，保留仓库、re
 
 ```bash
 twig init                         # 优先 main，其次 master；自动登记项目
-twig new auth                     # 创建 feature/auth 和 Shell 窗口，并进入
+twig new auth                     # 创建 auth 和 Shell 窗口，并进入
 twig new search --no-open          # 只创建环境，留在当前终端
 twig ls
 twig open auth                    # 在普通终端 attach，在 tmux 内 switch-client
@@ -148,12 +200,13 @@ projects/
 
 ```bash
 twig init --name myapp --base develop --target main --root ../my-worktrees
-twig new payment --base feature/auth
+twig new feat/login --base auth
+twig new fix/bug
 ```
 
 `--base` 必须是已有本地分支。`--target` 是安全删除时检查的合并目标，与任务创建来源独立。默认合并目标等于初始化时的基础分支。不自动 fetch、pull、push 或修改主分支。
 
-Worktree 根目录必须与主工作目录分离，不能相互包含。任务名为 1–64 位 ASCII 字母、数字、`-` 或 `_`，首位为字母或数字；`main` 保留给主窗口。
+Worktree 根目录必须与主工作目录分离，不能相互包含。新任务名与分支名一致，不自动添加前缀，例如 `auth`、`feat/login`、`fix/bug`。任务名总长为 1–64 位，可用 `/` 分段；每段为 ASCII 字母、数字、`-` 或 `_`，以字母或数字开头，不允许空段。`feat/login` 的目录为 `<root>/feat/login/`，tmux 窗口名也是 `feat/login`。已有任务继续使用登记的分支与路径，不自动改名；`main` 保留给主窗口。
 
 ### 提交 GitHub PR / GitLab MR
 
@@ -183,6 +236,7 @@ twig pr --title '修复登录超时' --body-file ./pr.md
 
 | 命令 | 行为 |
 | --- | --- |
+| `twig` / `twig console` | 全局项目、任务与 Codex 状态面板 |
 | `twig config add/list/show/remove` | 登记、查看和取消登记项目，不联网 |
 | `twig config remote add/remove/default` | 管理项目的多个 remote 和默认克隆来源 |
 | `twig clone NAME` | 克隆或接续已登记项目，配置 remote 并初始化 twig |
@@ -246,7 +300,7 @@ twig/
 - 异常退出遗留锁：确认没有其他 twig 命令运行后，手动删除错误提示中的 lock 文件。锁只协调 twig，无法阻止其他程序同时修改 Git 或启动进程；清理期间应停止其他写入。
 - 主工作目录或仓库迁移、裸仓库、非 UTF-8 路径不在 MVP 支持范围内。
 - Git Worktree 不隔离端口、数据库、Git 配置、hooks 和外部缓存，需要用户自行安排。
-- 尚未提供 `status`、`doctor`、TUI、跨 Fork PR/MR 或自动合并，这些不是已确定的实现计划。Codex `resume` 不在当前环境管理范围内。
+- 尚未提供独立 `status`、`doctor`、跨 Fork PR/MR 或自动合并，这些不是已确定的实现计划。Codex `resume` 不在当前环境管理范围内。
 
 ## 开发与验证
 

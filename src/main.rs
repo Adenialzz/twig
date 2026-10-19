@@ -1,5 +1,7 @@
+mod codex;
 mod completion;
 mod config;
+mod console;
 mod git;
 mod pr;
 mod registry;
@@ -12,7 +14,7 @@ use config::{Config, Feature, Project, State};
 use git::git;
 use std::{
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Parser)]
@@ -25,11 +27,21 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
-    command: Action,
+    command: Option<Action>,
 }
 
 #[derive(Subcommand)]
 enum Action {
+    /// 全局项目、任务与 Codex 会话控制台
+    Console,
+    /// 控制台登记表单的独立进程入口
+    #[command(name = "__console-register", hide = true)]
+    ConsoleRegister {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+    },
     /// 管理用户级项目登记表
     Config {
         #[command(subcommand)]
@@ -102,7 +114,14 @@ fn main() {
 
 fn execute(cli: Cli) -> Result<()> {
     let invocation_dir = std::env::current_dir()?;
-    let action = match cli.command {
+    let action = match cli.command.unwrap_or(Action::Console) {
+        Action::Console => {
+            return console::run(registry::location(cli.config)?, cli.repo, invocation_dir);
+        }
+        Action::ConsoleRegister { path, name } => {
+            ensure!(cli.repo.is_none(), "登记表单不接受 --repo");
+            return console::form::register(&registry::location(cli.config)?, &path, name);
+        }
         Action::Config { command } => {
             ensure!(
                 cli.repo.is_none(),
@@ -217,7 +236,13 @@ fn execute(cli: Cli) -> Result<()> {
             target,
             yes,
         ),
-        Action::Init { .. } | Action::Config { .. } | Action::Clone { .. } => unreachable!(),
+        Action::Console
+        | Action::ConsoleRegister { .. }
+        | Action::Init { .. }
+        | Action::Config { .. }
+        | Action::Clone { .. } => {
+            unreachable!()
+        }
     }
 }
 
@@ -302,7 +327,7 @@ fn init(
 }
 
 fn feature<'a>(state: &'a State, name: &str) -> Result<&'a Feature> {
-    config::name(name)?;
+    config::task_name(name)?;
     state
         .get(name)
         .with_context(|| format!("没有任务 {name}，请运行 twig ls"))
@@ -345,6 +370,34 @@ fn check_worktree(config: &Config, feature: &Feature) -> Result<bool> {
     Ok(false)
 }
 
+// 斜杠任务使用子目录；中间目录不得是符号链接或另一个仓库。
+fn check_task_parent(root: &Path, path: &Path) -> Result<()> {
+    let relative = path
+        .strip_prefix(root)
+        .context("任务路径不在 Worktree 根目录内")?;
+    let mut parent = root.to_path_buf();
+    for part in relative.parent().into_iter().flat_map(Path::components) {
+        parent.push(part);
+        match std::fs::symlink_metadata(&parent) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    "任务父路径不是普通目录：{}",
+                    parent.display()
+                );
+                match std::fs::symlink_metadata(parent.join(".git")) {
+                    Ok(_) => bail!("任务父目录属于已有仓库：{}", parent.display()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn new(
     project: &Project,
     config: &Config,
@@ -352,7 +405,7 @@ fn new(
     name: &str,
     base: Option<String>,
 ) -> Result<String> {
-    config::name(name)?;
+    config::task_name(name)?;
     ensure!(name != "main", "main 保留给项目主窗口");
     if let Some(existing) = state.get(name) {
         ensure!(
@@ -362,12 +415,20 @@ fn new(
     } else {
         let base = base.unwrap_or_else(|| config.base.clone());
         ensure!(git::exists(&config.main, &base)?, "基础分支不存在：{base}");
-        let branch = format!("feature/{name}");
+        let branch = name.to_owned();
+        git(&config.main, &["check-ref-format", "--branch", &branch])?;
         ensure!(
             !git::exists(&config.main, &branch)?,
             "分支已存在：{branch}；不会接管外部已有分支"
         );
         let path = config.root.join(name);
+        check_task_parent(&config.root, &path)?;
+        ensure!(
+            state
+                .values()
+                .all(|task| !path.starts_with(&task.path) && !task.path.starts_with(&path)),
+            "任务路径与已有任务相互包含"
+        );
         ensure!(
             !path.try_exists()? && std::fs::symlink_metadata(&path).is_err(),
             "路径已存在：{}",
@@ -379,6 +440,7 @@ fn new(
     }
     let feature = feature(state, name)?;
     if !check_worktree(config, feature)? {
+        check_task_parent(&config.root, &feature.path)?;
         let path = feature.path.to_str().context("暂不支持非 UTF-8 路径")?;
         if git::exists(&config.main, &feature.branch)? {
             git(
@@ -473,7 +535,7 @@ fn remove(
     target: Option<String>,
     yes: bool,
 ) -> Result<()> {
-    config::name(name)?;
+    config::task_name(name)?;
     let Some(feature) = state.get(name).cloned() else {
         println!("任务 {name} 已不存在；未操作任何外部资源");
         return Ok(());

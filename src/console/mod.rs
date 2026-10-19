@@ -1,0 +1,755 @@
+mod data;
+pub(crate) mod form;
+pub(crate) mod query;
+mod ui;
+
+use anyhow::{Result, ensure};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    execute,
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use data::{Request, Snapshot, Worker};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::{
+    io::{self, IsTerminal},
+    path::PathBuf,
+    time::Duration,
+};
+
+pub(super) struct App {
+    snapshot: Snapshot,
+    project: Option<String>,
+    task: Option<PathBuf>,
+    thread: Option<String>,
+    focus: usize,
+    filters: [String; 3],
+    searching: bool,
+    search_input: String,
+    command_selection: Option<usize>,
+    search_backup: Option<SearchBackup>,
+    help: bool,
+    history: bool,
+    descendants: bool,
+    page: u64,
+    refresh: u64,
+    detail: bool,
+    scroll: u16,
+    message: Option<String>,
+    initial_repo: Option<String>,
+    initial_cwd: PathBuf,
+    located: bool,
+    form: Option<form::Form>,
+    pending_selection: Option<(String, String)>,
+    pane_prefix: bool,
+    top_prefix: bool,
+}
+struct SearchBackup {
+    filters: [String; 3],
+    project: Option<String>,
+    task: Option<PathBuf>,
+    thread: Option<String>,
+    history: bool,
+    page: u64,
+    detail: bool,
+    scroll: u16,
+}
+impl App {
+    fn new(repo: Option<String>, cwd: PathBuf) -> Self {
+        Self {
+            snapshot: Snapshot {
+                codex_error: Some("正在连接 Codex…".into()),
+                ..Default::default()
+            },
+            project: None,
+            task: None,
+            thread: None,
+            focus: 0,
+            filters: Default::default(),
+            searching: false,
+            search_input: String::new(),
+            command_selection: None,
+            search_backup: None,
+            help: false,
+            history: false,
+            descendants: false,
+            page: 0,
+            refresh: 0,
+            detail: false,
+            scroll: 0,
+            message: None,
+            initial_repo: repo,
+            initial_cwd: cwd,
+            located: false,
+            form: None,
+            pending_selection: None,
+            pane_prefix: false,
+            top_prefix: false,
+        }
+    }
+    fn begin_search(&mut self) {
+        self.search_backup = Some(SearchBackup {
+            filters: self.filters.clone(),
+            project: self.project.clone(),
+            task: self.task.clone(),
+            thread: self.thread.clone(),
+            history: self.history,
+            page: self.page,
+            detail: self.detail,
+            scroll: self.scroll,
+        });
+        self.search_input.clear();
+        self.command_selection = None;
+        self.searching = true;
+        self.preview_search();
+    }
+    fn command_candidates(&self) -> Vec<&'static str> {
+        if self.search_input.starts_with('/') {
+            return vec![];
+        }
+        ["new", "refresh", "help", "quit"]
+            .into_iter()
+            .filter(|name| name.starts_with(&self.search_input))
+            .collect()
+    }
+    fn preview_search(&mut self) {
+        self.filters[self.focus] = self
+            .search_input
+            .strip_prefix('/')
+            .unwrap_or(&self.search_input)
+            .to_owned();
+        self.reconcile();
+    }
+    fn restore_search(&mut self) {
+        if let Some(previous) = self.search_backup.take() {
+            self.filters = previous.filters;
+            self.project = previous.project;
+            self.task = previous.task;
+            self.thread = previous.thread;
+            self.history = previous.history;
+            self.page = previous.page;
+            self.detail = previous.detail;
+            self.scroll = previous.scroll;
+            self.reconcile();
+        }
+        self.searching = false;
+        self.command_selection = None;
+    }
+    fn new_form(&mut self) {
+        match self.focus {
+            0 => self.form = Some(form::Form::project()),
+            1 => {
+                if let Some(repo) = self.repo() {
+                    if let Some((_, config)) = &repo.context {
+                        self.form = Some(form::Form::task(repo.name.clone(), config.base.clone()));
+                    } else {
+                        self.message = Some("项目不可用，请先处理项目异常".into());
+                    }
+                } else {
+                    self.message = Some("请先选择项目".into());
+                }
+            }
+            _ => self.message = Some("/new：请先切到项目区或任务区".into()),
+        }
+    }
+    fn search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        let candidates = self.command_candidates();
+        match key.code {
+            KeyCode::Esc => self.restore_search(),
+            KeyCode::Down | KeyCode::Up if !candidates.is_empty() => {
+                self.command_selection = Some(match self.command_selection {
+                    None if key.code == KeyCode::Up => candidates.len() - 1,
+                    None => 0,
+                    Some(i) if key.code == KeyCode::Up => {
+                        (i + candidates.len() - 1) % candidates.len()
+                    }
+                    Some(i) => (i + 1) % candidates.len(),
+                });
+            }
+            KeyCode::Tab if !candidates.is_empty() => {
+                self.search_input = candidates[self.command_selection.unwrap_or(0)].into();
+                self.command_selection = Some(0);
+                self.preview_search();
+            }
+            KeyCode::Enter => {
+                let command = self
+                    .command_selection
+                    .and_then(|i| candidates.get(i).copied())
+                    .or_else(|| {
+                        candidates
+                            .iter()
+                            .copied()
+                            .find(|name| *name == self.search_input)
+                    });
+                if let Some(command) = command {
+                    self.restore_search();
+                    match command {
+                        "new" => self.new_form(),
+                        "refresh" => {
+                            self.refresh += 1;
+                            self.message = None;
+                        }
+                        "help" => self.help = true,
+                        "quit" => return true,
+                        _ => unreachable!(),
+                    }
+                } else {
+                    self.searching = false;
+                    self.search_backup = None;
+                    self.command_selection = None;
+                }
+            }
+            KeyCode::Backspace => {
+                self.search_input.pop();
+                self.command_selection = None;
+                self.preview_search();
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.search_input.push(c);
+                self.command_selection = None;
+                self.preview_search();
+            }
+            _ => {}
+        }
+        false
+    }
+    fn repos(&self) -> Vec<&data::Repo> {
+        let filter = self.filters[0].to_lowercase();
+        self.snapshot
+            .repos
+            .iter()
+            .filter(|r| r.name.to_lowercase().contains(&filter))
+            .collect()
+    }
+    fn repo(&self) -> Option<&data::Repo> {
+        self.snapshot
+            .repos
+            .iter()
+            .find(|r| Some(&r.name) == self.project.as_ref())
+    }
+    fn tasks(&self) -> Vec<&data::Task> {
+        let filter = self.filters[1].to_lowercase();
+        self.repo()
+            .map(|r| {
+                r.tasks
+                    .iter()
+                    .filter(|t| {
+                        format!("{} {}", t.name, t.branch)
+                            .to_lowercase()
+                            .contains(&filter)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn task(&self) -> Option<&data::Task> {
+        self.repo()?
+            .tasks
+            .iter()
+            .find(|t| Some(&t.path) == self.task.as_ref())
+    }
+    fn threads(&self) -> Vec<&crate::codex::Thread> {
+        let (Some(project), Some(path)) = (&self.project, &self.task) else {
+            return vec![];
+        };
+        let mut threads = data::for_task(&self.snapshot.threads, &self.snapshot, project, path);
+        if self.history
+            && self.snapshot.history_key.as_ref() == Some(&(path.clone(), self.descendants))
+        {
+            for thread in &self.snapshot.history {
+                if !threads.iter().any(|t| t.id == thread.id) {
+                    threads.push(thread);
+                }
+            }
+        }
+        let filter = self.filters[2].to_lowercase();
+        threads.retain(|t| {
+            format!("{} {}", t.title(), t.id)
+                .to_lowercase()
+                .contains(&filter)
+        });
+        threads.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
+        threads
+    }
+    fn reconcile(&mut self) {
+        if let Some((project, task)) = &self.pending_selection
+            && let Some(repo) = self.snapshot.repos.iter().find(|r| &r.name == project)
+            && let Some(task) = repo.tasks.iter().find(|t| &t.name == task)
+        {
+            self.project = Some(project.clone());
+            self.task = Some(task.path.clone());
+            self.focus = 1;
+            self.filters = Default::default();
+            self.detail = false;
+            self.history = false;
+            self.located = true;
+            self.message = Some(format!("操作成功，已选中 {project} / {}", task.name));
+            self.pending_selection = None;
+        }
+        if !self.located && !self.snapshot.repos.is_empty() {
+            if let Some(name) = &self.initial_repo {
+                if self.snapshot.repos.iter().any(|r| &r.name == name) {
+                    self.project = Some(name.clone());
+                } else {
+                    self.message = Some(format!("未登记项目 {name}"));
+                }
+            } else if let Some((repo, task)) = self
+                .snapshot
+                .repos
+                .iter()
+                .flat_map(|r| r.tasks.iter().map(move |t| (r, t)))
+                .filter(|(_, t)| self.initial_cwd.starts_with(&t.path))
+                .max_by_key(|(_, t)| t.path.components().count())
+            {
+                self.project = Some(repo.name.clone());
+                self.task = Some(task.path.clone());
+            }
+            self.located = true;
+        }
+        let repos = self.repos();
+        if !repos.iter().any(|r| Some(&r.name) == self.project.as_ref()) {
+            self.project = repos.first().map(|r| r.name.clone());
+        }
+        let tasks = self.tasks();
+        if !tasks.iter().any(|t| Some(&t.path) == self.task.as_ref()) {
+            self.task = tasks.first().map(|t| t.path.clone());
+        }
+        let threads = self.threads();
+        if !threads.iter().any(|t| Some(&t.id) == self.thread.as_ref()) {
+            self.thread = threads.first().map(|t| t.id.clone());
+        }
+    }
+    fn step(&mut self, direction: isize) {
+        self.scroll = 0;
+        match self.focus {
+            0 => {
+                let ids: Vec<_> = self.repos().iter().map(|r| r.name.clone()).collect();
+                self.project = select(&ids, self.project.as_ref(), direction);
+                self.history = false;
+                self.page = 0;
+                self.detail = false;
+            }
+            1 => {
+                let ids: Vec<_> = self.tasks().iter().map(|t| t.path.clone()).collect();
+                self.task = select(&ids, self.task.as_ref(), direction);
+                self.history = false;
+                self.page = 0;
+                self.detail = false;
+            }
+            _ => {
+                let ids: Vec<_> = self.threads().iter().map(|t| t.id.clone()).collect();
+                self.thread = select(&ids, self.thread.as_ref(), direction);
+                self.detail = false;
+            }
+        }
+        self.reconcile();
+    }
+    fn request(&self) -> Request {
+        Request {
+            project: self.project.clone(),
+            path: self.task.clone(),
+            history: self.history,
+            descendants: self.descendants,
+            page: self.page,
+            turn: self.thread.clone().filter(|_| self.detail),
+            refresh: self.refresh,
+        }
+    }
+}
+fn select<T: PartialEq + Clone>(items: &[T], selected: Option<&T>, direction: isize) -> Option<T> {
+    if items.is_empty() {
+        return None;
+    }
+    let index = items.iter().position(|i| Some(i) == selected).unwrap_or(0);
+    Some(items[index.saturating_add_signed(direction).min(items.len() - 1)].clone())
+}
+
+struct Screen {
+    active: bool,
+}
+impl Screen {
+    fn start() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut screen = Self { active: true };
+        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen) {
+            screen.restore()?;
+            return Err(e.into());
+        }
+        Ok(screen)
+    }
+    fn restore(&mut self) -> Result<()> {
+        if self.active {
+            // 两项都尝试，避免其中一项失败跳过另一项。
+            let raw = disable_raw_mode();
+            let screen = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+            self.active = false;
+            raw?;
+            screen?;
+        }
+        Ok(())
+    }
+}
+impl Drop for Screen {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+pub fn run(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()> {
+    ensure!(
+        io::stdin().is_terminal() && io::stdout().is_terminal(),
+        "Console 需要交互式终端；脚本请使用 twig config list 或 twig --repo NAME ls"
+    );
+    // panic 时先恢复终端，再输出诊断；退出后还原原 hook。
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        eprintln!("Console 异常：{info}");
+    }));
+    let result = run_inner(registry, repo, cwd);
+    std::panic::set_hook(previous);
+    result
+}
+fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()> {
+    let mut screen = Screen::start()?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut worker = Worker::start(registry.clone());
+    let mut app = App::new(repo, cwd);
+    worker.requests.send(app.request())?;
+    loop {
+        if let Some(form) = &mut app.form {
+            match form.poll() {
+                Ok(Some(selection)) => {
+                    app.pending_selection = Some(selection);
+                    app.form = None;
+                    app.refresh += 1;
+                    app.message = Some("操作成功，正在刷新项目与任务…".into());
+                    worker.requests.send(app.request())?;
+                }
+                Err(error) => form.error = Some(format!("{error:#}")),
+                Ok(None) => {}
+            }
+        }
+        let mut updated = false;
+        for snapshot in worker.updates.try_iter() {
+            app.snapshot = snapshot;
+            updated = true;
+        }
+        if updated {
+            if let Some(name) = &app.initial_repo
+                && app.snapshot.registry_checked.is_some()
+            {
+                ensure!(
+                    app.snapshot.repos.iter().any(|r| &r.name == name),
+                    "未登记项目 {name}；请运行 twig config list"
+                );
+            }
+            app.reconcile();
+            worker.requests.send(app.request())?;
+        }
+        terminal.draw(|frame| ui::draw(frame, &app))?;
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        let event = event::read()?;
+        let Event::Key(key) = event else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        if let Some(form) = &mut app.form {
+            if key.code == KeyCode::PageDown {
+                form.scroll = form.scroll.saturating_add(2);
+                continue;
+            }
+            if key.code == KeyCode::PageUp {
+                form.scroll = form.scroll.saturating_sub(2);
+                continue;
+            }
+            if form.busy() {
+                continue;
+            }
+            match key.code {
+                KeyCode::Esc => app.form = None,
+                KeyCode::Tab => {
+                    if !form.complete_path() {
+                        form.field = (form.field + 1) % 2;
+                    }
+                }
+                KeyCode::BackTab => form.field = (form.field + 1) % 2,
+                KeyCode::Down if form.completing_path() && !form.directories.is_empty() => {
+                    form.directory_selection =
+                        (form.directory_selection + 1) % form.directories.len();
+                }
+                KeyCode::Up if form.completing_path() && !form.directories.is_empty() => {
+                    form.directory_selection = (form.directory_selection + form.directories.len()
+                        - 1)
+                        % form.directories.len();
+                }
+                KeyCode::Backspace => {
+                    form.fields[form.field].pop();
+                    form.error = None;
+                    form.scroll = 0;
+                }
+                KeyCode::Enter => {
+                    if let Err(error) = form.confirm(&registry) {
+                        form.error = Some(format!("{error:#}"));
+                    }
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.form = None
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    form.fields[form.field].push(c);
+                    form.error = None;
+                    form.scroll = 0;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            break;
+        }
+        if app.help {
+            app.help = false;
+            continue;
+        }
+        if app.searching {
+            if app.search_key(key) {
+                break;
+            }
+            worker.requests.send(app.request())?;
+            continue;
+        }
+        if app.pane_prefix {
+            app.pane_prefix = false;
+            if let KeyCode::Char(direction) = key.code {
+                app.focus = match (app.focus, direction.to_ascii_lowercase()) {
+                    (_, 'h') => 0,
+                    (0, 'l') => 1,
+                    (1, 'j') => 2,
+                    (2, 'k') => 1,
+                    _ => app.focus,
+                };
+            }
+            worker.requests.send(app.request())?;
+            continue;
+        }
+        if app.top_prefix {
+            app.top_prefix = false;
+            if key.code == KeyCode::Char('g') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.step(isize::MIN);
+                worker.requests.send(app.request())?;
+                continue;
+            }
+            if key.code == KeyCode::Esc {
+                continue;
+            }
+        }
+        if matches!(key.code, KeyCode::Char('w' | 'W'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            app.pane_prefix = true;
+            continue;
+        }
+        match key.code {
+            KeyCode::Char('q') => break,
+            KeyCode::Char('?') => app.help = true,
+            KeyCode::PageDown => app.scroll = app.scroll.saturating_add(4),
+            KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(4),
+            KeyCode::Tab => app.focus = (app.focus + 1) % 3,
+            KeyCode::BackTab => app.focus = (app.focus + 2) % 3,
+            KeyCode::Down | KeyCode::Char('j') => app.step(1),
+            KeyCode::Up | KeyCode::Char('k') => app.step(-1),
+            KeyCode::Char('g') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.top_prefix = true
+            }
+            KeyCode::Char('G') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.step(isize::MAX)
+            }
+            KeyCode::Char('/') => app.begin_search(),
+            KeyCode::Esc => {
+                app.filters[app.focus].clear();
+                if app.detail {
+                    app.detail = false;
+                } else {
+                    app.focus = app.focus.saturating_sub(1);
+                }
+                app.reconcile();
+            }
+            KeyCode::Char('r') => {
+                app.refresh += 1;
+                app.message = None;
+            }
+            KeyCode::Char('h') => {
+                app.history = !app.history;
+                app.page = 0;
+                app.detail = false;
+                app.focus = 2;
+            }
+            KeyCode::Char('a') if app.history => {
+                app.descendants = !app.descendants;
+                app.page = 0;
+            }
+            KeyCode::Char('n') if app.focus < 2 => app.new_form(),
+            KeyCode::Char('n') if app.focus == 2 && app.history => {
+                if app.snapshot.history_more && app.snapshot.history_pages > app.page {
+                    app.page += 1;
+                }
+            }
+            KeyCode::Enter if app.focus == 2 => app.detail = true,
+            KeyCode::Enter if app.focus == 0 => {
+                if app.repo().is_some() {
+                    app.filters[1].clear();
+                    app.task = app.repo().and_then(|r| {
+                        r.tasks
+                            .iter()
+                            .find(|t| t.name == "main")
+                            .map(|t| t.path.clone())
+                    });
+                    app.focus = 1;
+                    app.detail = false;
+                    app.scroll = 0;
+                    app.reconcile();
+                }
+            }
+            KeyCode::Enter => {
+                let target = app
+                    .repo()
+                    .map(|r| (r.name.clone(), app.task().map(|t| t.name.clone())));
+                if let Some((project, Some(task))) = target {
+                    screen.restore()?;
+                    // 停止采集后才能进入；防止与进入阶段共享终端或旧查询。
+                    drop(worker);
+                    match data::enter(&registry, &project, &task) {
+                        Ok(()) => app.message = None,
+                        Err(error) => app.message = Some(format!("进入失败：{error:#}")),
+                    }
+                    screen = Screen::start()?;
+                    terminal.clear()?;
+                    worker = Worker::start(registry.clone());
+                }
+            }
+            _ => {}
+        }
+        worker.requests.send(app.request())?;
+    }
+    screen.restore()?;
+    drop(worker);
+    Ok(())
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use crossterm::event::KeyEvent;
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            assert!(!app.search_key(key(KeyCode::Char(c))));
+        }
+    }
+    fn app() -> App {
+        let mut app = App::new(None, PathBuf::from("/demo"));
+        app.snapshot.repos.push(data::Repo {
+            name: "demo".into(),
+            path: "/demo".into(),
+            error: None,
+            context: Some((
+                crate::config::Project {
+                    common: "/demo/.git".into(),
+                    dir: "/demo/.git/twig".into(),
+                },
+                crate::config::Config {
+                    version: 1,
+                    main: "/demo".into(),
+                    root: "/tasks".into(),
+                    base: "main".into(),
+                    target: "main".into(),
+                    session: "test".into(),
+                },
+            )),
+            tasks: ["main", "auth"]
+                .into_iter()
+                .map(|name| data::Task {
+                    name: name.into(),
+                    path: PathBuf::from(format!("/tasks/{name}")),
+                    branch: name.into(),
+                    git: String::new(),
+                    window: String::new(),
+                    error: None,
+                    checked: None,
+                })
+                .collect(),
+        });
+        app.reconcile();
+        app
+    }
+    #[test]
+    fn commands_restore_context_and_search_is_default() {
+        let mut app = app();
+        app.focus = 1;
+        app.filters[1] = "auth".into();
+        app.reconcile();
+        let task = app.task.clone();
+        app.begin_search();
+        assert_eq!(app.command_selection, None);
+        type_text(&mut app, "new");
+        assert!(app.task.is_none());
+        assert!(!app.search_key(key(KeyCode::Enter)));
+        assert_eq!(app.task, task);
+        assert_eq!(app.filters[1], "auth");
+        let form = app.form.take().unwrap();
+        assert_eq!(form.project.as_deref(), Some("demo"));
+        assert_eq!(form.fields[1], "main");
+
+        app.begin_search();
+        type_text(&mut app, "ne");
+        app.search_key(key(KeyCode::Enter));
+        assert!(app.form.is_none());
+        assert_eq!(app.filters[1], "ne");
+        app.begin_search();
+        type_text(&mut app, "/new");
+        assert!(app.command_candidates().is_empty());
+        app.search_key(key(KeyCode::Down));
+        app.search_key(key(KeyCode::Tab));
+        app.search_key(key(KeyCode::Enter));
+        assert!(app.form.is_none());
+        assert_eq!(app.filters[1], "new");
+    }
+    #[test]
+    fn command_selection_completion_and_cancel_preserve_project() {
+        let mut app = app();
+        let original = app.project.clone();
+        app.begin_search();
+        type_text(&mut app, "absent");
+        assert!(app.project.is_none());
+        app.search_key(key(KeyCode::Esc));
+        assert_eq!(app.project, original);
+        assert_eq!(app.filters[0], "");
+        app.begin_search();
+        app.search_key(key(KeyCode::Down));
+        app.search_key(key(KeyCode::Enter));
+        assert!(app.form.take().is_some());
+        app.begin_search();
+        type_text(&mut app, "he");
+        app.search_key(key(KeyCode::Tab));
+        assert_eq!(app.search_input, "help");
+        app.search_key(key(KeyCode::Enter));
+        assert!(app.help);
+        app.help = false;
+        assert_eq!(app.project, original);
+        app.begin_search();
+        type_text(&mut app, "refresh");
+        app.search_key(key(KeyCode::Enter));
+        assert_eq!(app.refresh, 1);
+        app.begin_search();
+        app.search_key(key(KeyCode::Up));
+        assert!(app.search_key(key(KeyCode::Enter)));
+    }
+}

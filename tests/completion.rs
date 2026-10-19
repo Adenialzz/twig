@@ -223,7 +223,7 @@ fn zsh_tab_orders_tasks_and_handles_quoted_paths() {
     let feature = serde_json::json!({"branch": "main", "base": "main", "path": temp.path()});
     fs::write(
         state_dir.join("state.json"),
-        serde_json::json!({"alpha": feature, "beta": feature}).to_string(),
+        serde_json::json!({"alpha": feature, "beta": feature, "feat/login": feature, "fix/bug": feature}).to_string(),
     )
     .unwrap();
     let registry = format!(
@@ -266,6 +266,9 @@ for action in open new stop rm; do
         exit 1
     }
 done
+start_shell
+zpty -w -n shell $'twig open feat/l\t\x18q'
+wait_for 'TWIG_BUFFER=twig open feat/login ' || exit 1
 start_shell
 zpty -w -n shell $'twig open b\t\x18q'
 wait_for 'TWIG_BUFFER=twig open beta ' || exit 1

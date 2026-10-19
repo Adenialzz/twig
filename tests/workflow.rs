@@ -215,16 +215,13 @@ fn refuses_dirty_unmerged_and_busy_removal() {
     f.fail(&["rm", "auth", "--keep-branch", "-y"], "活动进程");
     f.ok(&["stop", "auth", "-y"]);
     f.ok(&["rm", "auth", "--keep-branch", "-y"]);
-    assert!(
-        f.git(&["branch", "--list", "feature/auth"])
-            .contains("feature/auth")
-    );
+    assert!(f.git(&["branch", "--list", "auth"]).contains("auth"));
 }
 
 #[test]
 fn detects_conflicts_and_resumes_partial_creation() {
     let f = Fixture::new();
-    f.git(&["branch", "feature/existing"]);
+    f.git(&["branch", "existing"]);
     f.fail(&["new", "--no-open", "existing"], "分支已存在");
     fs::create_dir(f.root.join("occupied")).unwrap();
     f.fail(&["new", "--no-open", "occupied"], "路径已存在");
@@ -283,15 +280,11 @@ fn merged_branch_cleanup_and_confirmation() {
             .output()
             .unwrap(),
     );
-    f.git(&["merge", "--ff-only", "feature/done"]);
+    f.git(&["merge", "--ff-only", "done"]);
     f.ok(&["stop", "done", "-y"]);
     f.fail(&["rm", "done"], "已取消");
     f.ok(&["rm", "done", "-y"]);
-    assert!(
-        f.git(&["branch", "--list", "feature/done"])
-            .trim()
-            .is_empty()
-    );
+    assert!(f.git(&["branch", "--list", "done"]).trim().is_empty());
 }
 
 #[test]
@@ -332,7 +325,7 @@ fn upstream_and_foreign_window_protection() {
     let f = Fixture::new();
     f.git(&["branch", "upstream"]);
     f.ok(&["new", "--no-open", "unpushed"]);
-    f.git(&["branch", "--set-upstream-to=upstream", "feature/unpushed"]);
+    f.git(&["branch", "--set-upstream-to=upstream", "unpushed"]);
     success(
         Command::new("git")
             .current_dir(f.root.join("unpushed"))
@@ -340,7 +333,7 @@ fn upstream_and_foreign_window_protection() {
             .output()
             .unwrap(),
     );
-    f.git(&["merge", "--ff-only", "feature/unpushed"]);
+    f.git(&["merge", "--ff-only", "unpushed"]);
     f.fail(&["rm", "unpushed", "-y"], "未推送提交");
     f.mux(&["new-window", "-d", "-t", &f.session(), "-n", "foreign"]);
     f.fail(&["new", "--no-open", "foreign"], "同名非 twig");
@@ -523,10 +516,10 @@ fn registry_clone_multiple_remotes_and_repo_selection() {
     success(f.registered(&["--repo", "app", "new", "--no-open", "auth"]));
     assert!(success(f.registered(&["ls", "--repo", "app"])).contains("auth"));
     let base = git_at(&["rev-parse", "develop"]);
-    assert_eq!(git_at(&["rev-parse", "feature/auth"]), base);
+    assert_eq!(git_at(&["rev-parse", "auth"]), base);
     success(f.registered(&["config", "remove", "app"]));
     assert!(destination.join(".git").exists());
-    assert!(git_at(&["branch", "--list", "feature/auth"]).contains("feature/auth"));
+    assert!(git_at(&["branch", "--list", "auth"]).contains("auth"));
     assert!(!f.registered(&["--repo", "app", "ls"]).status.success());
 }
 
@@ -818,4 +811,67 @@ fn repeated_init_is_read_only_even_with_missing_registry_and_session() {
     assert_eq!(fs::read_to_string(lock).unwrap(), "existing lock");
     assert!(!f.registry_path().parent().unwrap().exists());
     assert!(!unused_root.exists());
+}
+
+#[test]
+fn slash_task_names_and_legacy_branches() {
+    let f = Fixture::new();
+    for name in ["feat/login", "fix/bug"] {
+        f.ok(&["new", "--no-open", name]);
+        f.ok(&["new", "--no-open", name]);
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(f.repo.join(".git/twig/state.json")).unwrap())
+                .unwrap();
+        assert_eq!(state[name]["branch"], name);
+        assert_eq!(
+            state[name]["path"],
+            f.root.join(name).canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(
+            f.mux(&["list-windows", "-t", &f.session(), "-F", "#{@twig-feature}"])
+                .lines()
+                .any(|line| line == name)
+        );
+        f.ok(&["stop", name, "-y"]);
+        let _ = f.run(&["open", name]);
+        f.ok(&["stop", name, "-y"]);
+        f.ok(&["rm", name, "-y"]);
+        assert!(!f.root.join(name).exists());
+        assert!(f.git(&["branch", "--list", name]).is_empty());
+    }
+    f.ok(&["new", "--no-open", "legacy"]);
+    f.git(&["branch", "-m", "legacy", "feature/legacy"]);
+    let path = f.repo.join(".git/twig/state.json");
+    let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["legacy"]["branch"] = "feature/legacy".into();
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(
+        f.ok(&["new", "--no-open", "legacy"])
+            .contains("feature/legacy")
+    );
+    f.ok(&["stop", "legacy", "-y"]);
+    f.ok(&["rm", "legacy", "-y"]);
+}
+
+#[test]
+fn slash_tasks_reject_unsafe_paths_before_recording() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    for name in [
+        "../escape",
+        "/absolute",
+        "feat/../escape",
+        "feat//login",
+        "feat/",
+        "feat/.hidden",
+    ] {
+        f.fail(&["new", "--no-open", name], "名称须");
+    }
+    f.fail(&["new", "--no-open", "HEAD"], "not a valid branch");
+    symlink(f._temp.path(), f.root.join("escape")).unwrap();
+    f.fail(&["new", "--no-open", "escape/task"], "不是普通目录");
+    fs::create_dir_all(f.root.join("nested/.git")).unwrap();
+    f.fail(&["new", "--no-open", "nested/task"], "已有仓库");
+    assert!(!f.repo.join(".git/twig/state.json").exists());
+    assert!(!f._temp.path().join("task").exists());
 }
