@@ -149,6 +149,430 @@ fn success(out: Output) -> String {
 }
 
 #[test]
+fn startup_mixed_modes_keep_process_output_and_close_shell() {
+    let f = Fixture::new();
+    fs::create_dir(f.repo.join(".twig")).unwrap();
+    let literal = "quote ' $(touch unwanted) ;";
+    let layout = serde_json::json!({"tmux": {"panes": [
+        {"mode": "shell", "focus": true},
+        {"split": "right", "mode": "process", "command": ["/bin/echo", literal]},
+        {"split": "down", "mode": "process", "command": ["/usr/bin/false"]},
+        {"split": "down", "mode": "process", "command": ["/bin/sleep", "60"]}
+    ]}});
+    fs::write(
+        f.repo.join(".twig/config.toml"),
+        toml::to_string(&layout).unwrap(),
+    )
+    .unwrap();
+    f.ok(&["new", "local", "mixed", "--no-open"]);
+    let target = format!("{}:mixed", f.session());
+    let output = f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"]);
+    let panes: Vec<_> = output.lines().collect();
+    assert_eq!(panes.len(), 4);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while f
+        .mux(&[
+            "display-message",
+            "-p",
+            "-t",
+            panes[3],
+            "#{pane_current_command}",
+        ])
+        .trim()
+        != "sleep"
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    f.mux(&["send-keys", "-t", panes[3], "C-c"]);
+    for pane in &panes[1..] {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while f
+            .mux(&["display-message", "-p", "-t", pane, "#{pane_dead}"])
+            .trim()
+            != "1"
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    assert_eq!(
+        f.mux(&[
+            "display-message",
+            "-p",
+            "-t",
+            panes[1],
+            "#{pane_dead_status}"
+        ])
+        .trim(),
+        "0"
+    );
+    assert_eq!(
+        f.mux(&[
+            "display-message",
+            "-p",
+            "-t",
+            panes[2],
+            "#{pane_dead_status}"
+        ])
+        .trim(),
+        "1"
+    );
+    assert!(
+        f.mux(&["capture-pane", "-p", "-S", "-", "-t", panes[1]])
+            .contains(literal)
+    );
+    assert!(!f.root.join("mixed/unwanted").exists());
+    f.mux(&[
+        "send-keys",
+        "-t",
+        panes[0],
+        "-l",
+        "printf ready > shell-ready",
+    ]);
+    f.mux(&["send-keys", "-t", panes[0], "Enter"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while fs::read_to_string(f.root.join("mixed/shell-ready"))
+        .ok()
+        .as_deref()
+        != Some("ready")
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    f.mux(&["send-keys", "-t", panes[0], "C-d"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while f
+        .mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
+        .lines()
+        .count()
+        != 3
+    {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
+            .lines()
+            .collect::<Vec<_>>(),
+        panes[1..]
+    );
+    f.ok(&["new", "local", "mixed", "--no-open"]);
+    assert_eq!(
+        f.mux(&["list-panes", "-t", &target, "-F", "#{pane_dead}"])
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["1", "1", "1"]
+    );
+}
+
+#[test]
+fn startup_commands_return_to_shell_and_ctrl_d_closes_panes() {
+    let f = Fixture::new();
+    fs::create_dir(f.repo.join(".twig")).unwrap();
+    let script = f.repo.join("start 'command.sh");
+    fs::write(&script, "#!/bin/sh\nprintf '%s' \"$1\" > received\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    f.git(&["add", "start 'command.sh"]);
+    f.git(&["commit", "-m", "startup script"]);
+    let literal = "quote ' backslash \\ $(touch unwanted) ;\nsecond line";
+    let layout = serde_json::json!({"tmux": {"panes": [
+        {"command": ["./start 'command.sh", literal]},
+        {"split": "right", "command": ["/usr/bin/false"]},
+        {"split": "down", "command": ["/bin/sleep", "60"]}
+    ]}});
+    fs::write(
+        f.repo.join(".twig/config.toml"),
+        toml::to_string(&layout).unwrap(),
+    )
+    .unwrap();
+    // Shell 初始化不读取真实用户 dotfiles。
+    f.mux(&[
+        "set-environment",
+        "-g",
+        "HOME",
+        f._temp.path().to_str().unwrap(),
+    ]);
+    for (task, shell) in [
+        ("sh", "/bin/sh"),
+        ("bash", "/bin/bash"),
+        ("zsh", "/bin/zsh"),
+    ] {
+        f.mux(&["set-option", "-t", &f.session(), "default-shell", shell]);
+        f.ok(&["new", "local", task, "--no-open"]);
+        let target = format!("{}:{task}", f.session());
+        let output = f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"]);
+        let panes: Vec<_> = output.lines().collect();
+        assert_eq!(panes.len(), 3);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while fs::read_to_string(f.root.join(task).join("received"))
+            .ok()
+            .as_deref()
+            != Some(literal)
+            || f.mux(&[
+                "display-message",
+                "-p",
+                "-t",
+                panes[2],
+                "#{pane_current_command}",
+            ])
+            .trim()
+                != "sleep"
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{shell} 的启动命令未按预期执行"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!f.root.join(task).join("unwanted").exists());
+        f.mux(&["send-keys", "-t", panes[2], "C-c"]);
+        for (index, pane) in panes.iter().enumerate() {
+            f.mux(&[
+                "send-keys",
+                "-t",
+                pane,
+                "-l",
+                &format!("printf 'ready' > after-{index}"),
+            ]);
+            f.mux(&["send-keys", "-t", pane, "Enter"]);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while fs::read_to_string(f.root.join(task).join(format!("after-{index}")))
+                .ok()
+                .as_deref()
+                != Some("ready")
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{shell} 在命令结束后未接受输入"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            f.mux(&["send-keys", "-t", pane, "C-d"]);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while f
+                .mux(&["list-panes", "-a", "-F", "#{pane_id}"])
+                .lines()
+                .any(|id| id == *pane)
+            {
+                assert!(std::time::Instant::now() < deadline, "Ctrl-D 未关闭 Pane");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+#[test]
+fn startup_shells_inherit_global_options_and_honor_session_overrides() {
+    let f = Fixture::new();
+    fs::create_dir(f.repo.join(".twig")).unwrap();
+    fs::write(
+        f.repo.join(".twig/config.toml"),
+        "[tmux]\npanes = [{}, {split = 'right'}]",
+    )
+    .unwrap();
+    f.mux(&["set-option", "-g", "default-shell", "/bin/sh"]);
+    for (task, shell) in [("inherited", "/bin/sh"), ("override", "/bin/bash")] {
+        if task == "override" {
+            f.mux(&["set-option", "-t", &f.session(), "default-shell", shell]);
+        }
+        f.ok(&["new", "local", task, "--no-open"]);
+        let panes = f.mux(&[
+            "list-panes",
+            "-t",
+            &format!("{}:{task}", f.session()),
+            "-F",
+            "#{pane_id}",
+        ]);
+        assert_eq!(panes.lines().count(), 2);
+        for (index, pane) in panes.lines().enumerate() {
+            let command = f.mux(&["display-message", "-p", "-t", pane, "#{pane_start_command}"]);
+            assert!(command.contains(shell), "Shell 启动命令错误：{command}");
+            let marker = format!("shell-ready-{index}");
+            f.mux(&[
+                "send-keys",
+                "-t",
+                pane,
+                "-l",
+                &format!("printf 'ready' > {marker}"),
+            ]);
+            f.mux(&["send-keys", "-t", pane, "Enter"]);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let path = f.root.join(task).join(marker);
+            while fs::read_to_string(&path).ok().as_deref() != Some("ready") {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Shell 未执行输入的命令"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert_eq!(
+                f.mux(&["display-message", "-p", "-t", pane, "#{pane_dead}"])
+                    .trim(),
+                "0"
+            );
+        }
+    }
+}
+
+#[test]
+fn startup_layout_precedence_commands_and_reopen() {
+    let f = Fixture::new();
+    let global = fs::read_to_string(f.registry_path()).unwrap();
+    fs::write(
+        f.registry_path(),
+        format!(
+            "[tmux]\npanes = [{{}}, {{ split = 'right', percent = 35, focus = true }}]\n{global}"
+        ),
+    )
+    .unwrap();
+    success(f.registered(&["new", "local", "global", "--no-open"]));
+    let target = format!("{}:global", f.session());
+    assert_eq!(
+        f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
+            .lines()
+            .count(),
+        2
+    );
+    assert_eq!(
+        f.mux(&[
+            "list-panes",
+            "-t",
+            &format!("{}:main", f.session()),
+            "-F",
+            "#{pane_id}"
+        ])
+        .lines()
+        .count(),
+        1
+    );
+    // 取消登记和重新登记不能丢失用户启动配置。
+    f.ok(&["rm", "local"]);
+    let saved: toml::Value =
+        toml::from_str(&fs::read_to_string(f.registry_path()).unwrap()).unwrap();
+    assert_eq!(saved["tmux"]["panes"].as_array().unwrap().len(), 2);
+    f.ok(&["add", "local", "--path", f.repo.to_str().unwrap()]);
+    fs::create_dir(f.repo.join(".twig")).unwrap();
+    let local = f.repo.join(".twig/config.toml");
+    fs::write(&local, "[tmux]\npanes = [{ command = ['/bin/echo', 'literal $(touch unwanted) ;'], focus = true }, { split = 'down', percent = 30 }]\n").unwrap();
+    success(f.registered(&["new", "local", "configured", "--no-open"]));
+    let target = format!("{}:configured", f.session());
+    let panes = f.mux(&[
+        "list-panes",
+        "-t",
+        &target,
+        "-F",
+        "#{pane_id}\t#{pane_active}\t#{pane_start_path}",
+    ]);
+    let first = panes.lines().next().unwrap().split('\t').next().unwrap();
+    assert!(panes.lines().next().unwrap().contains("\t1\t"));
+    assert!(
+        panes
+            .lines()
+            .all(|line| line.ends_with(f.root.join("configured").to_str().unwrap()))
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let output = f.mux(&["capture-pane", "-p", "-S", "-", "-t", first]);
+        if output
+            .lines()
+            .any(|line| line.trim() == "literal $(touch unwanted) ;")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "未看到命令输出：{output}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        f.mux(&["display-message", "-p", "-t", first, "#{pane_dead}"])
+            .trim(),
+        "0"
+    );
+    assert!(!f.root.join("configured/unwanted").exists());
+    fs::write(&local, "[tmux]\npanes = []\n").unwrap();
+    f.ok(&["new", "local", "configured", "--no-open"]);
+    assert_eq!(
+        f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
+            .lines()
+            .count(),
+        2
+    );
+    f.ok(&["stop", "local", "configured", "-y"]);
+    f.ok(&["new", "local", "configured", "--no-open"]);
+    assert_eq!(
+        f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
+            .lines()
+            .count(),
+        1
+    );
+    fs::write(&local, "# 未定义 tmux，继承用户配置\n").unwrap();
+    f.ok(&["new", "local", "fallback", "--no-open"]);
+    assert_eq!(
+        f.mux(&[
+            "list-panes",
+            "-t",
+            &format!("{}:fallback", f.session()),
+            "-F",
+            "#{pane_id}"
+        ])
+        .lines()
+        .count(),
+        2
+    );
+}
+
+#[test]
+fn startup_rejects_invalid_configuration_without_creating_window() {
+    let f = Fixture::new();
+    fs::create_dir(f.repo.join(".twig")).unwrap();
+    for text in [
+        "[tmux]\npanes = [{command = []}]",
+        "[tmux]\npanes = [{}, {split = 'right', percent = 0}]",
+        "[tmux]\npanes = [{focus = true}, {split = 'down', focus = true}]",
+        "[tmux]\npanes = [{unknown = true}]",
+        "[tmux]\npanes = [{mode = 'process'}]",
+        "[tmux]\npanes = [{mode = 'unknown'}]",
+    ] {
+        fs::write(f.repo.join(".twig/config.toml"), text).unwrap();
+        f.fail(&["new", "local", "invalid", "--no-open"], "配置");
+        assert!(
+            !f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_name}"])
+                .lines()
+                .any(|n| n == "invalid")
+        );
+    }
+    fs::write(
+        f.repo.join(".twig/config.toml"),
+        "[tmux]\npanes = [{command = ['/usr/bin/false']}]",
+    )
+    .unwrap();
+    f.ok(&["new", "local", "invalid", "--no-open"]);
+}
+
+#[test]
+fn startup_partial_failure_keeps_window_and_does_not_run_commands() {
+    let f = Fixture::new();
+    fs::create_dir(f.repo.join(".twig")).unwrap();
+    let mut panes = vec!["{command = ['/usr/bin/touch', 'must-not-run']}"; 1];
+    panes.extend(std::iter::repeat_n("{split = 'down'}", 30));
+    fs::write(
+        f.repo.join(".twig/config.toml"),
+        format!("[tmux]\npanes = [{}]", panes.join(",")),
+    )
+    .unwrap();
+    f.fail(&["new", "local", "partial", "--no-open"], "初始化失败");
+    assert!(!f.root.join("partial/must-not-run").exists());
+    f.fail(&["new", "local", "partial", "--no-open"], "初始化未完成");
+    f.fail(&["open", "local", "partial"], "初始化未完成");
+    fs::write(f.repo.join(".twig/config.toml"), "[tmux]\npanes = []").unwrap();
+    f.ok(&["stop", "local", "partial", "-y"]);
+    f.ok(&["new", "local", "partial", "--no-open"]);
+}
+
+#[test]
 fn lifecycle_and_recovery() {
     let f = Fixture::new();
     f.ok(&["add", "local", "--path", f.repo.to_str().unwrap()]);

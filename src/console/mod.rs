@@ -731,6 +731,7 @@ mod search_tests {
                 crate::config::Project {
                     common: "/demo/.git".into(),
                     dir: "/global/projects/demo-id".into(),
+                    registry: "/global/config.toml".into(),
                 },
                 crate::config::Config {
                     version: 1,

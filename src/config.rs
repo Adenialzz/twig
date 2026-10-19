@@ -30,6 +30,7 @@ pub type State = BTreeMap<String, Feature>;
 pub struct Project {
     pub common: PathBuf,
     pub dir: PathBuf,
+    pub registry: PathBuf,
 }
 
 impl Project {
@@ -40,6 +41,7 @@ impl Project {
         )?)
         .canonicalize()?;
         Ok(Self {
+            registry: registry.to_owned(),
             dir: registry
                 .parent()
                 .context("登记表缺少父目录")?

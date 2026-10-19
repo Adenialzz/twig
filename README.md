@@ -2,7 +2,7 @@
 
 用 Git Worktree 和 tmux 管理独立任务环境的轻量 Rust CLI。
 
-一个项目对应一个 tmux Session，一个任务对应一个分支、Worktree 和窗口。窗口打开普通 Shell，Codex、Claude 或其他程序由你手动启动。twig 不调用 LLM，不自动合并，也不运行后台服务。
+一个项目对应一个 tmux Session，一个任务对应一个分支、Worktree 和窗口。默认打开普通 Shell；可显式配置任务窗口的分屏和启动程序。twig 不编排 Agent，不自动合并，也不运行后台服务。
 
 继续开发前请阅读 [AGENTS.md](AGENTS.md) 和 [DESIGN.md](DESIGN.md)，了解开发约定、设计决定、候选功能与交接状态。
 
@@ -144,7 +144,7 @@ twig new myapp fix/bug
 
 已初始化时 `add` 复用项目配置并补充登记，不重建窗口；传入冲突的基础/目标分支或重新指定根目录会报错。初始化失败保留资源，修复后可再次 `add` 补登记，再用 `new`/`open` 或控制台 Enter 准备窗口。修改已有项目配置请编辑 `config.json`。
 
-登记表默认位于 `~/.twig/config.toml`，只保存别名和本地路径：
+用户配置默认位于 `~/.twig/config.toml`，其中 `[projects]` 保存别名和本地路径，也可配置 `[tmux]` 启动行为：
 
 ```toml
 [projects.myapp]
@@ -175,6 +175,33 @@ projects/
 Worktree 根目录必须与主工作目录分离，不能相互包含。`--base` 必须为已有本地分支；`--target` 用于安全删除的合并检查，默认等于基础分支。不自动 fetch、pull、push 或修改主分支。
 
 任务名直接作为分支名，不自动添加前缀。总长为 1–64 位，可用 `/` 分段；每段为 ASCII 字母、数字、横线或下划线，并以字母或数字开头，不允许空段。`feat/login` 对应 `<root>/feat/login/`，tmux 窗口名也是 `feat/login`；`main` 保留给主窗口。已有任务使用登记的分支与路径，不自动改名。
+
+### 任务窗口初始化
+
+完整字段、示例及交互说明见 [任务窗口启动配置](docs/tmux-startup.md)。
+
+在主仓库根目录的 `.twig/config.toml` 中配置项目启动方式，或在用户级 `~/.twig/config.toml` 中配置默认值。指定 `--config PATH` 时，PATH 同时替代用户配置和登记表，不再读取默认用户文件。
+
+```toml
+[tmux]
+panes = [
+  { focus = true },
+  { split = "right", percent = 35, command = ["./scripts/dev"] },
+  { split = "down", percent = 40 },
+]
+```
+
+首个 Pane 不设置 split/percent。后续 Pane 从上一个 Pane 分割，`right` 表示右侧、`down` 表示下方；`percent` 是新 Pane 占分割前空间的百分比，默认 50，范围 1–99。最多一个 `focus = true`，默认聚焦首个 Pane。
+
+`command` 为程序与参数数组。Pane 的 `mode` 默认为 `shell`，启动 tmux 的 `default-shell` 登录 Shell；配置了 command 时，将其作为 Shell 的第一条命令执行。显式 `mode = "process"` 时必须提供 command，直接运行程序，退出后保留 dead Pane、输出和退出码；不加载交互式 Shell 配置。所有 Pane 的工作目录都是任务 Worktree。参数逐个引用，不展开 `$VAR`、`~`、管道或 `&&`；复杂逻辑请写入项目脚本，脚本须在任务分支中存在。显式配置也可启动 Codex/Claude 等工具，但 twig 不恢复对话、不发送提示词或审批、不自动重启程序。
+
+项目文件始终从已登记项目的主仓库读取，不按调用目录或任务分支寻找。项目定义 `[tmux]` 时整体覆盖用户配置，不合并 Pane；未定义则继承用户配置。`[tmux]` 下 `panes = []` 可显式恢复单 Shell。配置错误会报错。
+
+仅在创建任务窗口时应用，包括窗口缺失后的 `new`、`open` 和 Console Enter；已有窗口不重排、不重复执行命令。`--no-open` 仍创建窗口并启动配置的命令，只是不进入窗口。`add` 创建的 `main` 窗口保持原有普通 Shell。
+
+shell 模式中，命令完成、失败或被 Ctrl-C 中断后回到 Shell 提示符，可以继续操作，输出保留在终端历史中。空提示符下 Ctrl-D 按 Shell 的正常行为退出并关闭 Pane，不留下 dead Pane；最后一个 Pane 关闭时窗口关闭。process 模式由程序处理 Ctrl-C/Ctrl-D，程序退出后没有 Shell 接手，Ctrl-D 不再起作用。同一窗口可混用两种模式。窗口初始化中途失败保留资源，后续进入会提示检查，可手动修复后继续使用 tmux，或显式 `twig stop PROJECT TASK` 再 `open` 重建。运行中的命令仍受 stop 确认和 rm 活动进程检查保护。
+
+快捷键、鼠标、外观继续由 `~/.tmux.conf` 管理。这里不执行 Worktree 一次性准备，也不自动复制文件或安装依赖。用户显式配置的程序可能联网或产生其他副作用，由该程序决定。
 
 ### 提交 GitHub PR / GitLab MR
 
@@ -207,7 +234,7 @@ twig pr myapp auth --title '修复登录超时' --body-file ./pr.md
 | `twig add PROJECT --path PATH [--base BRANCH] [--target BRANCH] [--root PATH]` | 登记并初始化已有仓库 |
 | `twig ls [PROJECT]` | 不带项目列出项目，带项目列出任务及实际状态 |
 | `twig new PROJECT NAME [--base BRANCH] [--no-open]` | 创建或接续任务环境，默认进入 Shell |
-| `twig open PROJECT NAME` | 进入任务窗口；缺失时重建 Shell |
+| `twig open PROJECT NAME` | 进入任务窗口；缺失时按启动配置重建 |
 | `twig stop PROJECT NAME [-y]` | 确认后关闭任务窗口及进程，保留代码和分支 |
 | `twig rm PROJECT` | 取消项目登记，保留所有资源和项目状态 |
 | `twig rm PROJECT NAME [--target BRANCH] [--keep-branch] [--delete-ignored] [-y]` | 安全移除指定任务 |
@@ -215,7 +242,7 @@ twig pr myapp auth --title '修复登录超时' --body-file ./pr.md
 
 旧 `init`、`config`、`clone`、`--repo` 已移除，不提供兼容别名；旧登记表中的 `main`、`default_remote` 和 `remotes` 字段也已移除。重复 `new` 接续已有任务，重复任务 `stop`/`rm` 不创建资源；不会接管外部已有的同名分支或 Worktree。
 
-`new` 默认与 `open` 一样进入任务窗口：普通终端 attach，在 tmux 内切换客户端；重复 `new` 也会进入已有窗口，不启动任何 AI 工具。脚本或批量创建时使用 `--no-open`。若进入失败（例如非交互终端没有 TTY），已创建的环境保留，可在交互式终端执行 `twig open PROJECT NAME`。
+`new` 默认与 `open` 一样进入任务窗口：普通终端 attach，在 tmux 内切换客户端；重复 `new` 也会进入已有窗口，不重复执行启动命令。脚本或批量创建时使用 `--no-open`。若进入失败（例如非交互终端没有 TTY），已创建的环境保留，可在交互式终端执行 `twig open PROJECT NAME`。
 
 `ls` 中 `Open` 只表示窗口存在，不表示 Codex 正在运行。`Missing` 表示 Worktree 未创建或已移除，`Mismatch` 表示目录丢失、分支变化等需要人工检查的状态。
 
@@ -264,7 +291,7 @@ twig rm myapp payment --keep-branch     # 允许保留尚未合并的分支
 主目录和全部关联 Worktree 共享配置，文件不会进入 Git 提交。Session 名为 `twig-<仓库路径哈希>`，并通过 `@twig-repo` 验证归属。窗口通过 `@twig-feature` 标记和 tmux Window ID 识别，支持数字任务名和手动重命名窗口，不依赖固定编号。不同项目即使目录名相同也能并存。
 
 - SSH 断线不影响 tmux server；重连后用 `twig open PROJECT NAME`。未进行真实 SSH 断网测试。
-- 窗口丢失：`open` 或 `new` 重建 Shell；程序和对话由用户自己恢复。
+- 窗口丢失：`open` 或 `new` 按启动配置重建；不恢复之前的进程状态或对话。
 - 创建 Worktree 成功但 tmux 失败：保留代码与记录，修复原因后重复 `new NAME`。
 - Worktree 创建本身失败：保留创建意图，排除冲突后重复 `new NAME`，或用 `rm NAME --keep-branch` 清理记录。
 - Window 创建成功但归属标记设置失败：同名窗口不会被盲目接管，检查后手动重命名或关闭它，再重试。

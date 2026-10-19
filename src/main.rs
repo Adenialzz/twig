@@ -5,6 +5,7 @@ mod console;
 mod git;
 mod pr;
 mod registry;
+mod startup;
 mod tmux;
 
 use anyhow::{Context, Result, bail, ensure};

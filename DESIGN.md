@@ -11,7 +11,7 @@
 - 名称改为 `twig`；可执行命令为 `twig`，Cargo 包名为 `twig-cli`。
 - 使用 Rust。起初曾建议 Go，以减少实现成本；用户希望尝试 Rust，因此采用 Rust，不代表性能需求迫使选用它。
 - 在 `/Users/song/JJ_Projects/twig` 独立建仓库。dotfiles 主要管理配置和轻量脚本，twig 有独立的构建、测试和迭代需求，不嵌入 dotfiles，也未添加子模块。
-- 不自动启动 Codex。`new`、`open` 都只准备 Shell，用户自行运行 Codex、Claude 或其他程序；不依赖 Codex Desktop 或 Codex CLI。
+- 默认普通 Shell；允许用户显式配置任务窗口布局和启动程序，包括 Codex/Claude，不恢复对话或管理 Agent 生命周期。
 - 删除采用保守保护，允许保留分支；没有自动合并、强制删除或远程 PR 自动处理。
 - 使用全局登记表保存项目别名与本地路径。CLI 全局化，任务操作显式指定项目和任务；克隆与 remote 管理交给 Git。
 
@@ -25,7 +25,7 @@
 
 普通任务命令不联网，不隐式 fetch、pull 或 push。创建起点必须是已有本地分支；基础分支和合并检查目标独立，例如任务可从 `feature/auth` 开始，但最终检查是否合并到 `main`。
 
-remote 名称和 URL 由 Git 管理，登记表只保存别名与路径：
+remote 名称和 URL 由 Git 管理；用户配置的 `[projects]` 保存别名与路径，`[tmux]` 保存任务窗口启动默认值：
 
 - `add PROJECT --path PATH` 登记并初始化已有仓库，可指定首次初始化的 base、target、root。相对路径在切换目录前解析；不联网。
 - 同路径复用别名，别名冲突不覆盖；初始化成功后保存登记。已存在项目配置时复用并补登记，冲突初始化选项报错，不重建窗口。
@@ -55,7 +55,7 @@ Makefile 中 `make build`（默认目标）构建 release，`make install` 只�
 
 配置与状态分为两层：
 
-1. **用户登记表**：默认 `~/.twig/config.toml`，可通过 `--config` 覆盖。保存项目别名与本地路径；首次写入时创建。不是任务状态数据库。
+1. **用户登记表**：默认 `~/.twig/config.toml`，可通过 `--config` 覆盖。保存项目别名、本地路径及可选 `[tmux]` 启动配置；首次写入时创建。不是任务状态数据库。
 2. **项目配置与任务记录**：位于登记表同目录的 `projects/<仓库 ID>/config.json` 和 `projects/<仓库 ID>/state.json`，主工作目录与全部关联 Worktree 共用。项目配置保存主目录、Worktree 根目录、基础/目标分支、Session；任务记录保存名称、分支、基础分支和路径。
 
 Git 查询决定 Worktree、分支、修改和合并的实际状态；tmux 查询决定窗口是否存在。记录只补充归属和创建意图，不替代实际检测。
@@ -69,7 +69,7 @@ Session 名由仓库共享 Git 目录的绝对路径哈希生成，并使用 `@t
 - `new` 先记录创建意图，再创建分支/Worktree/窗口。失败时报告部分成功，保留可诊断、可接续的资源。选择保留而不是强制回滚，避免误删已产生的工作。
 - 重复 `new` 复用自己登记的资源，不自动接管外部已有的同名分支或窗口。
 - `new` 默认在环境准备成功后进入窗口，重复执行也进入；`--no-open` 只准备环境，供脚本或批量创建使用。进入前释放项目锁，沿用 `open` 的 attach/switch-client 行为；进入失败保留环境并提示通过 `open` 重试。
-- `open` 复用窗口，窗口缺失时重建 Shell；不承诺恢复终端进程或 AI 对话。
+- `open` 复用窗口，窗口缺失时按启动配置重建；不恢复原终端进程状态或 AI 对话。
 - `ls` 的窗口存在状态不能被解读为 Codex 正在运行。
 - `stop` 会终止窗口内进程，需确认；它不删除 Worktree 或分支。
 - `rm` 默认拒绝未提交、未跟踪、ignored 文件、未合并分支和仍有活动进程的窗口；确认后再检查，以防等待期间发生修改。
@@ -242,3 +242,33 @@ Worktree 保留任务名的目录层级，例如 `<root>/feat/login/`。拒绝�
 控制台登记、任务创建和删除统一调用公开顶层命令，隐藏的 --print-name 仅供登记表单获取复用后的别名，移除原 __console-register 入口。补全按第一个位置参数补项目、第二个补任务，分支与 remote 来自指定项目；不推断 cwd。
 
 本次验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过，共 56 个测试（11 单元、5 补全、13 Console、8 PR/MR、19 工作流）。移除旧 clone/remote/init 专属测试，新增全局命令参数层级、缺参拒绝、取消登记保留资源、重新登记、同路径复用、别名冲突、相对路径及部分初始化重试验证；真实 Zsh Tab 与控制台 PTY、独立 tmux socket 生命周期测试通过。上一轮全局存储改动保留，本次未提交、未安装、未推送。
+
+### 任务窗口启动配置（2026-10-19）
+
+已确认并实现主仓库 `.twig/config.toml` → 用户级配置的两级 `[tmux]`，`--config` 替代默认用户文件。项目定义 `[tmux]` 时整体覆盖，未定义时继承；空 panes 明确恢复单 Shell。不按调用目录或任务分支寻找配置。内部 config.json 继续只保存项目资源参数。
+
+Pane 支持 command 参数数组、right/down 分屏、percent 和 focus；后续 Pane 分割前一个 Pane，工作目录为任务 Worktree。配置程序不经过 Shell 插值，复杂逻辑由项目脚本承担；省略 command 使用 tmux default-shell 登录 Shell。未配置布局时沿用原生 tmux 默认启动行为。新建任务窗口和缺失窗口重建应用配置；已有窗口、main 窗口、只读浏览及补全不执行。--no-open 也执行启动命令，只是不进入。
+
+配置布局先创建 Pane 再启动命令，保留退出输出；初始化部分失败使用窗口标记拒绝自动重复执行，资源保留供检查或显式 stop/open 重建。登记序列化保留 tmux 字段。用户 tmux 快捷键和外观不归 twig 管理；不增加文件复制、依赖安装或一次性初始化 hooks。显式命令可联网，twig 自身仍不隐式 fetch/pull/push。
+
+验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过，共 59 个测试。新增独立 tmux socket 测试覆盖配置覆盖/回退、登记写入保留配置、焦点和工作目录、带 Shell 特殊字符的命令参数、退出输出、窗口复用与重建、错误配置和部分初始化失败保护。分支 feat/tmux-startup；未提交、未安装，未修改用户真实配置。
+
+### 修复启动 Shell 配置继承（2026-10-19）
+
+用户实测发现默认 Shell Pane 退出码为 127：原 `show-options -v` 未读取继承的全局 default-shell，导致程序名为空。改用 `show-options -Av`，读取有效值并保留 Session 覆盖语义。新增回归测试先复现旧实现失败，再验证全局继承、Session 覆盖，以及两个 Shell Pane 均能执行输入命令且保持存活。格式检查、Clippy、全部 60 个测试通过。此前只验证 Pane 布局和配置命令输出，未覆盖默认 Shell 交互，此处补齐。
+
+已执行 make install 安装修复版；按用户授权恢复 test-tmux 任务两个已退出的 Shell Pane，保留测试 Pane 输出，没有删除或重建任务。改动未提交。
+
+### 统一为交互式 Shell（2026-10-19）
+
+用户确认每个 Pane 都是 Shell，command 仅为启动后自动执行的第一条命令。替代此前“配置命令直接占用 Pane、退出后保留 dead Pane”的方案。布局全部创建完成后启动登录 Shell，关闭 remain-on-exit，再通过 tmux 输入逐参数引用的启动命令；不重启已有窗口中的程序。参数仍保持字面含义，复杂逻辑由脚本承担。
+
+命令成功、失败或被 Ctrl-C 中断后回到同一 Shell，输出留在终端历史；空提示符下 Ctrl-D 按 Shell 设置正常退出并关闭 Pane。初始化部分失败仍保留标记和资源，避免重复执行。Shell 个人设置如忽略 EOF 或程序自行处理信号仍由用户控制。
+
+验证：格式检查、Clippy、全部 61 个测试通过。新增独立 tmux socket 测试在 sh、Bash、Zsh 下验证启动命令成功/失败后可输入、Ctrl-C 后继续交互、Ctrl-D 移除 Pane，以及带空格/引号的脚本路径和含引号、反斜杠、换行、Shell 替换字符的参数按字面传递。README、启动配置指南、AGENTS 和本项目示例配置注释已同步。
+
+### Pane 支持 shell/process 两种模式（2026-10-19）
+
+用户确认新增可选 mode，默认 shell，保留交互式 Shell 体验；process 必须提供 command，直接传递程序和参数，退出后保留 dead Pane、输出及退出状态。未知模式和缺少命令直接报错。同窗允许混用，remain-on-exit 按 Pane 单独设置，Shell 退出不会留下 dead Pane；process 不加载交互式 Shell 配置。已有窗口不转换或重复启动命令。本项目示例保持原有默认 Shell 模式。
+
+验证：格式检查、Clippy、全部 62 个测试通过。混合模式回归覆盖 process 成功/失败退出码、Ctrl-C 后保留 Pane、特殊字符参数原样传递、Shell 可输入及 Ctrl-D 关闭、重复 new 不重启已退出程序；配置校验覆盖未知模式和 process 缺少 command。原 sh/Bash/Zsh 交互回归通过。

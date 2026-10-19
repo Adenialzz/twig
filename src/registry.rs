@@ -10,6 +10,8 @@ use std::{
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Registry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux: Option<crate::startup::Layout>,
     #[serde(default)]
     pub projects: BTreeMap<String, Entry>,
 }

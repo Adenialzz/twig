@@ -1,0 +1,11 @@
+# 任务窗口创建时生效；已有窗口不会重新分屏或执行命令。
+# 详细说明见 docs/tmux-startup.md。
+[tmux]
+panes = [
+  # 左侧主 Shell，占窗口宽度约 65%，默认获得键盘焦点。
+  { focus = true },
+  # 右侧 Shell 自动运行测试；结束或 Ctrl-C 后回到提示符。
+  { split = "right", percent = 35, command = ["cargo", "test", "--locked"] },
+  # 从右侧 Pane 向下分出 40%，作为辅助 Shell。
+  { split = "down", percent = 40 },
+]

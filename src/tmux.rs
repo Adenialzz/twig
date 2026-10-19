@@ -2,7 +2,7 @@ use crate::{
     config::{Config, Project},
     git::{checked, run},
 };
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::{ffi::OsStr, path::Path, process::Command};
 
 pub fn tmux(args: &[&str]) -> Result<String> {
@@ -111,21 +111,45 @@ pub fn ensure_window(
 ) -> Result<String> {
     ensure_session(config, project)?;
     if let Some(id) = window(config, project, name)? {
+        ensure!(
+            tmux(&["show-options", "-wqv", "-t", &id, "@twig-startup-pending"])? != "1",
+            "窗口初始化未完成，已保留 Pane；请检查后手动修复，或 twig stop 后重新打开"
+        );
         return Ok(id);
     }
-    let id = tmux(&[
+    let layout = if name == "main" {
+        crate::startup::Layout::default()
+    } else {
+        crate::startup::load(config, project)?
+    };
+    let target = format!("{}:", config.session);
+    let new_target = format!("{}:={name}", config.session);
+    let mut args = vec![
         "new-window",
         "-d",
         "-P",
         "-F",
         "#{window_id}",
         "-t",
-        &format!("{}:", config.session),
+        &target,
         "-n",
         name,
         "-c",
         path.to_str().unwrap(),
-    ])?;
+    ];
+    if !layout.panes.is_empty() {
+        args.extend([
+            "",
+            ";",
+            "set-option",
+            "-w",
+            "-t",
+            &new_target,
+            "remain-on-exit",
+            "on",
+        ]);
+    }
+    let id = tmux(&args)?;
     tmux(&[
         "set-option",
         "-w",
@@ -141,6 +165,13 @@ pub fn ensure_window(
         "@twig-feature",
         name,
     ])?;
+    if !layout.panes.is_empty() {
+        tmux(&["set-option", "-w", "-t", &id, "@twig-startup-pending", "1"])?;
+        layout
+            .apply(&id, path.to_str().unwrap())
+            .context("任务窗口初始化失败，已保留窗口与输出；检查后可 stop 再 open")?;
+        tmux(&["set-option", "-wu", "-t", &id, "@twig-startup-pending"])?;
+    }
     window(config, project, name)?
         .ok_or_else(|| anyhow::anyhow!("窗口创建后未找到，请重试 twig open <项目名> {name}"))
 }
