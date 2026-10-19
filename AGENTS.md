@@ -44,3 +44,7 @@
 - 补全测试需要 Zsh（含 `zpty`、`zselect` 模块）；升级 `clap_complete` 后验证动态协议和生成的 Zsh 接入脚本。展示或排序变更须用真实 Tab/ZLE 验证，不能只检查候选输出顺序。
 - 验证范围应与改动匹配；纯文档更新检查一致性和链接，不必重复运行完整代码测试。
 - 代码变更提交前执行 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`。
+
+## 开发
+
+遵循 `CONTRIBUTING.md`
