@@ -1,3 +1,5 @@
+mod support;
+
 use std::{
     fs::{self, File},
     io::{Read, Write},
@@ -117,23 +119,21 @@ impl Fixture {
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
     fn init(&self) {
-        self.twig(&["init", "--name", "demo"]);
-        self.twig(&["new", "auth", "--no-open"]);
+        self.twig(&["add", "demo", "--path", self.repo.to_str().unwrap()]);
+        self.twig(&["new", "demo", "auth", "--no-open"]);
     }
-    fn terminal(&self, slow: bool, repo: Option<&str>) -> Pty {
+    fn terminal(&self, slow: bool) -> Pty {
         let mut command = Command::new("sh");
         self.env(&mut command);
         command.env("TWIG_SLOW_CODEX", if slow { "1" } else { "0" });
-        command.args(["-c",r#"
-if [ -n "$TWIG_SELECTED" ]; then "$TWIG_TEST_BIN" --config "$TWIG_TEST_CONFIG" --repo "$TWIG_SELECTED"; else "$TWIG_TEST_BIN" --config "$TWIG_TEST_CONFIG"; fi
+        command.args([
+            "-c",
+            r#"
+"$TWIG_TEST_BIN" --config "$TWIG_TEST_CONFIG"
 code=$?
 printf '\nTERMINAL_RESTORED:%s\n' "$code"
-"#]);
-        if let Some(name) = repo {
-            command.env("TWIG_SELECTED", name);
-        } else {
-            command.env_remove("TWIG_SELECTED");
-        }
+"#,
+        ]);
         Pty::spawn(command)
     }
 }
@@ -297,13 +297,13 @@ fn noninteractive_console_is_explicit_and_completion_remains_readonly() {
 #[test]
 fn empty_and_broken_registry_keep_terminal_usable_and_do_not_write() {
     let f = Fixture::new();
-    let mut p = f.terminal(false, None);
+    let mut p = f.terminal(false);
     p.wait("尚未登记项目");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(!f.registry.exists());
     fs::write(&f.registry, "invalid {").unwrap();
-    let mut p = f.terminal(false, None);
+    let mut p = f.terminal(false);
     p.wait("登记表读取失败");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
@@ -313,8 +313,8 @@ fn empty_and_broken_registry_keep_terminal_usable_and_do_not_write() {
 fn navigation_search_resize_and_quit_work_during_slow_queries() {
     let f = Fixture::new();
     f.init();
-    let state = fs::read(f.repo.join(".git/twig/state.json")).unwrap();
-    let mut p = f.terminal(true, Some("demo"));
+    let state = fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
+    let mut p = f.terminal(true);
     p.wait("demo");
     p.send(b"\t/auth\r");
     p.resize(65, 22);
@@ -326,17 +326,21 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
     p.wait("TERMINAL_RESTORED:0");
     assert!(start.elapsed() < Duration::from_secs(3));
     assert_eq!(
-        fs::read(f.repo.join(".git/twig/state.json")).unwrap(),
+        fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
         state
     );
-    assert!(!f.repo.join(".git/twig/lock").exists());
+    assert!(
+        !support::project_dir(&f.repo, &f.registry)
+            .join("lock")
+            .exists()
+    );
 }
 #[test]
 fn enter_main_and_task_releases_lock_and_restores_terminal() {
     let f = Fixture::new();
     f.init();
     for keys in [b"Ggg\r".as_slice(), b"G\r".as_slice()] {
-        let mut p = f.terminal(false, Some("demo"));
+        let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"\r");
         // 首次 Enter 仅进入任务区；搜索仍由 Console 处理。
@@ -361,7 +365,11 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         };
         p.wait(&format!("SELECTED_DIR:{}", expected.display()));
 
-        assert!(!f.repo.join(".git/twig/lock").exists());
+        assert!(
+            !support::project_dir(&f.repo, &f.registry)
+                .join("lock")
+                .exists()
+        );
         p.bytes.clear();
         p.text.clear();
         p.send(b"\x02d");
@@ -513,7 +521,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
         }
     }
     let guard = Stop(stop);
-    let mut p = f.terminal(false, Some("demo"));
+    let mut p = f.terminal(false);
     p.wait("LIVE_THR");
     p.send(b"h");
     p.wait("HISTORY_");
@@ -579,8 +587,10 @@ fn terminal_attributes(fd: std::os::fd::RawFd) -> libc::termios {
 fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
     let f = Fixture::new();
     f.init();
-    let cfg: serde_json::Value =
-        serde_json::from_slice(&fs::read(f.repo.join(".git/twig/config.json")).unwrap()).unwrap();
+    let cfg: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::project_dir(&f.repo, &f.registry).join("config.json")).unwrap(),
+    )
+    .unwrap();
     let target = format!("{}:main", cfg["session"].as_str().unwrap());
     let mux = |args: &[&str]| {
         let out = Command::new(&f.tmux)
@@ -609,7 +619,7 @@ fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
         "-c",
         f.temp.path().to_str().unwrap(),
     ]);
-    let mut p = f.terminal(false, Some("demo"));
+    let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\r\r");
     p.wait("无法确认归属");
@@ -619,7 +629,11 @@ fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
         mux(&["display-message", "-p", "-t", &target, "#{window_id}"]),
         foreign
     );
-    assert!(!f.repo.join(".git/twig/lock").exists());
+    assert!(
+        !support::project_dir(&f.repo, &f.registry)
+            .join("lock")
+            .exists()
+    );
 }
 
 #[test]
@@ -628,7 +642,7 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     let spaced = f.temp.path().join("repo with spaces");
     fs::rename(&f.repo, &spaced).unwrap();
     f.repo = spaced;
-    let mut p = f.terminal(false, None);
+    let mut p = f.terminal(false);
     p.wait("尚未登记项目");
     p.send(b"n");
     p.wait("登记已有仓库");
@@ -639,10 +653,10 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(!f.registry.exists());
-    assert!(!f.repo.join(".git/twig").exists());
+    assert!(!support::project_dir(&f.repo, &f.registry).exists());
     drop(p);
 
-    let mut p = f.terminal(false, None);
+    let mut p = f.terminal(false);
     p.wait("尚未登记项目");
     p.send(b"/new\r");
     p.send(
@@ -655,7 +669,11 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.wait("操作成功");
     p.wait("主工作目录");
     assert!(f.registry.exists());
-    assert!(f.repo.join(".git/twig/config.json").exists());
+    assert!(
+        support::project_dir(&f.repo, &f.registry)
+            .join("config.json")
+            .exists()
+    );
     p.bytes.clear();
     p.text.clear();
     // 创建项目后焦点已在任务区；通过候选补全打开任务表单。
@@ -663,14 +681,24 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.wait("新建任务");
     p.send(b"feat/fresh\t\x7f\x7f\x7f\x7fmissing\r");
     p.wait("基础分支不存在");
-    assert!(!f.repo.join(".git/twig/state.json").exists());
+    assert!(
+        !support::project_dir(&f.repo, &f.registry)
+            .join("state.json")
+            .exists()
+    );
     p.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fmain\r");
     p.wait("操作成功");
-    let state: serde_json::Value =
-        serde_json::from_slice(&fs::read(f.repo.join(".git/twig/state.json")).unwrap()).unwrap();
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(state["feat/fresh"]["base"], "main");
     assert!(PathBuf::from(state["feat/fresh"]["path"].as_str().unwrap()).is_dir());
-    assert!(!f.repo.join(".git/twig/lock").exists());
+    assert!(
+        !support::project_dir(&f.repo, &f.registry)
+            .join("lock")
+            .exists()
+    );
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.child.wait().unwrap().success());
@@ -680,14 +708,14 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
 fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
     let f = Fixture::new();
     f.init();
-    let config = fs::read(f.repo.join(".git/twig/config.json")).unwrap();
+    let config = fs::read(support::project_dir(&f.repo, &f.registry).join("config.json")).unwrap();
     let run = |name: &str| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
         f.env(&mut command);
         command
             .arg("--config")
             .arg(&f.registry)
-            .args(["__console-register", "--name", name, "--path"])
+            .args(["add", name, "--print-name", "--path"])
             .arg(&f.repo)
             .output()
             .unwrap()
@@ -702,7 +730,7 @@ fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
     assert!(run("again").status.success());
     assert_eq!(
         config,
-        fs::read(f.repo.join(".git/twig/config.json")).unwrap()
+        fs::read(support::project_dir(&f.repo, &f.registry).join("config.json")).unwrap()
     );
     let other = Fixture::new();
     let registry = fs::read_to_string(&f.registry).unwrap();
@@ -711,20 +739,24 @@ fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
     let result = command
         .arg("--config")
         .arg(&f.registry)
-        .args(["__console-register", "--name", "again", "--path"])
+        .args(["add", "again", "--print-name", "--path"])
         .arg(&other.repo)
         .output()
         .unwrap();
     assert!(!result.status.success());
     assert_eq!(registry, fs::read_to_string(&f.registry).unwrap());
-    assert!(!other.repo.join(".git/twig/config.json").exists());
+    assert!(
+        !support::project_dir(&other.repo, &other.registry)
+            .join("config.json")
+            .exists()
+    );
 }
 
 #[test]
 fn ctrl_w_directions_switch_lists_without_triggering_history_or_forms() {
     let f = Fixture::new();
     f.init();
-    let mut p = f.terminal(false, Some("demo"));
+    let mut p = f.terminal(false);
     p.wait("auth");
     p.resize(65, 22);
     for (keys, expected) in [
@@ -758,7 +790,7 @@ fn ctrl_w_directions_switch_lists_without_triggering_history_or_forms() {
 fn project_path_enter_validates_then_prefills_alias_without_writing() {
     let f = Fixture::new();
     fs::create_dir(f.repo.join("src")).unwrap();
-    let mut p = f.terminal(false, None);
+    let mut p = f.terminal(false);
     p.wait("尚未登记项目");
     p.send(b"n\r");
     p.wait("请输入仓库路径");
@@ -775,7 +807,7 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
     p.send(format!("{}/\r", f.repo.display()).as_bytes());
     p.wait("可修改别名");
     assert!(!f.registry.exists());
-    assert!(!f.repo.join(".git/twig").exists());
+    assert!(!support::project_dir(&f.repo, &f.registry).exists());
     // 使用默认 repo 别名直接提交；完整目录不误选子目录 src。
     p.send(b"\r");
     p.wait("操作成功");
@@ -790,10 +822,10 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
 fn delete_task_confirmation_protection_and_keep_branch() {
     let f = Fixture::new();
     f.init();
-    let state_path = f.repo.join(".git/twig/state.json");
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
-    let mut p = f.terminal(false, Some("demo"));
+    let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\r/delete\r");
     p.wait("不能删除主工作目录");
@@ -829,10 +861,10 @@ fn delete_task_confirmation_protection_and_keep_branch() {
 fn delete_task_removes_branch_and_rejects_changed_identity() {
     let f = Fixture::new();
     f.init();
-    let state_path = f.repo.join(".git/twig/state.json");
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let mut state: serde_json::Value =
         serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    let mut p = f.terminal(false, Some("demo"));
+    let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\rGd");
     p.wait("再按 d 打开删除确认");
@@ -865,13 +897,15 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
 fn delete_ignored_requires_option_and_keeps_default_cancel() {
     let f = Fixture::new();
     f.init();
-    let state: serde_json::Value =
-        serde_json::from_slice(&fs::read(f.repo.join(".git/twig/state.json")).unwrap()).unwrap();
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+    )
+    .unwrap();
     let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
     fs::write(f.repo.join(".git/info/exclude"), ".venv/\n").unwrap();
     fs::create_dir(path.join(".venv")).unwrap();
     fs::write(path.join(".venv/data"), "ignored").unwrap();
-    let mut p = f.terminal(false, Some("demo"));
+    let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\rGdd");
     p.wait("同时删除被忽略文件");

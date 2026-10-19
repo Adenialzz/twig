@@ -85,11 +85,16 @@ fn registry_path(matches: &ArgMatches) -> Result<PathBuf> {
 }
 
 fn repo_path(matches: &ArgMatches) -> Result<PathBuf> {
-    if let Some(name) = matches.get_one::<String>("repo") {
-        registry::expand(&registry::entry(&registry_path(matches)?, name)?.path)
-    } else {
-        Ok(std::env::current_dir()?)
+    let (action, command) = matches.subcommand().context("缺少命令")?;
+    if action == "add" {
+        return registry::expand(
+            command
+                .get_one::<PathBuf>("path")
+                .context("请先输入 --path")?,
+        );
     }
+    let name = command.get_one::<String>("project").context("缺少项目名")?;
+    registry::expand(&registry::entry(&registry_path(matches)?, name)?.path)
 }
 
 fn candidates(
@@ -128,10 +133,12 @@ pub fn projects(current: &OsStr) -> Vec<CompletionCandidate> {
 
 pub fn tasks(current: &OsStr) -> Vec<CompletionCandidate> {
     candidates(current, |matches| {
-        Ok(Project::discover_at(&repo_path(matches)?)?
-            .state()?
-            .into_keys()
-            .collect())
+        Ok(
+            Project::discover_at(&repo_path(matches)?, &registry_path(matches)?)?
+                .state()?
+                .into_keys()
+                .collect(),
+        )
     })
 }
 
@@ -152,20 +159,6 @@ pub fn git_remotes(current: &OsStr) -> Vec<CompletionCandidate> {
         Ok(git(&repo_path(matches)?, &["remote"])?
             .lines()
             .map(str::to_owned)
-            .collect())
-    })
-}
-
-pub fn remotes(current: &OsStr) -> Vec<CompletionCandidate> {
-    candidates(current, |matches| {
-        let mut command = matches;
-        while let Some((_, child)) = command.subcommand() {
-            command = child;
-        }
-        let name = command.get_one::<String>("project").context("缺少项目名")?;
-        Ok(registry::entry(&registry_path(matches)?, name)?
-            .remotes
-            .into_keys()
             .collect())
     })
 }

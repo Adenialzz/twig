@@ -11,11 +11,10 @@
 ## 2. 命令入口
 
 - `twig` 与 `twig console`：全局 Console，不要求调用目录为 Git 仓库。
-- `twig --repo NAME`：显示全局列表并定位 NAME，不隐藏其他项目。
 - `--config PATH`：遵循已有登记表选项，相对路径基于调用目录解析。
-- 无 `--repo` 时按调用目录定位最深匹配的已登记工作目录；否则按名称选第一项。
-- 原子命令语义保持不变。非交互 stdin/stdout 直接报错，脚本使用明确子命令。
-- 登记表不存在显示空页面与 `twig init` / 登记提示，不创建文件或锁。未知显式项目名明确报错。
+- 按调用目录定位最深匹配的已登记工作目录；否则按名称选第一项。
+- 非交互 stdin/stdout 直接报错，脚本使用 twig ls、twig ls PROJECT 等顶层命令。
+- 登记表不存在显示空页面与 `twig add NAME --path PATH` / 登记提示，不创建文件或锁。
 - 补全在 Console 分流之前处理，只读且不启动 TUI。
 
 ## 3. 界面与交互
@@ -34,7 +33,7 @@
 
 ## 4. 状态语义与归属
 
-项目来自登记表，不扫描磁盘找仓库。任务来自共享 Git 目录的状态记录；Git/tmux 查询决定实际状态。路径不存在、未初始化、配置损坏、分支变更、归属冲突单独显示；坏项目不阻止浏览其他项目。
+项目来自登记表，不扫描磁盘找仓库。任务来自登记表同目录 `projects/<仓库 ID>/` 的状态记录；Git/tmux 查询决定实际状态。路径不存在、未初始化、配置损坏、分支变更、归属冲突单独显示；坏项目不阻止浏览其他项目。
 
 Git 摘要区分暂存、未暂存、未跟踪数量，干净遵循普通 Git status，不含 ignored 文件；不等同满足删除条件。窗口存在不表示 Codex 存在。主目录行不算任务数。
 
@@ -95,7 +94,7 @@ Console 在 Project::discover 之前分流；主窗口进入需独立支持，�
 - 已实测本机 daemon 0.163.0：WebSocket 握手、loaded/list、read、cwd 过滤 list；观察到 twig 目录下 active、idle、notLoaded。0.163 CLI 默认支持共享 daemon，并提供 --no-daemon；独立服务会话不保证实时覆盖。
 - 实施时在临时目录与独立 tmux socket 打开无提示词 Codex，验证手动 CLI 的共享服务可见性；不调用模型或发测试任务。等待审批/输入通过模拟协议验证，避免向真实会话发消息。
 - 测试使用临时登记表、临时 Git 仓库、独立 tmux server、模拟 Codex CLI 与 Unix WebSocket 服务，不写真实用户配置。
-- 覆盖裸命令仓库外执行、--repo/--config、空/损坏配置、缺失路径、子目录、同名前缀、多会话、分页、未知状态、断连重连、陈旧标记、服务不可用。
+- 覆盖裸命令仓库外执行、--config、空/损坏配置、缺失路径、子目录、同名前缀、多会话、分页、未知状态、断连重连、陈旧标记、服务不可用。
 - 模拟服务记录所有请求，断言无 start/resume/审批/写入。网络静默、进程超时测试验证退出有界。
 - 真实 PTY 验证搜索/选择/Enter/退出、尺寸变更、终端模式恢复；进入测试覆盖跨 Session、主窗口、窗口重建与归属冲突。
 - 运行 cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked。同步 README/DESIGN/AGENTS 与补全。
@@ -128,7 +127,7 @@ Console 在 Project::discover 之前分流；主窗口进入需独立支持，�
 
 项目区 n 登记已有 Git 仓库（路径、别名），任务区 n 新建任务（名称、已有本地起点分支，默认项目配置）；会话区 n 保留历史下一页。Tab 切字段、Esc 取消；登记路径字段 Enter 校验并默认填入主仓库目录名作为别名，别名字段 Enter 提交，任务表单 Enter 提交。成功后留在控制台并选中结果，不自动进入 Shell。
 
-form.rs 管理表单与独立 twig 子进程：任务调用既有 new --no-open；项目使用隐藏的 __console-register 进程入口，复用 registry::initialize 与 init。cwd 变更只发生于子进程；已初始化仓库补登记、同路径复用、别名冲突不覆盖。不改变普通重复 init 的只读行为，不新增空仓库创建或远程克隆。
+form.rs 管理表单与独立 twig 子进程：任务调用 new PROJECT NAME --no-open；项目调用 add NAME --path PATH --print-name，复用 CLI 登记与初始化逻辑。cwd 变更只发生于子进程；已初始化仓库补登记、同路径复用、别名冲突不覆盖。不新增空仓库创建或远程克隆。
 
 子进程参数逐个传递，stdin 关闭，输出写临时文件避免堵塞管道和打乱终端，主循环轮询完成状态。写操作不使用浏览查询的 2 秒超时，不强杀；执行期间禁止重复提交和退出，错误保留表单及已有资源。表单支持窄终端、长字段末尾可见及 PgUp/PgDn 滚动错误。
 

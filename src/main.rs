@@ -20,10 +20,7 @@ use std::{
 #[derive(Parser)]
 #[command(name = "twig", version, about = "Git Worktree + tmux 任务环境管理")]
 struct Cli {
-    /// 在任意目录操作已登记项目
-    #[arg(long, global = true, add = ArgValueCompleter::new(completion::projects))]
-    repo: Option<String>,
-    /// 使用其他登记表（默认 ~/.twig/config.toml）
+    /// 使用其他登记表及同目录项目状态（默认 ~/.twig/config.toml）
     #[arg(long, global = true)]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -34,39 +31,24 @@ struct Cli {
 enum Action {
     /// 全局项目、任务与 Codex 会话控制台
     Console,
-    /// 控制台登记表单的独立进程入口
-    #[command(name = "__console-register", hide = true)]
-    ConsoleRegister {
-        #[arg(long)]
+    /// 登记并初始化已有 Git 仓库（不联网）
+    Add {
+        name: String,
+        #[arg(long, value_hint = clap::ValueHint::DirPath)]
         path: PathBuf,
-        #[arg(long)]
-        name: String,
-    },
-    /// 管理用户级项目登记表
-    Config {
-        #[command(subcommand)]
-        command: registry::Action,
-    },
-    /// 克隆登记的项目、添加 remotes 并初始化 twig
-    Clone {
-        #[arg(add = ArgValueCompleter::new(completion::projects))]
-        name: String,
-    },
-    /// 初始化项目（不修改 Git 分支，不拉取远端）
-    Init {
-        /// 全局登记别名，默认使用主仓库目录名
-        #[arg(long)]
-        name: Option<String>,
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
-        /// 默认合并目标，默认与基础分支相同
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         target: Option<String>,
         #[arg(long, value_hint = clap::ValueHint::DirPath)]
         root: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        print_name: bool,
     },
     /// 创建并进入任务 Shell 窗口；重复执行接续已有环境
     New {
+        #[arg(add = ArgValueCompleter::new(completion::projects))]
+        project: String,
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
@@ -75,26 +57,35 @@ enum Action {
         #[arg(long)]
         no_open: bool,
     },
-    /// 列出由 twig 管理的任务及实际状态
-    Ls,
+    /// 列出项目；指定项目时列出其任务及实际状态
+    Ls {
+        #[arg(add = ArgValueCompleter::new(completion::projects))]
+        project: Option<String>,
+    },
     /// 查找或创建草稿 PR/MR；仅 --push 才推送提交
     Pr(pr::Args),
     /// 进入任务窗口；窗口丢失时重建 Shell
     Open {
+        #[arg(add = ArgValueCompleter::new(completion::projects))]
+        project: String,
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
     },
     /// 关闭窗口及其中的进程，保留 Worktree 和分支
     Stop {
+        #[arg(add = ArgValueCompleter::new(completion::projects))]
+        project: String,
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
         #[arg(short = 'y', long)]
         yes: bool,
     },
-    /// 安全移除 Worktree 和已合并分支
+    /// 取消项目登记；指定任务时安全删除该任务
     Rm {
+        #[arg(add = ArgValueCompleter::new(completion::projects))]
+        project: String,
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
-        name: String,
+        name: Option<String>,
         #[command(flatten)]
         options: RemoveOptions,
         /// 控制台确认时的仓库、分支和路径快照
@@ -128,77 +119,63 @@ fn main() {
 
 fn execute(cli: Cli) -> Result<()> {
     let invocation_dir = std::env::current_dir()?;
-    let action = match cli.command.unwrap_or(Action::Console) {
-        Action::Console => {
-            return console::run(registry::location(cli.config)?, cli.repo, invocation_dir);
+    let registry_path = registry::location(cli.config)?;
+    let action = cli.command.unwrap_or(Action::Console);
+    match action {
+        Action::Console => return console::run(registry_path, invocation_dir),
+        Action::Add {
+            name,
+            path,
+            base,
+            target,
+            root,
+            print_name,
+        } => {
+            let name = registry::add(&registry_path, &path, name, base, target, root)?;
+            if print_name {
+                println!("{}", serde_json::to_string(&name)?);
+            }
+            return Ok(());
         }
-        Action::ConsoleRegister { path, name } => {
-            ensure!(cli.repo.is_none(), "登记表单不接受 --repo");
-            return console::form::register(&registry::location(cli.config)?, &path, name);
-        }
-        Action::Config { command } => {
+        Action::Ls { project: None } => return registry::list(&registry_path),
+        Action::Rm {
+            ref project,
+            name: None,
+            ref options,
+            ref expected_task,
+        } => {
             ensure!(
-                cli.repo.is_none(),
-                "config 命令直接使用项目名，不需要 --repo"
+                !options.keep_branch
+                    && !options.delete_ignored
+                    && options.target.is_none()
+                    && options.expected_ignored.is_none()
+                    && expected_task.is_none(),
+                "任务删除选项必须指定任务名；取消登记请使用 twig rm <项目名>"
             );
-            return registry::execute(&registry::location(cli.config)?, command);
+            return registry::remove(&registry_path, project);
         }
-        Action::Clone { name } => {
-            ensure!(
-                cli.repo.is_none(),
-                "clone 命令直接使用项目名，不需要 --repo"
-            );
-            let path = registry::location(cli.config)?;
-            let entry = registry::entry(&path, &name)?;
-            return registry::clone(&entry);
-        }
-        action => action,
-    };
-    let registry_path = if cli.repo.is_some() || matches!(action, Action::Init { .. }) {
-        Some(registry::location(cli.config)?)
-    } else {
-        None
-    };
-    let registered = if let Some(name) = &cli.repo {
-        let entry = registry::entry(registry_path.as_ref().unwrap(), name)?;
-        let path = registry::expand(&entry.path)?;
-        std::env::set_current_dir(&path).with_context(|| {
-            format!(
-                "无法进入 {}；尚未克隆时请运行 twig clone {name}",
-                path.display()
-            )
-        })?;
-        let root = git(&path, &["rev-parse", "--show-toplevel"])?;
-        ensure!(
-            PathBuf::from(root).canonicalize()? == path.canonicalize()?,
-            "登记路径不是仓库根目录"
-        );
-        Some(entry)
-    } else {
-        None
-    };
-    let project = Project::discover()?;
-    if matches!(action, Action::Init { .. }) && project.dir.join("config.json").try_exists()? {
-        println!("当前项目已经初始化，无需重复执行。");
-        return Ok(());
+        _ => {}
     }
+    let project_name = match &action {
+        Action::New { project, .. }
+        | Action::Open { project, .. }
+        | Action::Stop { project, .. }
+        | Action::Rm { project, .. } => project,
+        Action::Ls {
+            project: Some(project),
+        } => project,
+        Action::Pr(args) => &args.project,
+        _ => unreachable!(),
+    };
+    let entry = registry::entry(&registry_path, project_name)?;
+    let path = registry::expand(&entry.path)?;
+    let root = git(&path, &["rev-parse", "--show-toplevel"])?;
+    ensure!(
+        PathBuf::from(root).canonicalize()? == path.canonicalize()?,
+        "登记路径不是仓库根目录"
+    );
+    let project = Project::discover_at(&path, &registry_path)?;
     let lock = project.lock()?;
-    if let Action::Init {
-        name,
-        base,
-        target,
-        root,
-    } = action
-    {
-        let base = base.or_else(|| registered.as_ref().map(|r| r.main.clone()));
-        let target = target.or_else(|| registered.as_ref().map(|r| r.main.clone()));
-        return registry::initialize(
-            registry_path.as_ref().unwrap(),
-            name.or(cli.repo),
-            &project,
-            || init(&project, base, target, root),
-        );
-    }
     let config = project.config()?;
     let mut state = project.state()?;
     match action {
@@ -206,8 +183,9 @@ fn execute(cli: Cli) -> Result<()> {
             name,
             base,
             no_open,
+            project: alias,
         } => {
-            let window = new(&project, &config, &mut state, &name, base)?;
+            let window = new(&project, &config, &mut state, &alias, &name, base)?;
             drop(lock); // attach 不能持有项目锁。
             if no_open {
                 Ok(())
@@ -215,19 +193,19 @@ fn execute(cli: Cli) -> Result<()> {
                 tmux::enter(&config, &window)
             }
         }
-        Action::Ls => list(&project, &config, &state),
+        Action::Ls { .. } => list(&project, &config, &state),
         Action::Pr(args) => pr::execute(&config, &state, &invocation_dir, args),
-        Action::Open { name } => {
+        Action::Open { name, .. } => {
             let feature = feature(&state, &name)?;
             ensure!(
                 check_worktree(&config, feature)?,
-                "Worktree 不存在；请检查 twig ls，必要时重试 twig new {name}"
+                "Worktree 不存在；请检查 twig ls <项目名>，必要时重试 twig new <项目名> {name}"
             );
             let window = tmux::ensure_window(&config, &project, &name, &feature.path)?;
             drop(lock); // attach 不能持有项目锁。
             tmux::enter(&config, &window)
         }
-        Action::Stop { name, yes } => {
+        Action::Stop { name, yes, .. } => {
             feature(&state, &name)?;
             if let Some(window) = tmux::window(&config, &project, &name)? {
                 confirm(&format!("关闭 {name} 窗口并终止其中的全部进程？"), yes)?;
@@ -240,7 +218,9 @@ fn execute(cli: Cli) -> Result<()> {
             name,
             options,
             expected_task,
+            ..
         } => {
+            let name = name.unwrap();
             if let Some(expected) = expected_task {
                 let (common, branch, path): (PathBuf, String, PathBuf) =
                     serde_json::from_str(&expected)?;
@@ -252,13 +232,7 @@ fn execute(cli: Cli) -> Result<()> {
             }
             remove(&project, &config, &mut state, &name, &options)
         }
-        Action::Console
-        | Action::ConsoleRegister { .. }
-        | Action::Init { .. }
-        | Action::Config { .. }
-        | Action::Clone { .. } => {
-            unreachable!()
-        }
+        Action::Console | Action::Add { .. } => unreachable!(),
     }
 }
 
@@ -277,7 +251,6 @@ fn init(
             "项目已初始化；如需修改配置，请编辑 {}",
             project.dir.join("config.json").display()
         );
-        tmux::ensure_session(&config, project)?;
         println!("项目已初始化：{}", project.dir.display());
         return Ok(());
     }
@@ -330,9 +303,8 @@ fn init(
         session: config::session(&project.common),
     };
     project.save("config.json", &config)?;
-    tmux::ensure_session(&config, project).context(
-        "配置已保存；修复 tmux 后可通过 new/open 创建窗口；全局登记缺失时请手动补充登记表",
-    )?;
+    tmux::ensure_session(&config, project)
+        .context("配置已保存；修复 tmux 后可通过 new/open 创建窗口；登记未完成时可重试 twig add")?;
     println!(
         "已初始化：{}\nWorktree 根目录：{}\ntmux Session：{}",
         project.dir.display(),
@@ -346,7 +318,7 @@ fn feature<'a>(state: &'a State, name: &str) -> Result<&'a Feature> {
     config::task_name(name)?;
     state
         .get(name)
-        .with_context(|| format!("没有任务 {name}，请运行 twig ls"))
+        .with_context(|| format!("没有任务 {name}，请运行 twig ls <项目名>"))
 }
 
 fn check_worktree(config: &Config, feature: &Feature) -> Result<bool> {
@@ -418,6 +390,7 @@ fn new(
     project: &Project,
     config: &Config,
     state: &mut State,
+    alias: &str,
     name: &str,
     base: Option<String>,
 ) -> Result<String> {
@@ -480,12 +453,12 @@ fn new(
     }
     let window = tmux::ensure_window(config, project, name, &feature.path).with_context(|| {
         format!(
-            "Worktree 已保留在 {}；修复后执行 twig new {name} 或 twig open {name}",
+            "Worktree 已保留在 {}；修复后执行 twig new {alias} {name} 或 twig open {alias} {name}",
             feature.path.display()
         )
     })?;
     println!(
-        "{name}\n分支：{}\n目录：{}\n进入：twig open {name}",
+        "{name}\n分支：{}\n目录：{}\n进入：twig open {alias} {name}",
         feature.branch,
         feature.path.display()
     );

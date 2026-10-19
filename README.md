@@ -45,21 +45,20 @@ source <(COMPLETE=zsh twig)
 
 | 输入后按 Tab | 候选来源 |
 | --- | --- |
-| `twig open ` / `stop ` / `rm ` / `new ` | 项目已有任务；`new` 仍可输入新名称 |
-| `twig pr `、`twig pr --remote `、`twig pr --provider ` | 已有任务、本地 Git remote、GitHub/GitLab 平台 |
-| `twig --repo `、`twig clone ` | 用户登记表中的项目名 |
-| `twig config show ` / `remove `、`twig config remote add/remove/default ` | 已登记项目名 |
-| `twig config remote remove demo ` / `default demo ` | demo 登记的 remote 名 |
-| `twig new auth --base `、`twig init --base ` / `--target `、`twig rm auth --target ` | 已有本地分支，不含远端跟踪分支 |
-| `--config `、`--root `、`config add` 的 `--path ` | 文件或目录路径 |
+| `twig ls ` / `new ` / `open ` / `stop ` / `rm ` / `pr ` | 已登记项目别名 |
+| `twig open myapp ` / `new myapp ` / `stop myapp ` / `rm myapp ` / `pr myapp ` | 该项目的已有任务；`new` 仍可输入新名称 |
+| `twig new myapp auth --base `、`twig rm myapp auth --target ` | 该项目已有本地分支，不含远端跟踪分支 |
+| `twig add myapp --path /repo --base ` / `--target ` | 指定路径的已有本地分支 |
+| `twig pr myapp auth --remote ` / `--provider ` | Git 实际 remote / 支持的平台 |
+| `--config `、`--path `、`--root ` | 文件或目录路径 |
 
-动态候选按已输入前缀过滤，并识别光标前的 `--repo NAME`、`--config PATH`（也支持 `--repo=NAME`、`--config=PATH`）。例如 `twig --repo myapp open <Tab>` 可以在任意目录补全该项目的任务。关联 Worktree 共用任务候选。
+动态候选按输入前缀过滤，识别光标前的项目别名和 `--config PATH`（也支持 `--config=PATH`）。从任意目录操作同一别名，任务候选相同。
 
 带空格的配置路径可使用单引号、双引号或反斜杠转义。目录补全支持空格、冒号及 `--root=PATH` 写法，保留末尾 `/`，可以继续输入并补全子目录。
 
-`twig open <Tab>`（以及 `new`、`stop`、`rm`）先展示任务名，再展示带说明的选项；Tab 选择也优先任务名。任务按名称字典序排列。输入 `twig open a<Tab>` 只匹配该前缀的任务，输入 `twig open --<Tab>` 只显示选项。升级后在当前 Zsh 重新执行 `source <(COMPLETE=zsh twig)` 即可加载新的展示规则。
+`twig open myapp <Tab>`（以及 `new`、`stop`、`rm`）先展示任务名，再展示带说明的选项；Tab 选择也优先任务名。任务按名称字典序排列。输入 `twig open myapp a<Tab>` 只匹配该前缀的任务，输入 `twig open myapp --<Tab>` 只显示选项。升级后在当前 Zsh 重新执行 `source <(COMPLETE=zsh twig)` 即可加载新的展示规则。
 
-补全只读本地数据，不联网、不创建配置或锁、不调用 tmux，也不执行正在输入的任务命令。非仓库目录、未初始化项目或未登记项目可能没有相应候选；配置损坏时不会修改或覆盖文件。
+补全只读本地数据，不联网、不创建配置或锁、不调用 tmux，也不执行正在输入的任务命令。未初始化、未登记或路径缺失的项目可能没有相应候选；配置损坏时不会修改或覆盖文件。
 
 ## 全局 Console（控制台）
 
@@ -69,7 +68,6 @@ source <(COMPLETE=zsh twig)
 
 ```bash
 twig                          # 全局面板；按当前目录定位项目/任务
-twig --repo myapp              # 选中 myapp，仍显示其他项目
 twig --config ./config.toml    # 指定登记表
 ```
 
@@ -93,7 +91,7 @@ twig --config ./config.toml    # 指定登记表
 
 创建成功后选中新项目/任务并留在控制台，按 `Enter` 再进入 Shell。执行期间显示进度提示，等待操作结束，不强制取消；失败保留输入和已创建资源，修正后可重试。新建空仓库与远程克隆暂未纳入表单。
 
-从普通终端进入 tmux 后，detach 会返回 Console，保留项目、任务选择和焦点；从 tmux 内进入时切换到目标窗口，Console 留在原窗口，切回即可继续使用。退出面板保留原有 Shell 和 Agent。非交互环境明确报错，脚本继续使用 `config list`、`--repo NAME ls` 等子命令。
+从普通终端进入 tmux 后，detach 会返回 Console，保留项目、任务选择和焦点；从 tmux 内进入时切换到目标窗口，Console 留在原窗口，切回即可继续使用。退出面板保留原有 Shell 和 Agent。非交互环境明确报错，脚本继续使用 `ls`、`ls myapp` 等子命令。
 
 `/` 默认实时搜索当前列表，同时显示 `/new`、`/delete`、`/refresh`、`/help`、`/quit` 的前缀匹配候选，不默认选中。用上下键选择、`Tab` 补全、`Enter` 执行选中项；没有选中时，只有完整关键字触发命令，否则确认搜索。`//new` 强制搜索文本 `new`。`Esc` 取消输入，命令执行和取消都会恢复输入前的筛选与选择。`/new` 按原焦点打开项目登记或任务表单，会话区只提示切区。
 
@@ -115,72 +113,56 @@ twig --config ./config.toml    # 指定登记表
 
 ## 使用
 
-### 登记常用项目与多个 remote
+### 登记项目与创建任务
 
-用户级登记表默认位于 `~/.twig/config.toml`。首次写入时自动创建目录和文件，也可以直接编辑 TOML：
-
-```toml
-[projects.myapp]
-path = "~/projects/myapp"
-main = "main"
-default_remote = "origin"
-
-[projects.myapp.remotes]
-origin = "git@github.com:yourname/myapp.git"
-upstream = "git@github.com:team/myapp.git"
-```
-
-用命令登记和克隆：
+所有项目名都是登记别名，不要求与目录名或远程仓库名相同。任务命令必须显式指定项目，不按当前目录推断；`ls` 不带项目列出项目，带项目列出该项目的任务。
 
 ```bash
-twig config add myapp \
-  --url git@github.com:yourname/myapp.git \
-  --path ~/projects/myapp \
-  --main main
-twig config remote add myapp upstream git@github.com:team/myapp.git
-
-twig config list
-twig config show myapp
-twig clone myapp
-
-# 在任意目录使用，不需要先 cd
-twig --repo myapp new auth
-twig --repo myapp ls
-twig --repo myapp open auth
-```
-
-`config add` 的 `--remote` 默认是 `origin`，`--main` 默认是 `main`；`--path` 必填，相对路径在登记时转换为相对于调用目录的绝对路径。手动编辑 TOML 时，项目路径使用绝对路径或 `~/` 开头。项目名和 remote 名使用字母、数字、横线或下划线，并以字母或数字开头。
-
-```bash
-twig config remote default myapp upstream  # 设置首次 clone 的来源
-twig config remote remove myapp origin     # 默认 remote 需先切换才能移除
-twig config remove myapp                   # 仅取消登记，保留仓库、remote 和任务
-```
-
-登记操作不联网，不要求本地仓库已经存在，也不修改现有 Git remote。修改已有项目的路径、URL 或主分支可直接编辑 TOML；命令写入会重新序列化整个登记表，不保留手写注释。
-
-`clone` 使用 `default_remote` 对应的 URL，克隆并检出 `main` 指定的分支，保留 Git 的进度和认证交互，再添加其他 remote 并初始化 twig。其他 remote 只添加配置，不自动 fetch。认证复用 Git、SSH 和 credential helper，不由 twig 保存凭据。
-
-目标路径已存在时，只允许接续默认 remote URL 完全匹配、主分支存在的仓库；登记表中已存在的 remote 都会先核对 URL。不会覆盖目录、改写不同的 URL、切换已有分支或拉取更新。额外的 Git remote 会保留。若初始化失败，仓库保留，可修复原因后重新执行 `twig clone myapp`。仓库已有 twig 配置但基础/目标分支与登记的主分支冲突时，会报错而不覆盖。
-
-已有本地仓库可以只登记，再执行 `twig --repo myapp init`；此时不需要 `clone`，也不会修改 Git remote。登记主分支只作为首次初始化默认值；初始化后，任务仍以项目自身配置和实际 Git 状态为准。更新登记表不会自动同步到已有仓库；显式重试 `clone` 会核对 remote 并添加缺少的 remote，不删除其他 remote。
-
-需要独立登记表时可用 `twig --config /path/to/config.toml ...`，例如用于测试或不同机器配置；不带 `--repo` 的任务命令仍按当前目录识别项目；`init` 会向选定的登记表自动登记。
-
-### 直接使用当前仓库
-
-在已有、至少有一个提交的普通 Git 仓库中运行：
-
-```bash
-twig init                         # 优先 main，其次 master；自动登记项目
-twig new auth                     # 创建 auth 和 Shell 窗口，并进入
-twig new search --no-open          # 只创建环境，留在当前终端
-twig ls
-twig open auth                    # 在普通终端 attach，在 tmux 内 switch-client
+# 在任意目录登记已有、至少有一个提交的 Git 仓库
+twig add myapp --path ~/projects/myapp
+twig ls                           # 列出项目
+twig ls myapp                     # 列出项目中的任务
+twig new myapp auth               # 创建任务并进入 Shell
+twig new myapp search --no-open    # 只创建环境
+twig open myapp auth              # 进入已有任务
 # 在窗口中手动运行 codex 等程序
 ```
 
-默认目录结构，无需移动原仓库：
+`add` 同时初始化项目环境并登记路径，首次初始化优先使用本地 `main`，其次 `master`。不会创建仓库或自动克隆，不要求 remote；需要远程仓库时先执行 `git clone`，remote 也通过 Git 自行管理。
+
+```bash
+git clone git@github.com:yourname/myapp.git ~/projects/myapp
+twig add myapp --path ~/projects/myapp
+
+# 首次初始化时自定义；相对路径基于命令调用目录
+twig add myapp --path ~/projects/myapp --base develop --target main --root ../my-worktrees
+twig new myapp feat/login --base auth
+twig new myapp fix/bug
+```
+
+项目别名为 1–64 位 ASCII 字母、数字、横线或下划线，首位须为字母或数字。`--path` 必填，支持 `~/`、绝对路径和相对路径；关联 Worktree 或子目录会定位到主仓库。同路径复用已有别名，不新建别名；别名指向其他仓库时拒绝覆盖。
+
+已初始化时 `add` 复用项目配置并补充登记，不重建窗口；传入冲突的基础/目标分支或重新指定根目录会报错。初始化失败保留资源，修复后可再次 `add` 补登记，再用 `new`/`open` 或控制台 Enter 准备窗口。修改已有项目配置请编辑 `config.json`。
+
+登记表默认位于 `~/.twig/config.toml`，只保存别名和本地路径：
+
+```toml
+[projects.myapp]
+path = "/path/to/myapp"
+```
+
+手动编辑时路径须为绝对路径或 `~/` 开头。命令写入会重新序列化 TOML，不保留手写注释。基础分支、合并目标和 Worktree 根目录保存在项目配置中，remote 以 Git 为准。
+
+```bash
+twig rm myapp                     # 仅取消项目登记，保留仓库、任务、窗口和状态
+twig rm myapp auth                # 安全删除具体任务
+```
+
+取消登记后，可用 `add` 重新登记并继续访问已有任务。任务删除选项如 `--keep-branch`、`--delete-ignored`、`--target` 必须同时指定任务名，不能用于取消项目登记。
+
+通过 `twig --config /path/to/config.toml ...` 选择其他登记表。登记表所在目录也是数据根目录，不同目录隔离项目配置与任务记录，同目录的登记表共享状态；Git、Worktree、tmux 等外部资源仍共享。
+
+默认目录结构无需移动原仓库：
 
 ```text
 projects/
@@ -190,39 +172,24 @@ projects/
     └── search/
 ```
 
-首次 `init` 成功后自动写入 `~/.twig/config.toml`（或 `--config` 指定的文件），默认用主仓库目录名作为别名，此后可在任意目录使用 `twig --repo myapp ...`。目录名不符合项目命名规则或与其他路径重名时，用 `init --name myapp` 指定别名。冲突会在创建项目配置、Worktree 根目录和 Session 前报错。
+Worktree 根目录必须与主工作目录分离，不能相互包含。`--base` 必须为已有本地分支；`--target` 用于安全删除的合并检查，默认等于基础分支。不自动 fetch、pull、push 或修改主分支。
 
-同一路径已经登记时复用原别名和登记内容，不新增别名、不覆盖主分支或 remote；在关联 Worktree 内执行也登记主仓库。已有项目配置时，重复 `init` 只提示“当前项目已经初始化，无需重复执行。”并成功退出，不补登记、不操作 tmux、不创建锁，也不处理传入的初始化参数。新登记的 `main` 取项目基础分支，remote 留空，不自动导入 Git remote；首次 `config remote add` 会同时设为默认 remote，未配置默认 remote 时 `clone` 会明确报错。
-
-初始化失败时不写入新登记，已创建的项目资源保留。若尚未保存项目配置，可修复后重试 `init`；若 `config.json` 已存在，重复 `init` 也只提示退出。此时缺失的全局登记需手动补充登记表，tmux 修复后可用 `new`/`open` 创建窗口。全局登记保存失败时也需手动补充登记表。
-
-可在初始化时自定义：
-
-```bash
-twig init --name myapp --base develop --target main --root ../my-worktrees
-twig new feat/login --base auth
-twig new fix/bug
-```
-
-`--base` 必须是已有本地分支。`--target` 是安全删除时检查的合并目标，与任务创建来源独立。默认合并目标等于初始化时的基础分支。不自动 fetch、pull、push 或修改主分支。
-
-Worktree 根目录必须与主工作目录分离，不能相互包含。新任务名与分支名一致，不自动添加前缀，例如 `auth`、`feat/login`、`fix/bug`。任务名总长为 1–64 位，可用 `/` 分段；每段为 ASCII 字母、数字、`-` 或 `_`，以字母或数字开头，不允许空段。`feat/login` 的目录为 `<root>/feat/login/`，tmux 窗口名也是 `feat/login`。已有任务继续使用登记的分支与路径，不自动改名；`main` 保留给主窗口。
+任务名直接作为分支名，不自动添加前缀。总长为 1–64 位，可用 `/` 分段；每段为 ASCII 字母、数字、横线或下划线，并以字母或数字开头，不允许空段。`feat/login` 对应 `<root>/feat/login/`，tmux 窗口名也是 `feat/login`；`main` 保留给主窗口。已有任务使用登记的分支与路径，不自动改名。
 
 ### 提交 GitHub PR / GitLab MR
 
 统一使用 `twig pr`，分别调用已安装并登录的 [GitHub CLI `gh`](https://cli.github.com/manual/gh_pr_create) 或 [GitLab CLI `glab`](https://docs.gitlab.com/cli/mr/create/)。Git 推送仍使用 Git 自身的认证；twig 不保存凭据。
 
 ```bash
-twig pr                         # 在任务 Worktree（或其子目录）查找或创建草稿
-twig pr auth --push              # 推送 auth 的已提交内容，再查找或创建
-twig --repo myapp pr auth --push  # 从任意目录操作已登记项目
-twig pr --remote origin --target main
-twig pr --provider gitlab        # 自建 GitLab；自建 GitHub 使用 github
-twig pr --title '修复登录超时' --body-file ./pr.md
+twig pr myapp auth                       # 查找或创建草稿
+twig pr myapp auth --push                # 推送提交，再查找或创建
+twig pr myapp auth --remote origin --target main
+twig pr myapp auth --provider gitlab      # 自建平台需指定
+twig pr myapp auth --title '修复登录超时' --body-file ./pr.md
 ```
 
-- 省略任务名时按调用目录识别已登记的任务 Worktree；在主工作目录或其他目录需指定任务名。操作前验证 Worktree 归属和分支。
-- remote 优先使用显式 `--remote`，否则使用任务分支的 upstream remote；没有 upstream 时仅在存在唯一 remote 的情况下自动选择。登记表的 `default_remote` 只用于 clone，不决定 PR/MR 的 remote。
+- 项目别名与任务名均必填，不按当前目录猜测目标。操作前验证 Worktree 归属和分支。
+- remote 优先使用显式 `--remote`，否则使用任务分支的 upstream remote；没有 upstream 时仅在存在唯一 remote 的情况下自动选择。
 - 若选中 upstream remote，源分支使用 upstream 对应的远端分支名；否则使用任务分支的同名远端分支。目标默认为项目配置的 `target`，可用 `--target` 覆盖。
 - 根据 remote URL 自动识别 `github.com` / `gitlab.com`；其他域名必须指定 `--provider`。支持常见 HTTPS、HTTP、`git@host:group/repo.git` 和 `ssh://git@host:port/group/repo.git`，以及 GitLab 多级 subgroup。SSH 端口不作为平台 API 端口；不解析 SSH 主机别名、IPv6 地址或本地路径 remote。
 - 查找同仓库、同源分支、同目标分支的**开放中** PR/MR。已有时输出链接，不重复创建，也不修改标题、正文或草稿状态；已关闭或合并的请求不复用。不带 `--push` 的已有请求查询不会同步本地新提交。
@@ -237,20 +204,18 @@ twig pr --title '修复登录超时' --body-file ./pr.md
 | 命令 | 行为 |
 | --- | --- |
 | `twig` / `twig console` | 全局项目、任务与 Codex 状态面板 |
-| `twig config add/list/show/remove` | 登记、查看和取消登记项目，不联网 |
-| `twig config remote add/remove/default` | 管理项目的多个 remote 和默认克隆来源 |
-| `twig clone NAME` | 克隆或接续已登记项目，配置 remote 并初始化 twig |
-| `twig init [--name NAME] [--base BRANCH] [--target BRANCH] [--root PATH]` | 保存项目配置、创建主 Session 并自动登记 |
-| `twig new NAME [--base BRANCH] [--no-open]` | 创建或接续任务环境并进入 Shell；`--no-open` 只准备环境 |
-| `twig ls` | 列出 twig 登记的任务、实际 Git 状态与窗口状态 |
-| `twig pr [NAME] [--push] [--remote REMOTE] [--target BRANCH] [--provider github\|gitlab]` | 联网查找或创建草稿 PR/MR；推送必须显式指定 |
-| `twig open NAME` | 进入窗口；缺失时重建 Shell，不恢复进程或对话 |
-| `twig stop NAME [-y]` | 确认后关闭窗口并终止其进程，保留代码和分支 |
-| `twig rm NAME [--target BRANCH] [--keep-branch] [-y]` | 检查安全条件后移除任务 |
+| `twig add PROJECT --path PATH [--base BRANCH] [--target BRANCH] [--root PATH]` | 登记并初始化已有仓库 |
+| `twig ls [PROJECT]` | 不带项目列出项目，带项目列出任务及实际状态 |
+| `twig new PROJECT NAME [--base BRANCH] [--no-open]` | 创建或接续任务环境，默认进入 Shell |
+| `twig open PROJECT NAME` | 进入任务窗口；缺失时重建 Shell |
+| `twig stop PROJECT NAME [-y]` | 确认后关闭任务窗口及进程，保留代码和分支 |
+| `twig rm PROJECT` | 取消项目登记，保留所有资源和项目状态 |
+| `twig rm PROJECT NAME [--target BRANCH] [--keep-branch] [--delete-ignored] [-y]` | 安全移除指定任务 |
+| `twig pr PROJECT NAME [--push] [--remote REMOTE] [--target BRANCH] [--provider github\|gitlab]` | 查找或创建草稿 PR/MR，推送必须显式指定 |
 
-重复 `init` 只提示已初始化并退出，重复 `new` 复用已登记资源，重复 `stop`/`rm` 不会创建资源。不会接管外部已有的同名分支或 Worktree。修改已有初始化配置需要编辑下述 `config.json`，不是重新传 `init` 参数。
+旧 `init`、`config`、`clone`、`--repo` 已移除，不提供兼容别名；旧登记表中的 `main`、`default_remote` 和 `remotes` 字段也已移除。重复 `new` 接续已有任务，重复任务 `stop`/`rm` 不创建资源；不会接管外部已有的同名分支或 Worktree。
 
-`new` 默认与 `open` 一样进入任务窗口：普通终端 attach，在 tmux 内切换客户端；重复 `new` 也会进入已有窗口，不启动任何 AI 工具。脚本或批量创建时使用 `--no-open`。若进入失败（例如非交互终端没有 TTY），已创建的环境保留，可在交互式终端执行 `twig open NAME`。
+`new` 默认与 `open` 一样进入任务窗口：普通终端 attach，在 tmux 内切换客户端；重复 `new` 也会进入已有窗口，不启动任何 AI 工具。脚本或批量创建时使用 `--no-open`。若进入失败（例如非交互终端没有 TTY），已创建的环境保留，可在交互式终端执行 `twig open PROJECT NAME`。
 
 `ls` 中 `Open` 只表示窗口存在，不表示 Codex 正在运行。`Missing` 表示 Worktree 未创建或已移除，`Mismatch` 表示目录丢失、分支变化等需要人工检查的状态。
 
@@ -259,10 +224,10 @@ twig pr --title '修复登录超时' --body-file ./pr.md
 推荐从主仓库的其他终端执行：
 
 ```bash
-twig stop auth                    # 会确认终止窗口内的全部进程
+twig stop myapp auth                    # 会确认终止窗口内的全部进程
 # 自行审查、合并和推送代码
-twig rm auth
-twig rm payment --keep-branch     # 允许保留尚未合并的分支
+twig rm myapp auth
+twig rm myapp payment --keep-branch     # 允许保留尚未合并的分支
 ```
 
 默认删除要求：
@@ -279,18 +244,26 @@ twig rm payment --keep-branch     # 允许保留尚未合并的分支
 
 ## 状态、恢复与限制
 
-用户级项目登记表位于 `~/.twig/config.toml`，写入时使用同目录的 `config.lock`。每个项目的配置和任务状态仍位于 `git rev-parse --git-common-dir` 对应目录的 `twig/` 下：
+用户级项目登记表位于 `~/.twig/config.toml`，写入时使用同目录的 `config.lock`。每个项目的配置和任务状态位于登记表同目录的 `projects/<仓库 ID>/` 下，默认布局为：
 
 ```text
-twig/
-├── config.json                  # version/main/root/base/target/session
-├── state.json                   # 任务名 -> branch/base/path
-└── lock                         # 命令运行期间的项目互斥锁
+~/.twig/
+├── config.toml                  # 项目登记表
+├── config.lock                  # 登记表写入锁
+└── projects/
+    └── <仓库 ID>/
+        ├── config.json          # version/main/root/base/target/session
+        ├── state.json           # 任务名 -> branch/base/path
+        └── lock                 # 命令运行期间的项目互斥锁
 ```
+
+仓库 ID 为规范化后的共享 Git 目录绝对路径的稳定哈希。主目录与关联 Worktree 使用同一份状态，同一远程仓库的不同本地克隆独立存储；修改登记别名不改变 ID。读取配置时核对仓库归属。
+
+这是不兼容的存储变更：不读取或迁移旧 `.git/twig/` 数据，也不删除旧数据及现有分支、Worktree、tmux 资源。重新初始化不会接管已有任务资源。取消登记不删除状态，删除仓库后的残留状态也不自动清理；仓库移动后的自动修复仍不支持。
 
 主目录和全部关联 Worktree 共享配置，文件不会进入 Git 提交。Session 名为 `twig-<仓库路径哈希>`，并通过 `@twig-repo` 验证归属。窗口通过 `@twig-feature` 标记和 tmux Window ID 识别，支持数字任务名和手动重命名窗口，不依赖固定编号。不同项目即使目录名相同也能并存。
 
-- SSH 断线不影响 tmux server；重连后用 `twig open NAME`。未进行真实 SSH 断网测试。
+- SSH 断线不影响 tmux server；重连后用 `twig open PROJECT NAME`。未进行真实 SSH 断网测试。
 - 窗口丢失：`open` 或 `new` 重建 Shell；程序和对话由用户自己恢复。
 - 创建 Worktree 成功但 tmux 失败：保留代码与记录，修复原因后重复 `new NAME`。
 - Worktree 创建本身失败：保留创建意图，排除冲突后重复 `new NAME`，或用 `rm NAME --keep-branch` 清理记录。
@@ -326,4 +299,4 @@ PR/MR 测试使用模拟 `gh` / `glab` 和本地临时 bare remote，真实执�
 
 任务区选中任务后输入 `/delete` 或按 `dd`，查看项目、分支和 Worktree 路径，再确认删除。默认取消；Tab/左右键切换确认，↑↓ 或 j/k 选择选项，空格勾选/取消，Esc 取消。复用 `twig rm` 的文件、进程、合并和 upstream 检查，无强制删除；保留分支时跳过合并与推送检查。主工作目录不可删除。成功后选中主工作目录，详情见 [删除任务说明](docs/console-usage.md#删除任务)。
 
-删除 Worktree 默认保护 ignored 文件。确认不再需要后，可使用 `twig rm NAME --delete-ignored`，或在控制台删除弹窗查看清单并用 ↓ 或 j 选中「同时删除被忽略文件」，按空格开启。目录项包含其全部内容（例如 `.venv/`），不限于缓存。未提交、未跟踪文件及活动进程仍阻止删除；不使用 Git 强制删除。
+删除 Worktree 默认保护 ignored 文件。确认不再需要后，可使用 `twig rm PROJECT NAME --delete-ignored`，或在控制台删除弹窗查看清单并用 ↓ 或 j 选中「同时删除被忽略文件」，按空格开启。目录项包含其全部内容（例如 `.venv/`），不限于缓存。未提交、未跟踪文件及活动进程仍阻止删除；不使用 Git 强制删除。

@@ -148,8 +148,8 @@ pub fn summary<'a>(threads: impl Iterator<Item = &'a Thread>) -> String {
     }
 }
 
-pub fn repositories(path: &Path) -> Result<Vec<Repo>> {
-    registry::load(path)?
+pub fn repositories(registry_path: &Path) -> Result<Vec<Repo>> {
+    registry::load(registry_path)?
         .projects
         .into_iter()
         .map(|(name, entry)| {
@@ -169,7 +169,7 @@ pub fn repositories(path: &Path) -> Result<Vec<Repo>> {
                         == canonical,
                     "登记路径不是仓库根目录"
                 );
-                let project = Project::discover_at(&path)?;
+                let project = Project::discover_at(&path, registry_path)?;
                 let config = project.config()?;
                 ensure!(
                     config.main.canonicalize()? == canonical,
@@ -564,7 +564,7 @@ pub fn enter(registry_path: &Path, name: &str, task: &str) -> Result<()> {
     // Enter 时重新解析登记信息，不能用陈旧快照决定写操作。
     let entry = registry::entry(registry_path, name)?;
     let path = registry::expand(&entry.path)?;
-    let project = Project::discover_at(&path)?;
+    let project = Project::discover_at(&path, registry_path)?;
     let config = project.config()?;
     ensure!(
         path.canonicalize()? == config.main.canonicalize()?,
@@ -578,7 +578,7 @@ pub fn enter(registry_path: &Path, name: &str, task: &str) -> Result<()> {
         let feature = crate::feature(&state, task)?;
         ensure!(
             crate::check_worktree(&config, feature)?,
-            "Worktree 缺失；请先检查 twig ls"
+            "Worktree 缺失；请先检查 twig ls <项目名>"
         );
         tmux::ensure_window(&config, &project, task, &feature.path)?
     };
@@ -643,7 +643,7 @@ mod tests {
         std::fs::write(
             &registry,
             format!(
-                "[projects.missing]\npath = {:?}\nmain = 'main'\n",
+                "[projects.missing]\npath = {:?}\n",
                 dir.path().join("missing")
             ),
         )

@@ -142,7 +142,7 @@ pub fn ensure_window(
         name,
     ])?;
     window(config, project, name)?
-        .ok_or_else(|| anyhow::anyhow!("窗口创建后未找到，请重试 twig open {name}"))
+        .ok_or_else(|| anyhow::anyhow!("窗口创建后未找到，请重试 twig open <项目名> {name}"))
 }
 
 // 初版 init 的主窗口没有 @twig-feature；仅在已验证的 Session 内，
@@ -221,7 +221,7 @@ pub fn enter(config: &Config, window: &str) -> Result<()> {
         .status()?;
     ensure!(
         status.success(),
-        "tmux 进入失败；环境已保留，可在交互式终端执行 twig open"
+        "tmux 进入失败；环境已保留，可在交互式终端执行 twig open <项目名> <任务名>"
     );
     Ok(())
 }

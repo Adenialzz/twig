@@ -36,7 +36,6 @@ pub(super) struct App {
     detail: bool,
     scroll: u16,
     message: Option<String>,
-    initial_repo: Option<String>,
     initial_cwd: PathBuf,
     located: bool,
     form: Option<form::Form>,
@@ -57,7 +56,7 @@ struct SearchBackup {
     scroll: u16,
 }
 impl App {
-    fn new(repo: Option<String>, cwd: PathBuf) -> Self {
+    fn new(cwd: PathBuf) -> Self {
         Self {
             snapshot: Snapshot {
                 codex_error: Some("正在连接 Codex…".into()),
@@ -80,7 +79,6 @@ impl App {
             detail: false,
             scroll: 0,
             message: None,
-            initial_repo: repo,
             initial_cwd: cwd,
             located: false,
             form: None,
@@ -320,13 +318,7 @@ impl App {
             self.pending_removed = None;
         }
         if !self.located && !self.snapshot.repos.is_empty() {
-            if let Some(name) = &self.initial_repo {
-                if self.snapshot.repos.iter().any(|r| &r.name == name) {
-                    self.project = Some(name.clone());
-                } else {
-                    self.message = Some(format!("未登记项目 {name}"));
-                }
-            } else if let Some((repo, task)) = self
+            if let Some((repo, task)) = self
                 .snapshot
                 .repos
                 .iter()
@@ -428,10 +420,10 @@ impl Drop for Screen {
     }
 }
 
-pub fn run(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()> {
+pub fn run(registry: PathBuf, cwd: PathBuf) -> Result<()> {
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "Console 需要交互式终端；脚本请使用 twig config list 或 twig --repo NAME ls"
+        "Console 需要交互式终端；脚本请使用 twig ls 或 twig ls <项目名>"
     );
     // panic 时先恢复终端，再输出诊断；退出后还原原 hook。
     let previous = std::panic::take_hook();
@@ -440,15 +432,15 @@ pub fn run(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()> 
         let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
         eprintln!("Console 异常：{info}");
     }));
-    let result = run_inner(registry, repo, cwd);
+    let result = run_inner(registry, cwd);
     std::panic::set_hook(previous);
     result
 }
-fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()> {
+fn run_inner(registry: PathBuf, cwd: PathBuf) -> Result<()> {
     let mut screen = Screen::start()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut worker = Worker::start(registry.clone());
-    let mut app = App::new(repo, cwd);
+    let mut app = App::new(cwd);
     worker.requests.send(app.request())?;
     loop {
         if let Some(form) = &mut app.form {
@@ -478,14 +470,6 @@ fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()
             updated = true;
         }
         if updated {
-            if let Some(name) = &app.initial_repo
-                && app.snapshot.registry_checked.is_some()
-            {
-                ensure!(
-                    app.snapshot.repos.iter().any(|r| &r.name == name),
-                    "未登记项目 {name}；请运行 twig config list"
-                );
-            }
             app.reconcile();
             worker.requests.send(app.request())?;
         }
@@ -738,7 +722,7 @@ mod search_tests {
         }
     }
     fn app() -> App {
-        let mut app = App::new(None, PathBuf::from("/demo"));
+        let mut app = App::new(PathBuf::from("/demo"));
         app.snapshot.repos.push(data::Repo {
             name: "demo".into(),
             path: "/demo".into(),
@@ -746,7 +730,7 @@ mod search_tests {
             context: Some((
                 crate::config::Project {
                     common: "/demo/.git".into(),
-                    dir: "/demo/.git/twig".into(),
+                    dir: "/global/projects/demo-id".into(),
                 },
                 crate::config::Config {
                     version: 1,

@@ -222,7 +222,7 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
             } else if !app.filters[0].is_empty() {
                 "没有匹配的项目"
             } else {
-                "尚未登记项目。\n在仓库中执行 twig init；\n或查看 twig config --help。"
+                "尚未登记项目。\n按 n 登记已有仓库；\n或执行 twig add <别名> --path <路径>。"
             })
             .block(block(" 项目 ".into(), app.focus == 0))
             .wrap(Wrap { trim: false }),

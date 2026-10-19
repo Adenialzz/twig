@@ -16,9 +16,11 @@ use std::{
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// 任务名；省略时识别当前 Worktree
+    #[arg(add = ArgValueCompleter::new(crate::completion::projects))]
+    pub project: String,
+    /// 任务名
     #[arg(add = ArgValueCompleter::new(crate::completion::tasks))]
-    name: Option<String>,
+    name: String,
     /// 显式推送任务分支，不强制覆盖远端
     #[arg(long)]
     push: bool,
@@ -264,21 +266,7 @@ fn remote_repository(cwd: &Path, remote: &str, push: bool) -> Result<Repository>
 }
 
 pub fn execute(config: &Config, state: &State, invocation_dir: &Path, args: Args) -> Result<()> {
-    let name = match args.name {
-        Some(name) => name,
-        None => {
-            let root = PathBuf::from(
-                git(invocation_dir, &["rev-parse", "--show-toplevel"])
-                    .context("当前目录不是任务 Worktree，请指定任务名")?,
-            )
-            .canonicalize()?;
-            state
-                .iter()
-                .find(|(_, f)| f.path == root)
-                .map(|(name, _)| name.clone())
-                .context("当前目录不是已登记的任务 Worktree，请指定任务名")?
-        }
-    };
+    let name = args.name;
     let feature = crate::feature(state, &name)?;
     ensure!(
         crate::check_worktree(config, feature)?,

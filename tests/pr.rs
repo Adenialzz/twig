@@ -1,3 +1,5 @@
+mod support;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -90,8 +92,13 @@ impl Fixture {
                 "第一行\n第二行",
             ],
         );
-        let state_dir = f.repo.join(".git/twig");
-        fs::create_dir(&state_dir).unwrap();
+        fs::write(
+            f._temp.path().join("registry.toml"),
+            format!("[projects.demo]\npath = {:?}\n", f.repo.to_str().unwrap()),
+        )
+        .unwrap();
+        let state_dir = support::project_dir(&f.repo, &f._temp.path().join("registry.toml"));
+        fs::create_dir_all(&state_dir).unwrap();
         fs::write(
             state_dir.join("config.json"),
             serde_json::json!({"version": 1, "main": f.repo,
@@ -173,6 +180,8 @@ esac
 
     fn command(&self, cwd: &Path) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_twig"));
+        c.arg("--config")
+            .arg(self._temp.path().join("registry.toml"));
         c.current_dir(cwd)
             .env(
                 "PATH",
@@ -228,7 +237,7 @@ esac
 #[test]
 fn github_creation_requires_published_head_and_preserves_body() {
     let f = Fixture::new("git@github.com:team/project.git");
-    f.fail(&["pr"], "请先推送");
+    f.fail(&["pr", "demo", "task"], "请先推送");
     assert!(!f.calls().contains("<push>"));
     assert!(!f.calls().contains("<create>"));
     f.publish();
@@ -238,6 +247,7 @@ fn github_creation_requires_published_head_and_preserves_body() {
         f.command(&f.repo)
             .args([
                 "pr",
+                "demo",
                 "task",
                 "--title",
                 "标题 ' 引号",
@@ -258,10 +268,14 @@ fn github_creation_requires_published_head_and_preserves_body() {
     );
     assert!(!calls.contains("<push>"));
     assert!(!calls.contains("unexpected-tmux"));
-    assert!(!f.repo.join(".git/twig/lock").exists());
+    assert!(
+        !support::project_dir(&f.repo, &f._temp.path().join("registry.toml"))
+            .join("lock")
+            .exists()
+    );
     fs::write(&f.log, "").unwrap();
     f.git(&f.task, &["commit", "--allow-empty", "-m", "not pushed"]);
-    f.fail(&["pr"], "与本地提交不同");
+    f.fail(&["pr", "demo", "task"], "与本地提交不同");
     assert!(!f.calls().contains("<create>"));
     assert!(!f.calls().contains("<push>"));
 }
@@ -269,7 +283,7 @@ fn github_creation_requires_published_head_and_preserves_body() {
 #[test]
 fn gitlab_push_and_existing_request_use_the_same_repository() {
     let f = Fixture::new("https://gitlab.com/group/sub/project.git");
-    success(f.run(&["pr", "--push"]));
+    success(f.run(&["pr", "demo", "task", "--push"]));
     assert!(!f.published("feature/task").is_empty());
     assert_eq!(
         f.git(&f.task, &["config", "branch.feature/task.remote"]),
@@ -281,7 +295,7 @@ fn gitlab_push_and_existing_request_use_the_same_repository() {
     assert!(calls.contains("<--draft><--push=false><--yes>"));
     fs::write(&f.responses, r#"[{"web_url":"https://gitlab.com/group/sub/project/-/merge_requests/1","source_project_id":5,"target_project_id":5}]"#).unwrap();
     fs::write(&f.log, "").unwrap();
-    let url = success(f.run(&["pr"]));
+    let url = success(f.run(&["pr", "demo", "task"]));
     assert!(url.contains("merge_requests/1"));
     assert!(!f.calls().contains("<create>"));
     assert!(!f.calls().contains("<push>"));
@@ -289,7 +303,7 @@ fn gitlab_push_and_existing_request_use_the_same_repository() {
         &f.task,
         &["commit", "--allow-empty", "-m", "another change"],
     );
-    success(f.run(&["pr", "--push"]));
+    success(f.run(&["pr", "demo", "task", "--push"]));
     assert!(f.calls().contains("<push>"));
     assert!(!f.calls().contains("<create>"));
 }
@@ -297,7 +311,7 @@ fn gitlab_push_and_existing_request_use_the_same_repository() {
 #[test]
 fn remote_selection_upstream_mapping_and_self_hosted_provider() {
     let f = Fixture::new("ssh://git@git.example.test:2222/group/sub/project.git");
-    f.fail(&["pr"], "--provider");
+    f.fail(&["pr", "demo", "task"], "--provider");
     f.git(
         &f.repo,
         &[
@@ -307,7 +321,10 @@ fn remote_selection_upstream_mapping_and_self_hosted_provider() {
             "https://github.com/team/other.git",
         ],
     );
-    f.fail(&["pr", "--provider", "gitlab"], "没有唯一 remote");
+    f.fail(
+        &["pr", "demo", "task", "--provider", "gitlab"],
+        "没有唯一 remote",
+    );
     f.git(&f.repo, &["config", "branch.feature/task.remote", "origin"]);
     f.git(
         &f.repo,
@@ -317,7 +334,7 @@ fn remote_selection_upstream_mapping_and_self_hosted_provider() {
             "refs/heads/review/task",
         ],
     );
-    success(f.run(&["pr", "--push", "--provider", "gitlab"]));
+    success(f.run(&["pr", "demo", "task", "--push", "--provider", "gitlab"]));
     assert!(!f.published("review/task").is_empty());
     assert!(f.calls().contains("<--source-branch><review/task>"));
     assert!(
@@ -325,7 +342,7 @@ fn remote_selection_upstream_mapping_and_self_hosted_provider() {
             .contains("<--repo><https://git.example.test/group/sub/project>")
     );
     fs::write(&f.log, "").unwrap();
-    success(f.run(&["pr", "--push", "--remote", "other"]));
+    success(f.run(&["pr", "demo", "task", "--push", "--remote", "other"]));
     assert!(f.calls().contains("<--repo><github.com/team/other>"));
     assert!(
         f.calls()
@@ -346,23 +363,32 @@ fn conflicts_and_cli_failures_do_not_push_or_create() {
             "git@github.com:fork/project.git",
         ],
     );
-    f.fail(&["pr", "--push"], "不同仓库");
+    f.fail(&["pr", "demo", "task", "--push"], "不同仓库");
     assert!(f.calls().is_empty());
     f.git(&f.repo, &["config", "--unset-all", "remote.origin.pushurl"]);
-    f.fail(&["pr", "--push", "--target", "feature/task"], "不能相同");
-    f.fail(&["pr", "--push", "--target", "missing"], "缺少目标分支");
-    f.fail(&["pr", "--provider", "gitlab"], "公共平台不符");
+    f.fail(
+        &["pr", "demo", "task", "--push", "--target", "feature/task"],
+        "不能相同",
+    );
+    f.fail(
+        &["pr", "demo", "task", "--push", "--target", "missing"],
+        "缺少目标分支",
+    );
+    f.fail(
+        &["pr", "demo", "task", "--provider", "gitlab"],
+        "公共平台不符",
+    );
     let out = f
         .command(&f.task)
         .env("TWIG_TEST_LIST_FAIL", "1")
-        .args(["pr", "--push"])
+        .args(["pr", "demo", "task", "--push"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(!f.calls().contains("<push>"));
     assert!(!f.calls().contains("<create>"));
     fs::write(&f.responses, "invalid JSON").unwrap();
-    f.fail(&["pr", "--push"], "数据无效");
+    f.fail(&["pr", "demo", "task", "--push"], "数据无效");
     assert!(!f.calls().contains("<push>"));
 }
 
@@ -377,22 +403,26 @@ fn existing_fork_is_not_reused_and_create_failure_keeps_pushed_branch() {
     let out = f
         .command(&f.task)
         .env("TWIG_TEST_CREATE_FAIL", "1")
-        .args(["pr", "--push"])
+        .args(["pr", "demo", "task", "--push"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("已推送的提交会保留"));
     assert!(!f.published("feature/task").is_empty());
     assert!(f.task.exists());
-    assert!(!f.repo.join(".git/twig/lock").exists());
+    assert!(
+        !support::project_dir(&f.repo, &f._temp.path().join("registry.toml"))
+            .join("lock")
+            .exists()
+    );
 }
 
 #[test]
 fn task_identity_and_completion_are_local() {
     let f = Fixture::new("https://github.com/team/project.git");
-    let out = f.command(&f.repo).args(["pr"]).output().unwrap();
+    let out = f.command(&f.repo).args(["pr", "demo"]).output().unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("请指定任务名"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("required arguments"));
     fs::create_dir(f.task.join("subdir")).unwrap();
     fs::write(
         &f.responses,
@@ -402,7 +432,7 @@ fn task_identity_and_completion_are_local() {
     assert!(
         success(
             f.command(&f.task.join("subdir"))
-                .args(["pr"])
+                .args(["pr", "demo", "task"])
                 .output()
                 .unwrap()
         )
@@ -410,15 +440,16 @@ fn task_identity_and_completion_are_local() {
     );
     fs::write(&f.log, "").unwrap();
     for (args, expected) in [
-        (vec!["pr", "ta"], "task"),
-        (vec!["pr", "--remote", "or"], "origin"),
-        (vec!["pr", "--provider", "gitl"], "gitlab"),
+        (vec!["pr", "demo", "ta"], "task"),
+        (vec!["pr", "demo", "task", "--remote", "or"], "origin"),
+        (vec!["pr", "demo", "task", "--provider", "gitl"], "gitlab"),
     ] {
         let out = success(
             f.command(&f.task)
                 .env("COMPLETE", "zsh")
-                .env("_CLAP_COMPLETE_INDEX", args.len().to_string())
-                .args(["--", "twig"])
+                .env("_CLAP_COMPLETE_INDEX", (args.len() + 2).to_string())
+                .args(["--", "twig", "--config"])
+                .arg(f._temp.path().join("registry.toml"))
                 .args(args)
                 .output()
                 .unwrap(),
@@ -427,7 +458,7 @@ fn task_identity_and_completion_are_local() {
     }
     assert!(f.calls().is_empty());
     f.git(&f.task, &["switch", "--detach"]);
-    f.fail(&["pr", "task", "--push"], "分支已改变");
+    f.fail(&["pr", "demo", "task", "--push"], "分支已改变");
     assert!(f.calls().is_empty());
 }
 
@@ -436,28 +467,22 @@ fn registered_project_target_override_and_missing_cli() {
     let f = Fixture::new("https://github.com/team/project.git");
     f.git(&f.repo, &["push", f.bare.to_str().unwrap(), "main:release"]);
     let config = f._temp.path().join("registry.toml");
-    fs::write(&config, format!("[projects.demo]\npath = {:?}\nmain = 'main'\ndefault_remote = 'origin'\n[projects.demo.remotes]\norigin = 'https://github.com/team/project.git'\n", f.repo.to_str().unwrap())).unwrap();
+    fs::write(
+        &config,
+        format!("[projects.demo]\npath = {:?}\n", f.repo.to_str().unwrap()),
+    )
+    .unwrap();
     success(
         f.command(f._temp.path())
-            .args([
-                "--config",
-                config.to_str().unwrap(),
-                "--repo",
-                "demo",
-                "pr",
-                "task",
-                "--push",
-                "--target",
-                "release",
-            ])
+            .args(["pr", "demo", "task", "--push", "--target", "release"])
             .output()
             .unwrap(),
     );
     assert!(f.calls().contains("<--base><release>"));
-    // --repo 不能丢失调用者原本所在的任务 Worktree。
+    // 从任务目录调用同样使用显式项目和任务名。
     success(
         f.command(&f.task)
-            .args(["--config", config.to_str().unwrap(), "--repo", "demo", "pr"])
+            .args(["pr", "demo", "task"])
             .output()
             .unwrap(),
     );
@@ -466,7 +491,7 @@ fn registered_project_target_override_and_missing_cli() {
     let out = f
         .command(&f.task)
         .env("PATH", &f.bin)
-        .args(["pr", "--push"])
+        .args(["pr", "demo", "task", "--push"])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -489,8 +514,12 @@ fn rejected_push_does_not_force_or_create_a_request() {
         &f.task,
         &["commit", "--allow-empty", "-m", "local-only commit"],
     );
-    f.fail(&["pr", "--push"], "推送失败");
+    f.fail(&["pr", "demo", "task", "--push"], "推送失败");
     assert_eq!(f.published("feature/task"), before);
     assert!(!f.calls().contains("<create>"));
-    assert!(!f.repo.join(".git/twig/lock").exists());
+    assert!(
+        !support::project_dir(&f.repo, &f._temp.path().join("registry.toml"))
+            .join("lock")
+            .exists()
+    );
 }

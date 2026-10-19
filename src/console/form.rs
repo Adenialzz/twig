@@ -1,5 +1,5 @@
 //! 表单在独立 twig 进程中执行写操作，复用 CLI 的锁和生命周期逻辑。
-use crate::{config::Project, git::git, registry};
+use crate::{git::git, registry};
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::File,
@@ -155,9 +155,8 @@ impl Form {
             ensure!(deletion.confirm, "请明确确认删除");
             deletion.confirm = false;
             command.args([
-                "--repo",
-                self.project.as_deref().unwrap(),
                 "rm",
+                self.project.as_deref().unwrap(),
                 &self.fields[0],
                 "--yes",
                 "--expected-task",
@@ -175,9 +174,8 @@ impl Form {
         } else if let Some(project) = &self.project {
             crate::config::task_name(&self.fields[0])?;
             command.args([
-                "--repo",
-                project,
                 "new",
+                project,
                 &self.fields[0],
                 "--base",
                 &self.fields[1],
@@ -186,11 +184,11 @@ impl Form {
         } else {
             crate::config::name(&self.fields[1])?;
             command.args([
-                "__console-register",
+                "add",
+                &self.fields[1],
                 "--path",
                 &self.fields[0],
-                "--name",
-                &self.fields[1],
+                "--print-name",
             ]);
         }
         let output = tempfile::tempfile()?;
@@ -277,49 +275,6 @@ fn directories(input: &str) -> Result<Vec<String>> {
     }
     paths.sort();
     Ok(paths)
-}
-
-pub fn register(registry_path: &Path, path: &Path, name: String) -> Result<()> {
-    crate::config::name(&name)?;
-    let path = registry::expand(path)?
-        .canonicalize()
-        .context("仓库目录不存在")?;
-    ensure!(
-        git(&path, &["rev-parse", "--is-bare-repository"])? == "false",
-        "暂不支持裸仓库"
-    );
-    let main = crate::git::worktrees(&path)?
-        .first()
-        .context("未找到主工作目录")?
-        .0
-        .canonicalize()?;
-    // 此入口仅在表单子进程中调用，不改变控制台进程的 cwd。
-    std::env::set_current_dir(&main)?;
-    let project = Project::discover()?;
-    let _lock = project.lock()?;
-    registry::initialize(registry_path, Some(name.clone()), &project, || {
-        if project.dir.join("config.json").try_exists()? {
-            let config = project.config()?;
-            ensure!(config.main.canonicalize()? == main, "项目主目录归属已改变");
-            Ok(())
-        } else {
-            crate::init(&project, None, None, None)
-        }
-    })?;
-    let registry = registry::load(registry_path)?;
-    let mut actual = None;
-    for (alias, entry) in &registry.projects {
-        let entry_path = registry::expand(&entry.path)?;
-        if entry_path == main || (entry_path.try_exists()? && entry_path.canonicalize()? == main) {
-            actual = Some(alias);
-            if alias == &name {
-                break;
-            }
-        }
-    }
-    let actual = actual.context("登记完成后未找到项目")?;
-    println!("{}", serde_json::to_string(actual)?);
-    Ok(())
 }
 
 #[cfg(test)]

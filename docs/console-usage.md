@@ -15,13 +15,12 @@ make install
 ```sh
 twig
 twig console                # 与裸 twig 相同
-twig --repo myapp              # 初始选中 myapp，仍显示全部项目
 twig --config ./config.toml    # 使用指定登记表
 ```
 
-默认读取 `~/.twig/config.toml`。未指定 `--repo` 时，优先定位当前目录所属的已登记项目和任务，否则选择列表首项。
+默认读取 `~/.twig/config.toml`。优先定位当前目录所属的已登记项目和任务，否则选择列表首项。
 
-需要交互式终端，不能通过管道读取面板。脚本请使用 `twig config list` 或 `twig --repo myapp ls`。
+需要交互式终端，不能通过管道读取面板。脚本请使用 `twig ls` 或 `twig ls myapp`。
 
 ## 2. 让项目出现在面板里
 
@@ -34,11 +33,11 @@ twig --config ./config.toml    # 使用指定登记表
 
 路径字段按 `Enter` 先检查目录存在且属于非裸 Git 仓库，成功后切到别名字段并填入默认值；这一步不创建资源。完整目录优先，不会因存在子目录候选而误入下一级；输入尚未匹配完整目录时，先接受当前候选再检查。别名可以修改，也可以直接再按 `Enter` 完成登记。目录名含空格等不符合别名规则时，需手动修改。
 
-除路径候选补全外，按 `Tab` / `Shift+Tab` 切字段；路径字段 `Enter` 确定路径，别名字段 `Enter` 提交；`Esc` 或 `Ctrl+C` 取消表单。登记不联网、不要求 remote。已初始化的仓库只补登记；未初始化的仓库会复用 `init` 的初始化流程，准备主窗口并登记。关联 Worktree 或子目录会定位到主仓库。同路径复用已有别名，别名指向其他路径时拒绝覆盖。
+除路径候选补全外，按 `Tab` / `Shift+Tab` 切字段；路径字段 `Enter` 确定路径，别名字段 `Enter` 提交；`Esc` 或 `Ctrl+C` 取消表单。登记不联网、不要求 remote。已初始化的仓库只补登记；未初始化的仓库会复用 `add` 的初始化流程，准备主窗口并登记。关联 Worktree 或子目录会定位到主仓库。同路径复用已有别名，别名指向其他路径时拒绝覆盖。
 
-首次初始化要求仓库已有提交及本地 `main` 或 `master` 分支。其他起点请先在 Shell 中执行 `twig init --base BRANCH --name NAME`。空目录创建和远程克隆暂不在表单中提供。
+首次初始化要求仓库已有提交及本地 `main` 或 `master` 分支。其他起点请先在 Shell 中执行 `twig add NAME --path PATH --base BRANCH`。空目录创建和远程克隆暂不在表单中提供。
 
-成功后自动选中项目并切换到任务区。也可以继续在 Shell 中使用 `twig init` 和 `twig config list`。
+成功后自动选中项目并切换到任务区。也可以继续在 Shell 中使用 `twig add NAME --path PATH` 和 `twig ls`。
 
 ### 新建任务
 
@@ -194,7 +193,7 @@ Git 摘要显示暂存、修改、未跟踪文件数量，或「干净」。干�
 
 **没有项目或任务？**
 
-检查 `twig config list`、是否用了其他 `--config`，以及项目是否完成初始化。面板不自动发现未登记项目，也不把任意 Git 分支当作 twig 任务。
+检查 `twig ls`、是否用了其他 `--config`，以及项目是否完成初始化。面板不自动发现未登记项目，也不把任意 Git 分支当作 twig 任务。
 
 **项目可见，但进入失败？**
 
@@ -228,6 +227,6 @@ Git 摘要显示暂存、修改、未跟踪文件数量，或「干净」。干�
 
 删除弹窗会列出 ignored 文件/目录，目录项代表目录内全部内容，可用 PgUp/PgDn 查看。默认不删除这些内容；用 ↓ 或 j 选中「同时删除被忽略文件」，按空格开启，随后重新选择「确认删除」。切换选项总会重置为取消。该选项不限于缓存，也可能包含 `.env` 或本地数据，需先核对清单。清单变化时拒绝删除，请取消并重新打开弹窗查看。
 
-该选项只放行 ignored 文件；未提交、未跟踪文件、活动进程及原有分支检查继续生效。CLI 对应 `twig rm NAME --delete-ignored`，会在确认前输出 ignored 清单；不使用 `git clean` 或 `worktree remove --force`。
+该选项只放行 ignored 文件；未提交、未跟踪文件、活动进程及原有分支检查继续生效。CLI 对应 `twig rm PROJECT NAME --delete-ignored`，会在确认前输出 ignored 清单；不使用 `git clean` 或 `worktree remove --force`。
 
 选项区固定显示，当前选项整行高亮，`[x]` 表示已勾选。清单和错误在独立区域滚动，不会滚走选项和确认按钮。`i` 快捷键已移除。

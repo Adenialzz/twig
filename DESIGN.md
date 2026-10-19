@@ -13,7 +13,7 @@
 - 在 `/Users/song/JJ_Projects/twig` 独立建仓库。dotfiles 主要管理配置和轻量脚本，twig 有独立的构建、测试和迭代需求，不嵌入 dotfiles，也未添加子模块。
 - 不自动启动 Codex。`new`、`open` 都只准备 Shell，用户自行运行 Codex、Claude 或其他程序；不依赖 Codex Desktop 或 Codex CLI。
 - 删除采用保守保护，允许保留分支；没有自动合并、强制删除或远程 PR 自动处理。
-- 增加用户级常用项目登记表，支持远程 URL、多个 remote、默认克隆来源、主分支和本地路径；通过显式 `clone` 创建环境。
+- 使用全局登记表保存项目别名与本地路径。CLI 全局化，任务操作显式指定项目和任务；克隆与 remote 管理交给 Git。
 
 原始 `doc.md` 是历史背景，不是高于本文件的待实现清单。默认启动 Codex 和对话恢复仍不在范围内；2026-10-19 已确认增加 Console 的可选 Codex 只读状态展示，见下文。
 
@@ -25,15 +25,13 @@
 
 普通任务命令不联网，不隐式 fetch、pull 或 push。创建起点必须是已有本地分支；基础分支和合并检查目标独立，例如任务可从 `feature/auth` 开始，但最终检查是否合并到 `main`。
 
-remote 名称和 URL 由 Git 实际配置管理。用户级登记表提供初始化信息，不是持续同步服务：
+remote 名称和 URL 由 Git 管理，登记表只保存别名与路径：
 
-- `config` 命令只读写登记表，既不克隆，也不改已有仓库的 remote。
-- 首次 `init` 成功后自动登记主仓库，默认别名取目录名，可用 `--name` 指定。同一路径复用已有登记，别名冲突提前报错；登记表锁覆盖检查、初始化和保存。遵循 `--config`，相对路径在切换仓库前解析。
-- 本地登记允许省略 `default_remote` 和 `remotes`；`init` 不导入 Git remote，新登记主分支取项目 base。首次添加 remote 自动设为默认，`clone` 缺少默认 remote 时报错。重复 `init` 在获取项目锁之前检查共享目录的 `config.json`，存在则仅提示并成功退出，不读取项目配置、不补登记、不操作 tmux、不处理初始化参数。`clone` 的接续流程保持不变。
-- `clone` 使用默认 remote，检出登记的主分支，添加其他 remote，再初始化 twig；其他 remote 不自动 fetch。
-- 重试 `clone` 时核对现有目录、remote URL、主分支和 twig 配置，不覆盖冲突；可添加缺少的 remote，不删除额外 remote，也不更新已有分支。
-- `default_remote` 用于克隆来源，不是所有分支的统一推送目标。分支的 pull/push upstream 继续由 Git 管理。
-- 不带 `--repo` 时按当前目录识别仓库；带 `--repo NAME` 时从登记表解析路径，允许在任意目录操作。
+- `add PROJECT --path PATH` 登记并初始化已有仓库，可指定首次初始化的 base、target、root。相对路径在切换目录前解析；不联网。
+- 同路径复用别名，别名冲突不覆盖；初始化成功后保存登记。已存在项目配置时复用并补登记，冲突初始化选项报错，不重建窗口。
+- `ls` 列项目，`ls PROJECT` 列任务；`rm PROJECT` 只取消登记，`rm PROJECT TASK` 安全删除任务。任务删除选项必须指定任务名。
+- `new/open/stop/pr` 均要求 PROJECT 和 TASK，不依赖当前目录推断。控制台仍可按调用目录定位初始选择。
+- 移除 init、config、clone、--repo 及旧登记表字段，不提供兼容接口。Git clone/remote 由用户直接调用。
 
 ## 架构与事实来源
 
@@ -46,9 +44,9 @@ Makefile 中 `make build`（默认目标）构建 release，`make install` 只�
 | `src/main.rs` | CLI 路由、项目初始化、任务创建/进入/停止/清理流程 |
 | `src/completion.rs` | 复用 CLI 定义解析补全上下文，只读查询项目、任务、分支和 remote 候选 |
 | `src/completion.zsh` | Zsh 候选展示：普通值与选项分别分组，普通值优先 |
-| `src/registry.rs` | 用户级 TOML 登记表、路径解析、remote 登记和 clone |
+| `src/registry.rs` | 用户级 TOML 登记表、路径解析、项目登记与取消登记 |
 | `src/pr.rs` | 任务识别、remote/平台选择、显式推送及草稿 PR/MR 查找与创建 |
-| `src/config.rs` | 共享 Git 目录中的项目配置、任务记录、锁、名称和 Session 标识 |
+| `src/config.rs` | 全局数据目录中的项目配置、任务记录、锁、名称和 Session 标识 |
 | `src/git.rs` | 外部命令执行及 Git 分支、合并关系、Worktree 查询 |
 | `src/tmux.rs` | Session/Window 归属、窗口恢复、进程检查、进入和切换 |
 | `tests/workflow.rs` | 临时仓库及独立 tmux server 上的集成测试 |
@@ -57,8 +55,8 @@ Makefile 中 `make build`（默认目标）构建 release，`make install` 只�
 
 配置与状态分为两层：
 
-1. **用户登记表**：默认 `~/.twig/config.toml`，可通过 `--config` 覆盖。保存项目别名、路径、主分支、默认 remote 和 remote URL 映射；首次写入时创建。不是任务状态数据库。
-2. **项目配置与任务记录**：位于共享 Git 目录的 `twig/config.json` 和 `twig/state.json`，主工作目录与全部关联 Worktree 共用。项目配置保存主目录、Worktree 根目录、基础/目标分支、Session；任务记录保存名称、分支、基础分支和路径。
+1. **用户登记表**：默认 `~/.twig/config.toml`，可通过 `--config` 覆盖。保存项目别名与本地路径；首次写入时创建。不是任务状态数据库。
+2. **项目配置与任务记录**：位于登记表同目录的 `projects/<仓库 ID>/config.json` 和 `projects/<仓库 ID>/state.json`，主工作目录与全部关联 Worktree 共用。项目配置保存主目录、Worktree 根目录、基础/目标分支、Session；任务记录保存名称、分支、基础分支和路径。
 
 Git 查询决定 Worktree、分支、修改和合并的实际状态；tmux 查询决定窗口是否存在。记录只补充归属和创建意图，不替代实际检测。
 
@@ -83,9 +81,9 @@ Session 名由仓库共享 Git 目录的绝对路径哈希生成，并使用 `@t
 
 ## 已完成与未承诺的功能
 
-已完成：`init`、`new`、`ls`、`open`、`stop`、`rm`、`config add/list/show/remove`、`config remote add/remove/default`、`clone`、`pr`、全局 `--repo` 和 `--config`，以及 Zsh 动态补全。具体参数与限制见 README。
+已完成：`add`、`new`、`ls`、`open`、`stop`、`rm`、`pr`、全局 Console、`--config` 和 Zsh 动态补全。具体参数与限制见 README。
 
-`pr [任务名]` 是用户明确批准新增的联网命令，统一封装 GitHub PR 与 GitLab MR。省略任务名时按调用者所在 Worktree 识别，保留 `--repo` 切换前的调用目录用于任务识别和正文相对路径。remote 优先级为显式参数、分支 upstream、唯一 remote；平台按公共域名判断，自建域名通过 `--provider` 指定。不新增项目配置项。
+`pr PROJECT TASK` 是显式联网命令，统一封装 GitHub PR 与 GitLab MR。项目与任务均必填；正文文件的相对路径仍以命令调用目录解析。remote 优先级为显式参数、分支 upstream、唯一 remote；平台按公共域名判断，自建域名通过 `--provider` 指定。不新增项目配置项。
 
 只复用同仓库、同源/目标分支的开放请求；否则创建草稿。upstream remote 对应的源分支尊重其 `branch.*.merge` 映射。目标默认项目 `target`。没有 `--push` 时已有请求只返回链接；创建前以 `ls-remote` 验证目标存在及源分支提交与本地一致，不依赖陈旧的 remote-tracking 引用。`--push` 使用显式单分支 refspec 并设置 upstream，不强推、不附带 tag。fetch/push 仓库不一致或存在多个 URL 时拒绝操作，跨 Fork 暂不支持。
 
@@ -107,6 +105,10 @@ Zsh 展示通过自定义 `EnvCompleter` 注册脚本，候选生成与转义继
 原始需求中的 Codex `resume` 和 Turn 完成通知属于早期想法。由于最终不管理 Codex 生命周期，它们不在当前范围内，不能直接当作“第二阶段必做功能”。
 
 Linux 实机、真实 SSH 断线重连、真实终端 attach 的键盘和显示、托管平台网络认证仍是待验证项。当前不支持裸仓库、非 UTF-8 路径、仓库迁移自动修复。Squash/rebase 合并可能无法通过祖先关系检查；`ls` 的 Clean 不含 ignored 文件，而删除检查包含它们。这些限制不应被隐藏，也不意味着要立即扩大功能范围。
+
+## 历史交接记录
+
+以下记录保留当时的行为和验证结果，其中旧命令及配置格式已被文末的 CLI 全局化决定取代，不应作为当前接口使用。
 
 ## 交接快照：2026-10-18
 
@@ -220,3 +222,23 @@ Worktree 保留任务名的目录层级，例如 `<root>/feat/login/`。拒绝�
 验证：fmt、Clippy 和全部 58 个测试通过（11 单元、5 补全、13 Console、8 PR/MR、21 工作流）。新增 PTY 测试覆盖清单展示、选项默认取消和显式 ignored 删除；CLI 测试覆盖默认保护、未跟踪/暂存文件保护、清单变化拒绝及普通 worktree remove 成功清理。未提交、未安装。
 
 删除弹窗改为独立固定的选项区：上下键或 j/k 选择选项，当前行高亮，空格切换勾选；Tab/左右键选择取消或确认按钮，Enter 执行所选按钮。移除 i 快捷键，修改任一选项仍重置为取消。清单与错误独立滚动，选项和按钮始终可见，保留整体居中布局。
+
+### 项目状态统一存全局（2026-10-19）
+
+项目配置、任务记录和项目锁改存登记表同目录的 `projects/<仓库 ID>/`，默认位于 `~/.twig/`。ID 复用共享 Git 目录规范化绝对路径的稳定 FNV-1a 哈希，主目录与关联 Worktree 共用，不同克隆独立。Session 命名和资源归属规则不变；读取配置时核对其主目录所属共享 Git 目录。
+
+所有命令（包括 clone、控制台表单和补全）传递所选登记表路径；`--config` 在切换工作目录之前解析。同目录登记表共享状态，不同目录隔离配置与任务记录；这不隔离 Git、Worktree 或 tmux 等外部资源。不引入额外数据目录参数或数据库。
+
+按用户要求直接进行不兼容变更，不读取、检测或迁移旧 `.git/twig/`，也不删除旧数据和已有资源。取消登记保留状态；仓库删除后的残留清理和仓库移动修复不在本次范围。
+
+验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过，共 60 个测试（11 单元、5 补全、13 Console、8 PR/MR、23 工作流）。新增覆盖默认全局目录、Worktree 共享、同目录登记表共享、不同数据根目录与克隆隔离、配置归属拒绝及旧文件原样保留。已同步真实 Zsh Tab、控制台 PTY、tmux 客户端及本地 remote 测试的存储路径。分支为 refactor/global-project-storage；未提交、未安装、未推送。
+
+### CLI 全局化与顶层命令统一（2026-10-19）
+
+用户确认顶层 add/ls/new/open/stop/rm/pr，不增加 project 层级。项目始终用登记别名定位，任务命令要求显式项目名和任务名。ls 不带项目列项目，带项目列任务；rm PROJECT 仅取消登记并保留资源，rm PROJECT TASK 执行原安全删除。任务删除选项缺少任务名时拒绝操作。
+
+删除 init/config/clone/--repo，不保留兼容别名，登记表仅保存 path。克隆与 remote 交由 Git，PR/MR 继续查询实际 Git remote。add 接收已有仓库路径与显式别名，首次初始化可指定 base/target/root；同路径复用，冲突拒绝，部分失败可重试补登记。已有配置时不重建窗口，任务创建和进入按原规则准备窗口。
+
+控制台登记、任务创建和删除统一调用公开顶层命令，隐藏的 --print-name 仅供登记表单获取复用后的别名，移除原 __console-register 入口。补全按第一个位置参数补项目、第二个补任务，分支与 remote 来自指定项目；不推断 cwd。
+
+本次验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过，共 56 个测试（11 单元、5 补全、13 Console、8 PR/MR、19 工作流）。移除旧 clone/remote/init 专属测试，新增全局命令参数层级、缺参拒绝、取消登记保留资源、重新登记、同路径复用、别名冲突、相对路径及部分初始化重试验证；真实 Zsh Tab 与控制台 PTY、独立 tmux socket 生命周期测试通过。上一轮全局存储改动保留，本次未提交、未安装、未推送。

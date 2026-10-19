@@ -1,3 +1,5 @@
+mod support;
+
 use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;
 
@@ -17,6 +19,7 @@ fn git(cwd: &Path, args: &[&str]) {
 fn complete(cwd: &Path, args: &[&str]) -> (String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_twig"))
         .current_dir(cwd)
+        .env("HOME", cwd)
         .env("COMPLETE", "zsh")
         .env("_CLAP_COMPLETE_INDEX", args.len().to_string())
         .args(["--", "twig"])
@@ -41,14 +44,13 @@ fn commands_options_and_paths_without_a_repository() {
     let temp = TempDir::new().unwrap();
     assert!(values(temp.path(), &["op"]).starts_with("open:"));
     assert_eq!(values(temp.path(), &["rm", "--keep"]), "--keep-branch");
-    assert!(values(temp.path(), &["config", "remote", "d"]).starts_with("default:"));
     fs::create_dir(temp.path().join("work trees")).unwrap();
     fs::write(temp.path().join("settings.toml"), "").unwrap();
-    assert!(values(temp.path(), &["init", "--root", "wo"]).contains("work trees/"));
+    assert!(values(temp.path(), &["add", "demo", "--root", "wo"]).contains("work trees/"));
     assert!(values(temp.path(), &["--config", "set"]).contains("settings.toml"));
-    let (out, err) = complete(temp.path(), &["open", "missing-task"]);
+    let (out, err) = complete(temp.path(), &["open", "missing-project"]);
     assert!(out.is_empty());
-    assert!(err.contains("not a git repository"));
+    assert!(err.is_empty());
     assert!(!temp.path().join(".git").exists());
 }
 
@@ -90,69 +92,90 @@ fn dynamic_values_follow_config_repo_and_shared_worktree_state() {
             worktree.to_str().unwrap(),
         ],
     );
-    let state_dir = repo.join(".git/twig");
-    fs::create_dir(&state_dir).unwrap();
+    let state_dir = support::project_dir(&repo, &config);
+    fs::create_dir_all(&state_dir).unwrap();
     let state =
         serde_json::json!({"auth": {"branch": "feature/auth", "base": "main", "path": worktree}})
             .to_string();
     fs::write(state_dir.join("state.json"), &state).unwrap();
     // 已有锁不应阻止只读补全，也不能被补全移除。
     fs::write(state_dir.join("lock"), "existing lock").unwrap();
-    fs::write(&config, format!("[projects.demo]\npath = {:?}\nmain = 'main'\ndefault_remote = 'origin'\n[projects.demo.remotes]\norigin = 'local-origin'\nupstream = 'local-upstream'\n", repo.to_str().unwrap())).unwrap();
+    fs::write(
+        &config,
+        format!("[projects.demo]\npath = {:?}\n", repo.to_str().unwrap()),
+    )
+    .unwrap();
     let cfg = config.to_str().unwrap();
-    for args in [
-        vec!["--config", cfg, "--repo", "de"],
-        vec!["--config", cfg, "clone", "de"],
-        vec!["config", "show", "--config", cfg, "de"],
-        vec!["--config", cfg, "config", "remove", "de"],
-        vec!["--config", cfg, "config", "remote", "add", "de"],
-    ] {
-        assert_eq!(values(temp.path(), &args), "demo");
-    }
-    for action in ["new", "open", "stop", "rm"] {
+    for action in ["ls", "new", "open", "stop", "rm", "pr"] {
         assert_eq!(
-            values(
-                temp.path(),
-                &["--config", cfg, "--repo", "demo", action, "a"]
-            ),
+            values(temp.path(), &["--config", cfg, action, "de"]),
+            "demo"
+        );
+    }
+    for action in ["new", "open", "stop", "rm", "pr"] {
+        assert_eq!(
+            values(temp.path(), &["--config", cfg, action, "demo", "a"]),
             "auth"
         );
-        assert_eq!(values(&worktree, &[action, "a"]), "auth");
+        assert_eq!(
+            values(&worktree, &["--config", cfg, action, "demo", "a"]),
+            "auth"
+        );
     }
     assert_eq!(
-        values(temp.path(), &["open", "--config", cfg, "--repo=demo", "a"]),
+        values(temp.path(), &["open", "demo", "--config", cfg, "a"]),
         "auth"
     );
     assert_eq!(
         values(
             temp.path(),
-            &[&format!("--config={cfg}"), "--repo=demo", "open", "a"]
+            &[&format!("--config={cfg}"), "open", "demo", "a"]
         ),
         "auth"
+    );
+    assert_eq!(
+        values(
+            temp.path(),
+            &["--config", cfg, "new", "demo", "next", "--base", "dev"]
+        ),
+        "develop"
+    );
+    assert_eq!(
+        values(
+            &repo,
+            &["--config", cfg, "rm", "demo", "auth", "--target=dev"]
+        ),
+        "--target=develop"
+    );
+    assert_eq!(
+        values(
+            &repo,
+            &["--config", cfg, "new", "demo", "next", "--base", "remote"]
+        ),
+        ""
+    );
+    git(&repo, &["remote", "add", "upstream", "local-origin"]);
+    assert_eq!(
+        values(
+            temp.path(),
+            &["--config", cfg, "pr", "demo", "auth", "--remote", "up"]
+        ),
+        "upstream"
     );
     assert_eq!(
         values(
             temp.path(),
             &[
-                "--config", cfg, "--repo", "demo", "new", "next", "--base", "dev"
+                "add",
+                "demo",
+                "--path",
+                repo.to_str().unwrap(),
+                "--base",
+                "dev"
             ]
         ),
         "develop"
     );
-    assert_eq!(
-        values(&repo, &["rm", "auth", "--target=dev"]),
-        "--target=develop"
-    );
-    assert_eq!(values(&repo, &["init", "--base", "remote"]), "");
-    for action in ["remove", "default"] {
-        assert_eq!(
-            values(
-                temp.path(),
-                &["--config", cfg, "config", "remote", action, "demo", "up"]
-            ),
-            "upstream"
-        );
-    }
     assert_eq!(
         fs::read_to_string(state_dir.join("state.json")).unwrap(),
         state
@@ -170,7 +193,7 @@ fn dynamic_values_follow_config_repo_and_shared_worktree_state() {
 fn missing_or_invalid_registry_is_never_created_or_overwritten() {
     let temp = TempDir::new().unwrap();
     let config = temp.path().join("missing/config.toml");
-    let args = ["--config", config.to_str().unwrap(), "--repo", ""];
+    let args = ["--config", config.to_str().unwrap(), "ls", "de"];
     assert_eq!(values(temp.path(), &args), "");
     assert!(!config.parent().unwrap().exists());
     fs::create_dir(config.parent().unwrap()).unwrap();
@@ -193,8 +216,8 @@ fn zsh_registration_loads_and_invokes_the_generated_function() {
 autoload -Uz compinit
 compinit -D
 source <(COMPLETE=zsh "$1")
-words=(twig config remote d)
-CURRENT=4
+words=(twig op)
+CURRENT=2
 _describe() { print -rl -- "${(@P)3}"; }
 _twig_complete
 "#,
@@ -209,7 +232,7 @@ _twig_complete
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("default:"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("open:"));
 }
 
 #[test]
@@ -218,8 +241,8 @@ fn zsh_tab_orders_tasks_and_handles_quoted_paths() {
     fs::create_dir_all(temp.path().join("work trees/nested")).unwrap();
     fs::create_dir_all(temp.path().join("foo:bar/nested")).unwrap();
     git(temp.path(), &["init", "-b", "main"]);
-    let state_dir = temp.path().join(".git/twig");
-    fs::create_dir(&state_dir).unwrap();
+    let state_dir = support::project_dir(temp.path(), &temp.path().join(".twig/config.toml"));
+    fs::create_dir_all(&state_dir).unwrap();
     let feature = serde_json::json!({"branch": "main", "base": "main", "path": temp.path()});
     fs::write(
         state_dir.join("state.json"),
@@ -227,10 +250,18 @@ fn zsh_tab_orders_tasks_and_handles_quoted_paths() {
     )
     .unwrap();
     let registry = format!(
-        "[projects.demo]\npath = {:?}\nmain = 'main'\ndefault_remote = 'origin'\n[projects.demo.remotes]\norigin = 'local'\n",
+        "[projects.demo]\npath = {:?}\n",
         temp.path().to_str().unwrap()
     );
+    fs::write(temp.path().join(".twig/config.toml"), &registry).unwrap();
     fs::write(temp.path().join("custom config.toml"), registry).unwrap();
+    let custom_state = support::project_dir(temp.path(), &temp.path().join("custom config.toml"));
+    fs::create_dir_all(&custom_state).unwrap();
+    fs::copy(
+        state_dir.join("state.json"),
+        custom_state.join("state.json"),
+    )
+    .unwrap();
     // zpty 驱动真实 ZLE/Tab，不替换 _describe；用 widget 读取最终选中的输入。
     let output = Command::new("zsh")
         .args(["-fc", r#"
@@ -258,46 +289,47 @@ start_shell() {
 }
 for action in open new stop rm; do
     start_shell
-    zpty -w -n shell "twig $action "$'\t\t\x18q'
-    wait_for "TWIG_BUFFER=twig $action alpha" || exit 1
+    zpty -w -n shell "twig $action demo "$'\t\t\x18q'
+    wait_for "TWIG_BUFFER=twig $action demo alpha" || exit 1
     # 在列表里 alpha 先于选项出现，说明文字也仍保留。
-    [[ $transcript == *alpha*beta*--repo*'在任意目录操作已登记项目'* ]] || {
+    [[ $transcript == *alpha*beta*--config*'使用其他登记表'* ]] || {
         print -ru2 -- "$transcript"
         exit 1
     }
 done
 start_shell
-zpty -w -n shell $'twig open feat/l\t\x18q'
-wait_for 'TWIG_BUFFER=twig open feat/login ' || exit 1
+zpty -w -n shell $'twig open demo feat/l\t\x18q'
+wait_for 'TWIG_BUFFER=twig open demo feat/login ' || exit 1
 start_shell
-zpty -w -n shell $'twig open b\t\x18q'
-wait_for 'TWIG_BUFFER=twig open beta ' || exit 1
-[[ $transcript != *--repo* ]] || exit 1
+zpty -w -n shell $'twig open demo b\t\x18q'
+wait_for 'TWIG_BUFFER=twig open demo beta ' || exit 1
+[[ $transcript != *--config* ]] || exit 1
 start_shell
-zpty -w -n shell $'twig open --\t\t\x18q'
-wait_for 'TWIG_BUFFER=twig open --repo' || exit 1
+zpty -w -n shell $'twig open demo --\t\t\x18q'
+wait_for 'TWIG_BUFFER=twig open demo --config' || exit 1
 [[ $transcript != *alpha* && $transcript != *beta* ]] || exit 1
 start_shell
-zpty -w -n shell $'twig init --root wo\t\x18q'
-wait_for 'TWIG_BUFFER=twig init --root work\ trees/' || exit 1
+zpty -w -n shell $'twig add demo --root wo\t\x18q'
+wait_for 'TWIG_BUFFER=twig add demo --root work\ trees/' || exit 1
 for option in '--root ' '--root='; do
     for candidate_path in 'work\ trees' 'foo:bar'; do
         start_shell
         # 连按两次补全：先补目录，再输入子目录前缀，验证没有多余空格。
         prefix=${candidate_path[1,2]}
-        zpty -w -n shell "twig init $option$prefix"$'\tne\t\x18q'
-        wait_for "TWIG_BUFFER=twig init $option$candidate_path/nested/" || exit 1
+        zpty -w -n shell "twig add demo $option$prefix"$'\tne\t\x18q'
+        wait_for "TWIG_BUFFER=twig add demo $option$candidate_path/nested/" || exit 1
     done
 done
 for option in '--config ' '--config='; do
     for config in "'custom config.toml'" '"custom config.toml"' 'custom\ config.toml'; do
         start_shell
-        zpty -w -n shell "twig $option$config --repo demo open a"$'\t\x18q'
-        wait_for "TWIG_BUFFER=twig $option$config --repo demo open alpha " || exit 1
+        zpty -w -n shell "twig $option$config open demo a"$'\t\x18q'
+        wait_for "TWIG_BUFFER=twig $option$config open demo alpha " || exit 1
     done
 done
 "#])
         .current_dir(temp.path())
+        .env("HOME", temp.path())
         .env("TWIG_TEST_BIN", env!("CARGO_BIN_EXE_twig"))
         .env("TERM", "xterm")
         .env("COLUMNS", "120")

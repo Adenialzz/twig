@@ -1,5 +1,5 @@
 use crate::git::git;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -33,17 +33,18 @@ pub struct Project {
 }
 
 impl Project {
-    pub fn discover() -> Result<Self> {
-        Self::discover_at(&std::env::current_dir()?)
-    }
-    pub fn discover_at(cwd: &Path) -> Result<Self> {
+    pub fn discover_at(cwd: &Path, registry: &Path) -> Result<Self> {
         let common = PathBuf::from(git(
             cwd,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )?)
         .canonicalize()?;
         Ok(Self {
-            dir: common.join("twig"),
+            dir: registry
+                .parent()
+                .context("登记表缺少父目录")?
+                .join("projects")
+                .join(repository_id(&common)),
             common,
         })
     }
@@ -53,11 +54,18 @@ impl Project {
     }
     pub fn config(&self) -> Result<Config> {
         let config: Config = serde_json::from_slice(
-            &fs::read(self.dir.join("config.json")).context("请先执行 twig init")?,
+            &fs::read(self.dir.join("config.json"))
+                .context("请先执行 twig add <项目名> --path <仓库路径>")?,
         )?;
         if config.version != 1 {
             bail!("不支持配置版本 {}", config.version);
         }
+        let common = PathBuf::from(git(
+            &config.main,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?)
+        .canonicalize()?;
+        ensure!(common == self.common, "项目配置的仓库归属不一致");
         Ok(config)
     }
     pub fn state(&self) -> Result<State> {
@@ -123,7 +131,7 @@ pub fn task_name(value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn session(path: &Path) -> String {
+pub fn repository_id(path: &Path) -> String {
     let hash = path
         .as_os_str()
         .as_encoded_bytes()
@@ -131,5 +139,9 @@ pub fn session(path: &Path) -> String {
         .fold(0xcbf29ce484222325u64, |h, b| {
             (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
         });
-    format!("twig-{hash:016x}")
+    format!("{hash:016x}")
+}
+
+pub fn session(path: &Path) -> String {
+    format!("twig-{}", repository_id(path))
 }
