@@ -361,12 +361,13 @@ fn collect(
     let mut git_project = None;
     let mut cursor: Option<String> = None;
     let mut seen_cursors = HashSet::new();
+    let mut handled_refresh = 0;
     while !cancel.load(Ordering::Relaxed) {
-        let previous = request.clone();
         for next in requests.try_iter() {
             request = next;
         }
-        let force = request.refresh != previous.refresh;
+        let force = request.refresh != handled_refresh;
+        handled_refresh = request.refresh;
         let mut dirty = false;
         if force || due(registry_at, 10) {
             match repositories(&registry) {

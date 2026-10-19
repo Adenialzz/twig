@@ -18,9 +18,17 @@ pub struct Form {
     pub directory_selection: usize,
     pub directory_error: Option<String>,
     pub operation_started: bool,
+    pub deletion: Option<Deletion>,
     default_alias: Option<String>,
     completion_input: Option<String>,
     job: Option<Job>,
+}
+pub struct Deletion {
+    pub branch: String,
+    pub path: std::path::PathBuf,
+    pub expected: String,
+    pub keep_branch: bool,
+    pub confirm: bool,
 }
 struct Job {
     child: Child,
@@ -38,6 +46,7 @@ impl Form {
             directory_selection: 0,
             directory_error: None,
             operation_started: false,
+            deletion: None,
             default_alias: None,
             completion_input: None,
             job: None,
@@ -55,6 +64,27 @@ impl Form {
     }
     pub fn completing_path(&self) -> bool {
         self.project.is_none() && self.field == 0 && !self.busy()
+    }
+    pub fn delete(
+        project: String,
+        name: String,
+        common: &Path,
+        branch: String,
+        path: std::path::PathBuf,
+    ) -> Result<Self> {
+        let expected = serde_json::to_string(&(common, &branch, &path))?;
+        Ok(Self {
+            project: Some(project),
+            fields: [name, String::new()],
+            deletion: Some(Deletion {
+                branch,
+                path,
+                expected,
+                keep_branch: false,
+                confirm: false,
+            }),
+            ..Self::project()
+        })
     }
     pub fn complete_path(&mut self) -> bool {
         if !self.completing_path() {
@@ -104,12 +134,28 @@ impl Form {
     }
     fn submit(&mut self, registry: &Path) -> Result<()> {
         ensure!(
-            !self.fields[0].trim().is_empty() && !self.fields[1].trim().is_empty(),
+            self.deletion.is_some()
+                || (!self.fields[0].trim().is_empty() && !self.fields[1].trim().is_empty()),
             "请填写全部字段"
         );
         let mut command = Command::new(std::env::current_exe()?);
         command.arg("--config").arg(registry);
-        if let Some(project) = &self.project {
+        if let Some(deletion) = &mut self.deletion {
+            ensure!(deletion.confirm, "请明确确认删除");
+            deletion.confirm = false;
+            command.args([
+                "--repo",
+                self.project.as_deref().unwrap(),
+                "rm",
+                &self.fields[0],
+                "--yes",
+                "--expected-task",
+                &deletion.expected,
+            ]);
+            if deletion.keep_branch {
+                command.arg("--keep-branch");
+            }
+        } else if let Some(project) = &self.project {
             crate::config::task_name(&self.fields[0])?;
             command.args([
                 "--repo",
@@ -169,7 +215,14 @@ impl Form {
         job.output.read_to_string(&mut output)?;
         ensure!(status.success(), "{}", output.trim());
         let selection = if let Some(project) = &self.project {
-            (project.clone(), self.fields[0].clone())
+            (
+                project.clone(),
+                if self.deletion.is_some() {
+                    "main".into()
+                } else {
+                    self.fields[0].clone()
+                },
+            )
         } else {
             let name: String =
                 serde_json::from_str(output.lines().last().context("登记未返回项目别名")?)?;

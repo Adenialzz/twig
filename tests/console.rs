@@ -785,3 +785,78 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.child.wait().unwrap().success());
 }
+
+#[test]
+fn delete_task_confirmation_protection_and_keep_branch() {
+    let f = Fixture::new();
+    f.init();
+    let state_path = f.repo.join(".git/twig/state.json");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+    let mut p = f.terminal(false, Some("demo"));
+    p.wait("auth");
+    p.send(b"\r/delete\r");
+    p.wait("不能删除主工作目录");
+    p.send(b"G/delete\r");
+    p.wait("确认删除");
+    // 默认取消，Enter 不产生写操作。
+    p.send(b"\r");
+    p.wait("主工作目录");
+    assert!(path.is_dir());
+    fs::write(path.join("unsaved"), "keep me").unwrap();
+    p.send(b"/delete\r\t\r");
+    p.wait("未提交");
+    assert!(path.is_dir());
+    assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
+    fs::remove_file(path.join("unsaved")).unwrap();
+    // 失败后回到取消，空格保留分支，再明确选择确认。
+    p.bytes.clear();
+    p.text.clear();
+    p.send(b" \t\r");
+    p.wait("已选中 demo / main");
+    assert!(!path.exists());
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert!(state.get("auth").is_none());
+    f.git(&["show-ref", "--verify", "refs/heads/auth"]);
+    p.send(b"/delete\r");
+    p.wait("不能删除主工作目录");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
+fn delete_task_removes_branch_and_rejects_changed_identity() {
+    let f = Fixture::new();
+    f.init();
+    let state_path = f.repo.join(".git/twig/state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let mut p = f.terminal(false, Some("demo"));
+    p.wait("auth");
+    p.send(b"\rGd");
+    p.wait("再按 d 打开删除确认");
+    assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
+    p.send(b"d");
+    p.wait("确认删除");
+    state["auth"]["branch"] = "changed".into();
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    p.send(b"\t\r");
+    p.wait("任务归属已变化");
+    assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
+    state["auth"]["branch"] = "auth".into();
+    fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    p.bytes.clear();
+    p.text.clear();
+    p.send(b"\t\r");
+    p.wait("已选中 demo / main");
+    let output = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["show-ref", "--verify", "refs/heads/auth"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.child.wait().unwrap().success());
+}

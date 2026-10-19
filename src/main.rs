@@ -97,6 +97,9 @@ enum Action {
         name: String,
         #[arg(long)]
         keep_branch: bool,
+        /// 控制台确认时的仓库、分支和路径快照
+        #[arg(long, hide = true)]
+        expected_task: Option<String>,
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         target: Option<String>,
         #[arg(short = 'y', long)]
@@ -225,17 +228,29 @@ fn execute(cli: Cli) -> Result<()> {
         Action::Rm {
             name,
             keep_branch,
+            expected_task,
             target,
             yes,
-        } => remove(
-            &project,
-            &config,
-            &mut state,
-            &name,
-            keep_branch,
-            target,
-            yes,
-        ),
+        } => {
+            if let Some(expected) = expected_task {
+                let (common, branch, path): (PathBuf, String, PathBuf) =
+                    serde_json::from_str(&expected)?;
+                let task = feature(&state, &name)?;
+                ensure!(
+                    project.common == common && task.branch == branch && task.path == path,
+                    "任务归属已变化，请取消并重新确认删除"
+                );
+            }
+            remove(
+                &project,
+                &config,
+                &mut state,
+                &name,
+                keep_branch,
+                target,
+                yes,
+            )
+        }
         Action::Console
         | Action::ConsoleRegister { .. }
         | Action::Init { .. }

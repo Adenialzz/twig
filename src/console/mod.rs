@@ -41,8 +41,10 @@ pub(super) struct App {
     located: bool,
     form: Option<form::Form>,
     pending_selection: Option<(String, String)>,
+    pending_removed: Option<String>,
     pane_prefix: bool,
     top_prefix: bool,
+    delete_prefix: bool,
 }
 struct SearchBackup {
     filters: [String; 3],
@@ -83,8 +85,10 @@ impl App {
             located: false,
             form: None,
             pending_selection: None,
+            pending_removed: None,
             pane_prefix: false,
             top_prefix: false,
+            delete_prefix: false,
         }
     }
     fn begin_search(&mut self) {
@@ -107,7 +111,7 @@ impl App {
         if self.search_input.starts_with('/') {
             return vec![];
         }
-        ["new", "refresh", "help", "quit"]
+        ["new", "delete", "refresh", "help", "quit"]
             .into_iter()
             .filter(|name| name.starts_with(&self.search_input))
             .collect()
@@ -185,6 +189,7 @@ impl App {
                     self.restore_search();
                     match command {
                         "new" => self.new_form(),
+                        "delete" => self.delete_form(),
                         "refresh" => {
                             self.refresh += 1;
                             self.message = None;
@@ -212,6 +217,29 @@ impl App {
             _ => {}
         }
         false
+    }
+    fn delete_form(&mut self) {
+        let result = (|| -> Result<form::Form> {
+            ensure!(self.focus == 1, "/delete：请先切到任务区");
+            let repo = self.repo().ok_or_else(|| anyhow::anyhow!("请先选择项目"))?;
+            let task = self.task().ok_or_else(|| anyhow::anyhow!("请先选择任务"))?;
+            ensure!(task.name != "main", "不能删除主工作目录");
+            let (project, _) = repo
+                .context
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("项目不可用"))?;
+            form::Form::delete(
+                repo.name.clone(),
+                task.name.clone(),
+                &project.common,
+                task.branch.clone(),
+                task.path.clone(),
+            )
+        })();
+        match result {
+            Ok(form) => self.form = Some(form),
+            Err(error) => self.message = Some(format!("{error:#}")),
+        }
     }
     fn repos(&self) -> Vec<&data::Repo> {
         let filter = self.filters[0].to_lowercase();
@@ -274,6 +302,10 @@ impl App {
     fn reconcile(&mut self) {
         if let Some((project, task)) = &self.pending_selection
             && let Some(repo) = self.snapshot.repos.iter().find(|r| &r.name == project)
+            && !repo
+                .tasks
+                .iter()
+                .any(|task| self.pending_removed.as_ref() == Some(&task.name))
             && let Some(task) = repo.tasks.iter().find(|t| &t.name == task)
         {
             self.project = Some(project.clone());
@@ -285,6 +317,7 @@ impl App {
             self.located = true;
             self.message = Some(format!("操作成功，已选中 {project} / {}", task.name));
             self.pending_selection = None;
+            self.pending_removed = None;
         }
         if !self.located && !self.snapshot.repos.is_empty() {
             if let Some(name) = &self.initial_repo {
@@ -421,10 +454,15 @@ fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()
         if let Some(form) = &mut app.form {
             match form.poll() {
                 Ok(Some(selection)) => {
+                    app.pending_removed = form.deletion.as_ref().map(|_| form.fields[0].clone());
                     app.pending_selection = Some(selection);
                     app.form = None;
                     app.refresh += 1;
-                    app.message = Some("操作成功，正在刷新项目与任务…".into());
+                    app.message = Some(if app.pending_removed.is_some() {
+                        "删除已完成，正在刷新项目与任务…".into()
+                    } else {
+                        "操作成功，正在刷新项目与任务…".into()
+                    });
                     worker.requests.send(app.request())?;
                 }
                 Err(error) => form.error = Some(format!("{error:#}")),
@@ -469,6 +507,29 @@ fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()
                 continue;
             }
             if form.busy() {
+                continue;
+            }
+            if let Some(deletion) = &mut form.deletion {
+                match key.code {
+                    KeyCode::Esc => app.form = None,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.form = None
+                    }
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                        deletion.confirm = !deletion.confirm
+                    }
+                    KeyCode::Char(' ') => {
+                        deletion.keep_branch = !deletion.keep_branch;
+                        deletion.confirm = false;
+                    }
+                    KeyCode::Enter if !deletion.confirm => app.form = None,
+                    KeyCode::Enter => {
+                        if let Err(error) = form.confirm(&registry) {
+                            form.error = Some(format!("{error:#}"));
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
             match key.code {
@@ -538,6 +599,16 @@ fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()
             worker.requests.send(app.request())?;
             continue;
         }
+        if app.delete_prefix {
+            app.delete_prefix = false;
+            if key.code == KeyCode::Char('d') && key.modifiers.is_empty() {
+                app.delete_form();
+                continue;
+            }
+            if key.code == KeyCode::Esc {
+                continue;
+            }
+        }
         if app.top_prefix {
             app.top_prefix = false;
             if key.code == KeyCode::Char('g') && !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -556,6 +627,9 @@ fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()
             continue;
         }
         match key.code {
+            KeyCode::Char('d') if app.focus == 1 && key.modifiers.is_empty() => {
+                app.delete_prefix = true;
+            }
             KeyCode::Char('q') => break,
             KeyCode::Char('?') => app.help = true,
             KeyCode::PageDown => app.scroll = app.scroll.saturating_add(4),
