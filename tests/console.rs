@@ -805,7 +805,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     assert!(path.is_dir());
     fs::write(path.join("unsaved"), "keep me").unwrap();
     p.send(b"/delete\r\t\r");
-    p.wait("未提交");
+    p.wait("删除失败");
     assert!(path.is_dir());
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
     fs::remove_file(path.join("unsaved")).unwrap();
@@ -856,6 +856,40 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
         .output()
         .unwrap();
     assert!(!output.status.success());
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
+fn delete_ignored_requires_option_and_keeps_default_cancel() {
+    let f = Fixture::new();
+    f.init();
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.repo.join(".git/twig/state.json")).unwrap()).unwrap();
+    let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+    fs::write(f.repo.join(".git/info/exclude"), ".venv/\n").unwrap();
+    fs::create_dir(path.join(".venv")).unwrap();
+    fs::write(path.join(".venv/data"), "ignored").unwrap();
+    let mut p = f.terminal(false, Some("demo"));
+    p.wait("auth");
+    p.send(b"\rGdd");
+    p.wait("同时删除被忽略文件");
+    p.send(b"\x1b[6~");
+    p.wait(".venv/");
+    // i 已移除，不能开启 ignored 删除。
+    p.send(b"i\t\r");
+    p.wait("删除失败");
+    assert!(path.join(".venv/data").exists());
+    // 切换选项会回到默认取消，Enter 不删除。
+    p.send(b"\x1b[B \r");
+    p.wait("主工作目录");
+    assert!(path.join(".venv/data").exists());
+    p.bytes.clear();
+    p.text.clear();
+    p.send(b"ddj \t\r");
+    p.wait("已选中 demo / main");
+    assert!(!path.exists());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.child.wait().unwrap().success());

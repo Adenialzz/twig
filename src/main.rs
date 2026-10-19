@@ -95,16 +95,27 @@ enum Action {
     Rm {
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
-        #[arg(long)]
-        keep_branch: bool,
+        #[command(flatten)]
+        options: RemoveOptions,
         /// 控制台确认时的仓库、分支和路径快照
         #[arg(long, hide = true)]
         expected_task: Option<String>,
-        #[arg(long, add = ArgValueCompleter::new(completion::branches))]
-        target: Option<String>,
-        #[arg(short = 'y', long)]
-        yes: bool,
     },
+}
+
+#[derive(clap::Args)]
+struct RemoveOptions {
+    #[arg(long)]
+    keep_branch: bool,
+    /// 同时删除 Worktree 中被 Git 忽略的文件（仍保护未提交和未跟踪文件）
+    #[arg(long)]
+    delete_ignored: bool,
+    #[arg(long, hide = true)]
+    expected_ignored: Option<String>,
+    #[arg(long, add = ArgValueCompleter::new(completion::branches))]
+    target: Option<String>,
+    #[arg(short = 'y', long)]
+    yes: bool,
 }
 
 fn main() {
@@ -227,10 +238,8 @@ fn execute(cli: Cli) -> Result<()> {
         }
         Action::Rm {
             name,
-            keep_branch,
+            options,
             expected_task,
-            target,
-            yes,
         } => {
             if let Some(expected) = expected_task {
                 let (common, branch, path): (PathBuf, String, PathBuf) =
@@ -241,15 +250,7 @@ fn execute(cli: Cli) -> Result<()> {
                     "任务归属已变化，请取消并重新确认删除"
                 );
             }
-            remove(
-                &project,
-                &config,
-                &mut state,
-                &name,
-                keep_branch,
-                target,
-                yes,
-            )
+            remove(&project, &config, &mut state, &name, &options)
         }
         Action::Console
         | Action::ConsoleRegister { .. }
@@ -546,10 +547,11 @@ fn remove(
     config: &Config,
     state: &mut State,
     name: &str,
-    keep_branch: bool,
-    target: Option<String>,
-    yes: bool,
+    options: &RemoveOptions,
 ) -> Result<()> {
+    let keep_branch = options.keep_branch;
+    let yes = options.yes;
+    let target = options.target.clone();
     config::task_name(name)?;
     let Some(feature) = state.get(name).cloned() else {
         println!("任务 {name} 已不存在；未操作任何外部资源");
@@ -565,13 +567,33 @@ fn remove(
                     "status",
                     "--porcelain",
                     "--untracked-files=all",
-                    "--ignored=matching",
+                    if options.delete_ignored {
+                        "--ignored=no"
+                    } else {
+                        "--ignored=matching"
+                    },
                 ],
             )?;
             ensure!(
                 dirty.is_empty(),
                 "Worktree 有未提交、未跟踪或被忽略的文件；请先保存或手动清理：\n{dirty}"
             );
+        }
+        if present && options.delete_ignored {
+            let ignored = git::ignored(&feature.path)?;
+            if let Some(expected) = &options.expected_ignored {
+                let expected: Vec<String> = serde_json::from_str(expected)?;
+                ensure!(
+                    ignored == expected,
+                    "被忽略文件清单已变化，请取消并重新打开删除确认"
+                );
+            }
+            if report && !ignored.is_empty() {
+                eprintln!(
+                    "同时删除以下被忽略文件/目录（包含目录内全部内容）：\n{}",
+                    ignored.join("\n")
+                );
+            }
         }
         let branch_exists = git::exists(&config.main, &feature.branch)?;
         if branch_exists && !keep_branch {
@@ -625,7 +647,12 @@ fn remove(
     }
     confirm(
         &format!(
-            "移除 {name} 的窗口和 Worktree{}？",
+            "移除 {name} 的窗口和 Worktree{}{}？",
+            if options.delete_ignored {
+                "（包含被忽略文件）"
+            } else {
+                ""
+            },
             if keep_branch {
                 "，保留分支"
             } else {

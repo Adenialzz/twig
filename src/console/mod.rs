@@ -465,7 +465,10 @@ fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()
                     });
                     worker.requests.send(app.request())?;
                 }
-                Err(error) => form.error = Some(format!("{error:#}")),
+                Err(error) => {
+                    form.error = Some(format!("{error:#}"));
+                    form.scroll = 0;
+                }
                 Ok(None) => {}
             }
         }
@@ -518,8 +521,14 @@ fn run_inner(registry: PathBuf, repo: Option<String>, cwd: PathBuf) -> Result<()
                     KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
                         deletion.confirm = !deletion.confirm
                     }
+                    KeyCode::Up | KeyCode::Char('k') => deletion.option = 0,
+                    KeyCode::Down | KeyCode::Char('j') => deletion.option = 1,
                     KeyCode::Char(' ') => {
-                        deletion.keep_branch = !deletion.keep_branch;
+                        if deletion.option == 0 {
+                            deletion.keep_branch = !deletion.keep_branch;
+                        } else {
+                            deletion.delete_ignored = !deletion.delete_ignored;
+                        }
                         deletion.confirm = false;
                     }
                     KeyCode::Enter if !deletion.confirm => app.form = None,

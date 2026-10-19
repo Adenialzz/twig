@@ -875,3 +875,46 @@ fn slash_tasks_reject_unsafe_paths_before_recording() {
     assert!(!f.repo.join(".git/twig/state.json").exists());
     assert!(!f._temp.path().join("task").exists());
 }
+
+#[test]
+fn delete_ignored_is_explicit_and_still_protects_other_files() {
+    let f = Fixture::new();
+    f.ok(&["new", "--no-open", "cache-task"]);
+    let path = f.root.join("cache-task");
+    fs::write(f.repo.join(".git/info/exclude"), "cache/\n").unwrap();
+    fs::create_dir(path.join("cache")).unwrap();
+    fs::write(path.join("cache/data"), "ignored data").unwrap();
+    f.fail(&["rm", "cache-task", "-y"], "被忽略");
+    fs::write(path.join("unsaved"), "save me").unwrap();
+    f.fail(&["rm", "cache-task", "--delete-ignored", "-y"], "未提交");
+    success(
+        Command::new("git")
+            .current_dir(&path)
+            .args(["add", "unsaved"])
+            .output()
+            .unwrap(),
+    );
+    f.fail(&["rm", "cache-task", "--delete-ignored", "-y"], "未提交");
+    success(
+        Command::new("git")
+            .current_dir(&path)
+            .args(["reset", "HEAD", "--", "unsaved"])
+            .output()
+            .unwrap(),
+    );
+    fs::remove_file(path.join("unsaved")).unwrap();
+    f.fail(
+        &[
+            "rm",
+            "cache-task",
+            "--delete-ignored",
+            "--expected-ignored",
+            "[]",
+            "-y",
+        ],
+        "清单已变化",
+    );
+    assert!(path.join("cache/data").exists());
+    f.ok(&["rm", "cache-task", "--delete-ignored", "-y"]);
+    assert!(!path.exists());
+}

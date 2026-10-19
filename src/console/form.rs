@@ -28,7 +28,10 @@ pub struct Deletion {
     pub path: std::path::PathBuf,
     pub expected: String,
     pub keep_branch: bool,
+    pub delete_ignored: bool,
+    pub ignored: Vec<String>,
     pub confirm: bool,
+    pub option: usize,
 }
 struct Job {
     child: Child,
@@ -73,6 +76,11 @@ impl Form {
         path: std::path::PathBuf,
     ) -> Result<Self> {
         let expected = serde_json::to_string(&(common, &branch, &path))?;
+        let ignored = if path.try_exists()? {
+            crate::git::ignored(&path)?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             project: Some(project),
             fields: [name, String::new()],
@@ -81,7 +89,10 @@ impl Form {
                 path,
                 expected,
                 keep_branch: false,
+                delete_ignored: false,
+                ignored,
                 confirm: false,
+                option: 0,
             }),
             ..Self::project()
         })
@@ -154,6 +165,12 @@ impl Form {
             ]);
             if deletion.keep_branch {
                 command.arg("--keep-branch");
+            }
+            if deletion.delete_ignored {
+                command
+                    .arg("--delete-ignored")
+                    .arg("--expected-ignored")
+                    .arg(serde_json::to_string(&deletion.ignored)?);
             }
         } else if let Some(project) = &self.project {
             crate::config::task_name(&self.fields[0])?;

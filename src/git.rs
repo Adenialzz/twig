@@ -104,3 +104,24 @@ pub fn worktrees(cwd: &Path) -> Result<Vec<(std::path::PathBuf, String)>> {
     }
     Ok(result)
 }
+
+pub fn ignored(path: &Path) -> Result<Vec<String>> {
+    let text = git(
+        path,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ],
+    )?;
+    let mut paths: Vec<_> = text
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    Ok(paths)
+}

@@ -476,49 +476,124 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         let inner = border.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(border, area);
-        let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(5)]).split(inner);
-        let status = if form.busy() {
-            "正在删除，请等待…".to_owned()
+        let compact = inner.height < 14;
+        let rows = Layout::vertical([
+            Constraint::Length(if compact { 2 } else { 4 }),
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(if compact { 2 } else { 3 }),
+        ])
+        .split(inner);
+        let identity = format!(
+            "项目：{} · 任务：{}\n分支：{}\nWorktree：{}",
+            safe(form.project.as_deref().unwrap_or_default()),
+            safe(&form.fields[0]),
+            safe(&deletion.branch),
+            safe(&deletion.path.to_string_lossy())
+        );
+        frame.render_widget(
+            Paragraph::new(identity)
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false }),
+            rows[0],
+        );
+        for (i, (label, checked)) in [
+            ("保留本地分支", deletion.keep_branch),
+            ("同时删除被忽略文件", deletion.delete_ignored),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let selected = deletion.option == i;
+            let style = if selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} [{}] {label}",
+                    if selected { "›" } else { " " },
+                    if *checked { "x" } else { " " }
+                ))
+                .alignment(Alignment::Center)
+                .style(style),
+                Rect {
+                    y: rows[1].y + i as u16,
+                    height: 1,
+                    ..rows[1]
+                },
+            );
+        }
+        let mut details = Vec::new();
+        if let Some(error) = &form.error {
+            details.push(format!(
+                "删除失败：{}\n可能已完成部分清理；请检查后重试。",
+                safe(error)
+            ));
+        }
+        details.push(format!(
+            "Worktree：{}",
+            safe(&deletion.path.to_string_lossy())
+        ));
+        details.push(format!(
+            "删除窗口、Worktree 和任务记录{}。",
+            if deletion.keep_branch {
+                "，保留分支"
+            } else {
+                "及本地分支"
+            }
+        ));
+        if deletion.keep_branch {
+            details.push("保留分支时跳过合并/推送检查。".into());
+        }
+        if !deletion.ignored.is_empty() {
+            details.push(format!(
+                "被忽略文件/目录（目录内全部内容）：\n{}",
+                deletion
+                    .ignored
+                    .iter()
+                    .map(|s| safe(s))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(details.join("\n"))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: false })
+                .scroll((form.scroll, 0)),
+            rows[2],
+        );
+        let buttons = if form.busy() {
+            "正在删除，请等待…".into()
         } else {
             format!(
-                "{}[ 取消 ]    {}[ 确认删除 ]\nTab / ←→ 选择 · Enter 确认 · Esc 取消\n空格切换保留分支 · PgUp/PgDn 滚动",
+                "{}[ 取消 ]    {}[ 确认删除 ]",
                 if deletion.confirm { "  " } else { "› " },
                 if deletion.confirm { "› " } else { "  " }
             )
         };
-        let text = format!(
-            "项目：{}\n任务：{}\n分支：{}\nWorktree：{}\n\n[{}] 保留本地分支\n将删除任务窗口、Worktree 和任务记录{}。\n保留分支时跳过合并/推送检查；文件与活动进程检查始终保留。\n\n{}",
-            safe(form.project.as_deref().unwrap_or_default()),
-            safe(&form.fields[0]),
-            safe(&deletion.branch),
-            safe(&deletion.path.to_string_lossy()),
-            if deletion.keep_branch { "x" } else { " " },
-            if deletion.keep_branch {
-                ""
-            } else {
-                "及本地分支"
-            },
-            form.error
-                .as_ref()
-                .map(|error| format!(
-                    "删除失败：{}\n可能已完成部分清理；请检查原因后重试，不会强制删除。",
-                    safe(error)
-                ))
-                .unwrap_or_default()
-        );
         frame.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(buttons)
                 .alignment(Alignment::Center)
-                .wrap(Wrap { trim: false })
-                .scroll((form.scroll, 0)),
-            rows[0],
-        );
-        frame.render_widget(
-            Paragraph::new(status)
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: false })
                 .style(Style::default().fg(Color::Cyan)),
-            rows[1],
+            rows[3],
+        );
+        let hint = if compact {
+            "↑↓ 选项 · 空格勾选 · Tab 按钮\nEnter 执行 · Esc 取消 · PgUp/Dn 滚动"
+        } else {
+            "↑↓ / j k 选择选项 · 空格切换\nTab / ←→ 切换按钮 · Enter 执行 · Esc 取消\nPgUp/PgDn 滚动清单及错误"
+        };
+        frame.render_widget(
+            Paragraph::new(hint)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Gray)),
+            rows[4],
         );
         return;
     }
