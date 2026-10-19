@@ -16,9 +16,9 @@ make install
 twig --help
 ```
 
-`make install` 先检查 `gh` 和 `glab`，通过 Homebrew 安装缺少的工具，已在 PATH 中的工具直接跳过；缺少工具且没有 Homebrew 时停止并提示手动安装。随后安装或更新 twig，成功后打印 Zsh 补全和平台登录提示，不修改 Shell 配置、不自动登录。使用 PR/MR 前按需运行 `gh auth login` / `glab auth login`。
+`make install` 只安装或更新 twig，不检查或安装 `gh`、`glab`，也不依赖 Homebrew。成功后打印 Zsh 补全和平台工具安装、登录提示，不修改 Shell 配置、不自动登录。使用 PR/MR 前按需自行安装 `gh` 或 `glab`，再运行 `gh auth login` / `glab auth login`。
 
-只安装 twig，或不使用 Make/Homebrew 时，可以直接执行 `cargo install --path . --locked`，平台 CLI 按需自行安装。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
+不使用 Make 时，可以直接执行 `cargo install --path . --locked`。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
 
 仅构建而不安装：
 

@@ -39,7 +39,7 @@ remote 名称和 URL 由 Git 实际配置管理。用户级登记表提供初始
 
 一个 Cargo 包，依赖 `clap`、`clap_complete`、`serde`、`serde_json`、`toml`、`anyhow` 和 `tempfile`；`tempfile` 用于测试隔离与 PR/MR 正文临时文件。通过 `std::process::Command` 调用 Git、tmux、ps、gh、glab，参数分别传入。错误补充操作上下文，失败不静默降级。
 
-Makefile 中 `make build`（默认目标）构建 release，`make install` 先检查 PATH 中的 gh/glab，通过 Homebrew 安装缺少的工具，再安装或更新 twig 并打印 Zsh 补全和平台登录提示。缺少工具且没有 Homebrew 时直接报错，用户可手动安装依赖，或用 `cargo install --path . --locked` 只安装 twig。不自动安装包管理器、登录平台或修改用户 Shell 配置。`make check` 依次执行格式检查、Clippy 和测试。
+Makefile 中 `make build`（默认目标）构建 release，`make install` 只安装或更新 twig 并打印 Zsh 补全和平台工具安装、登录提示，不检查或安装 gh/glab，不依赖 Homebrew。平台 CLI 由用户按需自行安装；也可用 `cargo install --path . --locked` 安装 twig。不自动登录平台或修改用户 Shell 配置。`make check` 依次执行格式检查、Clippy 和测试。
 
 | 文件 | 职责 |
 | --- | --- |
