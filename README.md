@@ -121,8 +121,8 @@ twig config remove myapp                   # 仅取消登记，保留仓库、re
 
 ```bash
 twig init                         # 优先 main，其次 master；自动登记项目
-twig new auth                     # 创建 feature/auth 和 Shell 窗口，不自动进入
-twig new search
+twig new auth                     # 创建 feature/auth 和 Shell 窗口，并进入
+twig new search --no-open          # 只创建环境，留在当前终端
 twig ls
 twig open auth                    # 在普通终端 attach，在 tmux 内 switch-client
 # 在窗口中手动运行 codex 等程序
@@ -187,7 +187,7 @@ twig pr --title '修复登录超时' --body-file ./pr.md
 | `twig config remote add/remove/default` | 管理项目的多个 remote 和默认克隆来源 |
 | `twig clone NAME` | 克隆或接续已登记项目，配置 remote 并初始化 twig |
 | `twig init [--name NAME] [--base BRANCH] [--target BRANCH] [--root PATH]` | 保存项目配置、创建主 Session 并自动登记 |
-| `twig new NAME [--base BRANCH]` | 创建或接续任务环境，不自动启动任何 AI 工具 |
+| `twig new NAME [--base BRANCH] [--no-open]` | 创建或接续任务环境并进入 Shell；`--no-open` 只准备环境 |
 | `twig ls` | 列出 twig 登记的任务、实际 Git 状态与窗口状态 |
 | `twig pr [NAME] [--push] [--remote REMOTE] [--target BRANCH] [--provider github\|gitlab]` | 联网查找或创建草稿 PR/MR；推送必须显式指定 |
 | `twig open NAME` | 进入窗口；缺失时重建 Shell，不恢复进程或对话 |
@@ -195,6 +195,8 @@ twig pr --title '修复登录超时' --body-file ./pr.md
 | `twig rm NAME [--target BRANCH] [--keep-branch] [-y]` | 检查安全条件后移除任务 |
 
 重复 `init` 只提示已初始化并退出，重复 `new` 复用已登记资源，重复 `stop`/`rm` 不会创建资源。不会接管外部已有的同名分支或 Worktree。修改已有初始化配置需要编辑下述 `config.json`，不是重新传 `init` 参数。
+
+`new` 默认与 `open` 一样进入任务窗口：普通终端 attach，在 tmux 内切换客户端；重复 `new` 也会进入已有窗口，不启动任何 AI 工具。脚本或批量创建时使用 `--no-open`。若进入失败（例如非交互终端没有 TTY），已创建的环境保留，可在交互式终端执行 `twig open NAME`。
 
 `ls` 中 `Open` 只表示窗口存在，不表示 Codex 正在运行。`Missing` 表示 Worktree 未创建或已移除，`Mismatch` 表示目录丢失、分支变化等需要人工检查的状态。
 

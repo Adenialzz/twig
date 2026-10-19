@@ -144,9 +144,9 @@ fn success(out: Output) -> String {
 fn lifecycle_and_recovery() {
     let f = Fixture::new();
     f.ok(&["init"]);
-    f.ok(&["new", "auth"]);
-    f.ok(&["new", "auth"]);
-    f.ok(&["new", "search"]);
+    f.ok(&["new", "--no-open", "auth"]);
+    f.ok(&["new", "--no-open", "auth"]);
+    f.ok(&["new", "--no-open", "search"]);
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
             .matches("worktree ")
@@ -168,7 +168,7 @@ fn lifecycle_and_recovery() {
     f.ok(&["stop", "auth", "-y"]);
     assert!(f.root.join("auth").is_dir());
     assert!(f.ok(&["ls"]).contains("Closed"));
-    f.ok(&["new", "auth"]);
+    f.ok(&["new", "--no-open", "auth"]);
     // open 的非交互 attach 会失败，但必须已经重建窗口。
     f.ok(&["stop", "auth", "-y"]);
     let _ = f.run(&["open", "auth"]);
@@ -184,13 +184,13 @@ fn lifecycle_and_recovery() {
     assert!(f.root.join("search").is_dir());
     f.mux(&["kill-server"]);
     assert!(f.ok(&["ls"]).contains("Closed"));
-    f.ok(&["new", "search"]);
+    f.ok(&["new", "--no-open", "search"]);
 }
 
 #[test]
 fn refuses_dirty_unmerged_and_busy_removal() {
     let f = Fixture::new();
-    f.ok(&["new", "auth"]);
+    f.ok(&["new", "--no-open", "auth"]);
     let path = f.root.join("auth");
     fs::write(path.join("notes"), "unsaved").unwrap();
     f.fail(&["rm", "auth", "-y"], "未提交");
@@ -225,19 +225,19 @@ fn refuses_dirty_unmerged_and_busy_removal() {
 fn detects_conflicts_and_resumes_partial_creation() {
     let f = Fixture::new();
     f.git(&["branch", "feature/existing"]);
-    f.fail(&["new", "existing"], "分支已存在");
+    f.fail(&["new", "--no-open", "existing"], "分支已存在");
     fs::create_dir(f.root.join("occupied")).unwrap();
-    f.fail(&["new", "occupied"], "路径已存在");
-    f.fail(&["new", "../escape"], "名称须");
+    f.fail(&["new", "--no-open", "occupied"], "路径已存在");
+    f.fail(&["new", "--no-open", "../escape"], "名称须");
     let out = f
         .command(&f.repo)
         .env("TWIG_FAIL_TMUX", "1")
-        .args(["new", "partial"])
+        .args(["new", "--no-open", "partial"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(f.root.join("partial").is_dir());
-    f.ok(&["new", "partial"]);
+    f.ok(&["new", "--no-open", "partial"]);
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
             .matches("worktree ")
@@ -259,23 +259,23 @@ fn detects_conflicts_and_resumes_partial_creation() {
 #[test]
 fn ignored_files_and_missing_directory_are_protected() {
     let f = Fixture::new();
-    f.ok(&["new", "ignored"]);
+    f.ok(&["new", "--no-open", "ignored"]);
     fs::write(f.repo.join(".git/info/exclude"), "cache/\n").unwrap();
     fs::create_dir(f.root.join("ignored/cache")).unwrap();
     fs::write(f.root.join("ignored/cache/file"), "data").unwrap();
     f.fail(&["rm", "ignored", "-y"], "被忽略");
-    f.ok(&["new", "lost"]);
+    f.ok(&["new", "--no-open", "lost"]);
     f.ok(&["stop", "lost", "-y"]);
     fs::remove_dir_all(f.root.join("lost")).unwrap();
-    f.fail(&["new", "lost"], "目录丢失");
+    f.fail(&["new", "--no-open", "lost"], "目录丢失");
     f.git(&["worktree", "prune"]);
-    f.ok(&["new", "lost"]);
+    f.ok(&["new", "--no-open", "lost"]);
 }
 
 #[test]
 fn merged_branch_cleanup_and_confirmation() {
     let f = Fixture::new();
-    f.ok(&["new", "done"]);
+    f.ok(&["new", "--no-open", "done"]);
     success(
         Command::new("git")
             .current_dir(f.root.join("done"))
@@ -297,7 +297,7 @@ fn merged_branch_cleanup_and_confirmation() {
 #[test]
 fn numeric_names_renamed_windows_and_background_jobs() {
     let f = Fixture::new();
-    f.ok(&["new", "0"]);
+    f.ok(&["new", "--no-open", "0"]);
     let windows = f.mux(&[
         "list-windows",
         "-t",
@@ -313,7 +313,7 @@ fn numeric_names_renamed_windows_and_background_jobs() {
         .next()
         .unwrap();
     f.mux(&["rename-window", "-t", id, "renamed"]);
-    f.ok(&["new", "0"]);
+    f.ok(&["new", "--no-open", "0"]);
     assert_eq!(
         f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"])
             .lines()
@@ -331,7 +331,7 @@ fn numeric_names_renamed_windows_and_background_jobs() {
 fn upstream_and_foreign_window_protection() {
     let f = Fixture::new();
     f.git(&["branch", "upstream"]);
-    f.ok(&["new", "unpushed"]);
+    f.ok(&["new", "--no-open", "unpushed"]);
     f.git(&["branch", "--set-upstream-to=upstream", "feature/unpushed"]);
     success(
         Command::new("git")
@@ -343,7 +343,7 @@ fn upstream_and_foreign_window_protection() {
     f.git(&["merge", "--ff-only", "feature/unpushed"]);
     f.fail(&["rm", "unpushed", "-y"], "未推送提交");
     f.mux(&["new-window", "-d", "-t", &f.session(), "-n", "foreign"]);
-    f.fail(&["new", "foreign"], "同名非 twig");
+    f.fail(&["new", "--no-open", "foreign"], "同名非 twig");
     assert!(f.root.join("foreign").is_dir());
     f.mux(&[
         "rename-window",
@@ -351,7 +351,7 @@ fn upstream_and_foreign_window_protection() {
         &format!("{}:foreign", f.session()),
         "personal",
     ]);
-    f.ok(&["new", "foreign"]);
+    f.ok(&["new", "--no-open", "foreign"]);
 }
 
 #[test]
@@ -359,7 +359,7 @@ fn rechecks_files_after_confirmation_prompt() {
     use std::io::{Read, Write};
     use std::process::Stdio;
     let f = Fixture::new();
-    f.ok(&["new", "race"]);
+    f.ok(&["new", "--no-open", "race"]);
     f.ok(&["stop", "race", "-y"]);
     fs::write(f.repo.join(".git/info/exclude"), "late-file\n").unwrap();
     let mut child = f
@@ -384,10 +384,10 @@ fn rechecks_files_after_confirmation_prompt() {
 }
 
 #[test]
-fn open_switches_an_attached_client_between_sessions() {
+fn new_and_open_switch_an_attached_client_between_sessions() {
     use std::process::Stdio;
     let f = Fixture::new();
-    f.ok(&["new", "auth"]);
+    f.ok(&["new", "--no-open", "auth"]);
     f.mux(&[
         "new-session",
         "-d",
@@ -416,14 +416,57 @@ fn open_switches_an_attached_client_between_sessions() {
         panic!("客户端未进入 {session}");
     };
     wait_for("driver");
-    let command = format!(
-        "'{}' open auth",
-        env!("CARGO_BIN_EXE_twig").replace('\'', "'\\''")
+    for action in ["open auth", "new fresh", "new fresh"] {
+        f.mux(&["switch-client", "-t", "driver"]);
+        wait_for("driver");
+        let command = format!(
+            "'{}' {action}",
+            env!("CARGO_BIN_EXE_twig").replace('\'', "'\\''")
+        );
+        f.mux(&["send-keys", "-t", "driver:", &command, "Enter"]);
+        wait_for(&f.session());
+        let expected = if action == "open auth" {
+            "auth"
+        } else {
+            "fresh"
+        };
+        assert_eq!(
+            f.mux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("{}:", f.session()),
+                "#{@twig-feature}"
+            ])
+            .trim(),
+            expected
+        );
+        assert!(!f.repo.join(".git/twig/lock").exists());
+    }
+    f.ok(&["new", "--no-open", "background"]);
+    assert_eq!(
+        f.mux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("{}:", f.session()),
+            "#{@twig-feature}"
+        ])
+        .trim(),
+        "fresh"
     );
-    f.mux(&["send-keys", "-t", "driver:", &command, "Enter"]);
-    wait_for(&f.session());
     drop(client.stdin.take());
     client.wait().unwrap();
+}
+
+#[test]
+fn new_preserves_environment_when_attach_fails_without_a_terminal() {
+    let f = Fixture::new();
+    f.fail(&["new", "auth"], "tmux 进入失败；环境已保留");
+    assert!(f.root.join("auth/.git").exists());
+    assert!(!f.repo.join(".git/twig/lock").exists());
+    f.ok(&["new", "--no-open", "auth"]);
+    assert!(f.ok(&["ls"]).contains("Open"));
 }
 
 #[test]
@@ -477,7 +520,7 @@ fn registry_clone_multiple_remotes_and_repo_selection() {
         git_at(&["config", "--get", "remote.upstream.url"]).trim(),
         f.repo.to_str().unwrap()
     );
-    success(f.registered(&["--repo", "app", "new", "auth"]));
+    success(f.registered(&["--repo", "app", "new", "--no-open", "auth"]));
     assert!(success(f.registered(&["ls", "--repo", "app"])).contains("auth"));
     let base = git_at(&["rev-parse", "develop"]);
     assert_eq!(git_at(&["rev-parse", "feature/auth"]), base);
@@ -635,7 +678,7 @@ fn init_registers_local_projects_and_reuses_worktree_registration() {
     f.ok(&["init"]);
     assert_eq!(fs::read(f.registry_path()).unwrap(), before);
     success(f.registered(&["--repo", "local", "ls"]));
-    f.ok(&["new", "task"]);
+    f.ok(&["new", "--no-open", "task"]);
     success(
         f.command(&f.root.join("task"))
             .args(["init"])
@@ -742,7 +785,7 @@ fn repeated_init_after_partial_failure_does_not_register_or_restore_session() {
 #[test]
 fn repeated_init_is_read_only_even_with_missing_registry_and_session() {
     let f = Fixture::new();
-    f.ok(&["new", "task"]);
+    f.ok(&["new", "--no-open", "task"]);
     let config_path = f.repo.join(".git/twig/config.json");
     let before = fs::read(&config_path).unwrap();
     f.mux(&["kill-server"]);

@@ -53,12 +53,15 @@ enum Action {
         #[arg(long, value_hint = clap::ValueHint::DirPath)]
         root: Option<PathBuf>,
     },
-    /// 创建任务分支、Worktree 和 Shell 窗口；重复执行接续已有环境
+    /// 创建并进入任务 Shell 窗口；重复执行接续已有环境
     New {
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
+        /// 只创建或接续任务环境，不进入窗口
+        #[arg(long)]
+        no_open: bool,
     },
     /// 列出由 twig 管理的任务及实际状态
     Ls,
@@ -166,7 +169,19 @@ fn execute(cli: Cli) -> Result<()> {
     let config = project.config()?;
     let mut state = project.state()?;
     match action {
-        Action::New { name, base } => new(&project, &config, &mut state, &name, base),
+        Action::New {
+            name,
+            base,
+            no_open,
+        } => {
+            let window = new(&project, &config, &mut state, &name, base)?;
+            drop(lock); // attach 不能持有项目锁。
+            if no_open {
+                Ok(())
+            } else {
+                tmux::enter(&config, &window)
+            }
+        }
         Action::Ls => list(&project, &config, &state),
         Action::Pr(args) => pr::execute(&config, &state, &invocation_dir, args),
         Action::Open { name } => {
@@ -336,7 +351,7 @@ fn new(
     state: &mut State,
     name: &str,
     base: Option<String>,
-) -> Result<()> {
+) -> Result<String> {
     config::name(name)?;
     ensure!(name != "main", "main 保留给项目主窗口");
     if let Some(existing) = state.get(name) {
@@ -385,7 +400,7 @@ fn new(
             )?;
         }
     }
-    tmux::ensure_window(config, project, name, &feature.path).with_context(|| {
+    let window = tmux::ensure_window(config, project, name, &feature.path).with_context(|| {
         format!(
             "Worktree 已保留在 {}；修复后执行 twig new {name} 或 twig open {name}",
             feature.path.display()
@@ -396,7 +411,7 @@ fn new(
         feature.branch,
         feature.path.display()
     );
-    Ok(())
+    Ok(window)
 }
 
 fn list(project: &Project, config: &Config, state: &State) -> Result<()> {
