@@ -41,6 +41,6 @@ twig rm myapp auth --delete-ignored
 
 命令在确认前列出要删除的 ignored 文件/目录；目录项包含目录内全部内容。该选项仅放行 ignored 文件，未提交、未跟踪文件及活动进程仍阻止删除。它不执行 git clean，也不强制移除 Worktree。加 `-y` 会跳过确认，因此先核对数据是否仍需要。
 
-Console 的 `/delete` 或 `dd` 提供相同清理能力，默认取消；支持勾选保留分支和删除 ignored 文件，详见 [Console](console.md)（`twig guide console`）。
+Console 的 `/delete` 或 `dd` 提供相同清理能力，默认取消；「删除本地分支」默认不勾选（保留分支），「同时删除被忽略文件」默认勾选；确认前须核对清单，详见 [Console](console.md)（`twig guide console`）。
 
 清理不删除远端分支、不合并代码、不关闭 PR/MR。部分失败的处理见 [故障排查](troubleshooting.md)。

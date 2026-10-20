@@ -1296,10 +1296,10 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     assert!(path.is_dir());
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
     fs::remove_file(path.join("unsaved")).unwrap();
-    // 失败后回到取消，空格保留分支，再明确选择确认。
+    // 失败后回到取消，保持默认保留分支，再明确选择确认。
     p.bytes.clear();
     p.text.clear();
-    p.send(b" \t\r");
+    p.send(b"\t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -1326,6 +1326,8 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     p.send(b"d");
     p.wait("确认删除");
+    // 显式勾选删除本地分支。
+    p.send(b" ");
     state["auth"]["branch"] = "changed".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
     p.send(b"\t\r");
@@ -1349,7 +1351,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
 }
 
 #[test]
-fn delete_ignored_requires_option_and_keeps_default_cancel() {
+fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     let f = Fixture::new();
     f.init();
     let state: serde_json::Value = serde_json::from_slice(
@@ -1366,8 +1368,8 @@ fn delete_ignored_requires_option_and_keeps_default_cancel() {
     p.wait("同时删除被忽略文件");
     p.send(b"\x1b[6~");
     p.wait(".venv/");
-    // i 已移除，不能开启 ignored 删除。
-    p.send(b"i\t\r");
+    // 默认勾选 ignored 删除；关闭后仍保护 ignored 文件。
+    p.send(b"j \t\r");
     p.wait("删除失败");
     assert!(path.join(".venv/data").exists());
     // 切换选项会回到默认取消，Enter 不删除。
@@ -1376,7 +1378,7 @@ fn delete_ignored_requires_option_and_keeps_default_cancel() {
     assert!(path.join(".venv/data").exists());
     p.bytes.clear();
     p.text.clear();
-    p.send(b"ddj \t\r");
+    p.send(b"dd\t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
     p.send(b"q");
