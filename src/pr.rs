@@ -15,7 +15,11 @@ use std::{
 };
 
 #[derive(clap::Args)]
+#[command(
+    after_help = "需要安装并登录 gh/glab。这是联网命令；已有开放请求返回链接，否则创建草稿。\n无 --push 时不推送；创建前要求远端源分支与当前提交一致。有 --push 时已有请求也会先推送。\n只支持同仓库请求，不自动合并或清理。\n示例：twig pr myapp auth --push\n完整规则：twig guide pr"
+)]
 pub struct Args {
+    /// 已登记的项目别名，不根据当前目录推断
     #[arg(add = ArgValueCompleter::new(crate::completion::projects))]
     pub project: String,
     /// 任务名
@@ -30,13 +34,13 @@ pub struct Args {
     /// 覆盖项目配置中的合并目标分支
     #[arg(long, add = ArgValueCompleter::new(crate::completion::branches))]
     target: Option<String>,
-    /// 自建域名须指定平台
+    /// 平台；github.com/gitlab.com 自动识别，自建域名必须指定
     #[arg(long, value_enum)]
     provider: Option<Provider>,
     /// 草稿标题；默认使用任务最新提交的标题
     #[arg(long)]
     title: Option<String>,
-    /// 草稿正文文件；默认使用任务最新提交的完整提交说明
+    /// 草稿正文文件（相对调用目录）；默认最新提交完整说明，不修改已有请求
     #[arg(long)]
     body_file: Option<PathBuf>,
 }

@@ -1,6 +1,6 @@
 # 任务窗口启动配置
 
-twig 可以在创建任务窗口时，自动分屏并在各个 Pane（窗格）中启动程序。本文介绍配置位置、字段和执行规则。基础命令见 [README](../README.md)。
+twig 可以在创建任务窗口时，自动分屏并在各个 Pane（窗格）中启动程序。命令行阅读：`twig guide windows`。本文介绍配置位置、字段和执行规则；登记表与状态文件见 [配置与存储](configuration.md)（`twig guide configuration`）。
 
 ## 快速开始
 

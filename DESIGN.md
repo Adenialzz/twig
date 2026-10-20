@@ -133,7 +133,7 @@ Linux 实机、真实 SSH 断线重连、真实终端 attach 的键盘和显示�
 
 ## 本次更新：全局 Console（2026-10-19）
 
-用户批准完整方案，要求落入 [docs/console.md](docs/console.md)，并明确指定本次直接在 main 开发，不自动推送。
+用户批准完整方案，当时记录在 docs/console.md，并明确指定本次直接在 main 开发，不自动推送。该旧技术稿已于 2026-10-20 重构用户文档时移除，当前同路径为用户指南。
 
 裸 `twig` / `twig console` 在项目发现之前分流，支持全局登记表、--repo 初始定位、项目/任务搜索和主窗口/任务进入。通过既有归属检查和锁准备窗口，进入前释放锁并恢复终端。历史 init 的无标记 main 窗口只在已验证 Session 内同时核对名称与启动目录后复用。
 
@@ -143,7 +143,7 @@ Linux 实机、真实 SSH 断线重连、真实终端 attach 的键盘和显示�
 
 Codex 服务通过 CLI 的 daemon version JSON 发现；连接为 Unix socket 上的 WebSocket。读取 loaded/list、read、list、turns/list，不启动服务、不恢复会话、不审批、不发提示词。按 cwd 最深路径归属项目/任务，多个会话独立展示。历史精确 cwd 分页，包含子目录需显式开启并逐页扫描。轮次详情按需读取，运行状态定期刷新。notLoaded 不代表任务完成，idle 不代表本轮成功；服务不可用时状态未知，旧值标为过期。
 
-只覆盖所连接服务可见的会话；`--no-daemon` 和其他服务不能保证实时覆盖。源字段不是 Pane 归属依据。详细测试记录在 docs/console.md 的实施验收中更新。
+只覆盖所连接服务可见的会话；`--no-daemon` 和其他服务不能保证实时覆盖。源字段不是 Pane 归属依据。当时的详细验收写在旧 Console 技术稿中；后续交接记录见本文，当前用户操作见 docs/console.md。
 
 Crossterm 启用 use-dev-tty 的同步 poll 后端，解决实际 PTY 验证中同时缩放/输入遗漏事件的问题。会话路径关联在采集线程完成，渲染不查询文件系统。新建 Session 主窗口也写入 @twig-feature=main，支持手动改名后的进入。
 
@@ -272,3 +272,15 @@ Pane 支持 command 参数数组、right/down 分屏、percent 和 focus；后�
 用户确认新增可选 mode，默认 shell，保留交互式 Shell 体验；process 必须提供 command，直接传递程序和参数，退出后保留 dead Pane、输出及退出状态。未知模式和缺少命令直接报错。同窗允许混用，remain-on-exit 按 Pane 单独设置，Shell 退出不会留下 dead Pane；process 不加载交互式 Shell 配置。已有窗口不转换或重复启动命令。本项目示例保持原有默认 Shell 模式。
 
 验证：格式检查、Clippy、全部 62 个测试通过。混合模式回归覆盖 process 成功/失败退出码、Ctrl-C 后保留 Pane、特殊字符参数原样传递、Shell 可输入及 Ctrl-D 关闭、重复 new 不重启已退出程序；配置校验覆盖未知模式和 process 缺少 command。原 sh/Bash/Zsh 交互回归通过。
+
+### 用户手册与渐进式 CLI 帮助（2026-10-20）
+
+用户确认人和 Agent 共用完整文本说明，不要求 JSON 协议。帮助分为顶层导航、逐命令参数及关键行为、主题手册三层。重构 docs，删除旧 console-usage.md、tmux-startup.md，并用用户指南替换 console.md 中的旧技术方案；README 保留安装、快速入口和文档链接。
+
+新增 `twig guide [TOPIC]`：无主题输出索引，主题按 Clap ValueEnum 提供发现与补全；`--all` 输出索引及全部主题，与 TOPIC 互斥。主题包括安装、快速开始、命令参考、配置存储、任务窗口、Console、清理、PR/MR、补全、Agent/脚本、故障排查。Markdown 以 include_str! 编译嵌入，直接写 stdout，不依赖源码目录、man、分页器、配置、Git/tmux 或 TTY。暂不安装单独 man 页面，需要分页由调用者管道到 less。
+
+参考组织方式：[Git help](https://git-scm.com/docs/git-help) 将命令和概念指南分开；[GitHub CLI reference](https://cli.github.com/manual/gh_help_reference) 同时提供逐命令帮助和完整参考；[CLI Guidelines](https://clig.dev/#documentation) 强调帮助中的示例、可发现性及深入文档入口。本项目据此保留短帮助，把完整工作流与配置规则放在主题中，用命令及相对链接互相指引。
+
+补齐公开参数解释、默认值和高影响行为，包括 no-open 启动程序、keep-branch 跳过合并/upstream 检查、rm PROJECT 立即取消登记、ls Mismatch 与退出码的区别。隐藏的内部控制台参数不作为公开用户接口。
+
+本次验证：fmt、相对文档链接检查通过；新增 2 项指南测试验证坏配置/空 PATH/无 HOME 目录下离线阅读不创建资源、全部主题覆盖及非法参数拒绝；更新补全断言并覆盖 guide 主题。完整 cargo test 共 64 项，63 项通过，既有 startup_layout_precedence_commands_and_reopen 在 pane_start_path 断言处失败。完整 Clippy 在既有 tests/console.rs:170 的 openpty 可变引用处触发 unnecessary_mut_passed；本次二进制及 guide/completion 测试目标的 Clippy 通过。已通过 git archive HEAD 创建临时基线副本，复现相同测试失败和 Clippy 警告，未改动相关实现。未提交、未安装。
