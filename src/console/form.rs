@@ -27,7 +27,7 @@ pub struct Deletion {
     pub branch: String,
     pub path: std::path::PathBuf,
     pub expected: String,
-    pub keep_branch: bool,
+    pub delete_branch: bool,
     pub delete_ignored: bool,
     pub ignored: Vec<String>,
     pub confirm: bool,
@@ -88,8 +88,8 @@ impl Form {
                 branch,
                 path,
                 expected,
-                keep_branch: false,
-                delete_ignored: false,
+                delete_branch: false,
+                delete_ignored: true,
                 ignored,
                 confirm: false,
                 option: 0,
@@ -162,7 +162,7 @@ impl Form {
                 "--expected-task",
                 &deletion.expected,
             ]);
-            if deletion.keep_branch {
+            if !deletion.delete_branch {
                 command.arg("--keep-branch");
             }
             if deletion.delete_ignored {

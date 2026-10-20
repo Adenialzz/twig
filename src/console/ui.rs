@@ -521,7 +521,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             rows[0],
         );
         for (i, (label, checked)) in [
-            ("保留本地分支", deletion.keep_branch),
+            ("删除本地分支", deletion.delete_branch),
             ("同时删除被忽略文件", deletion.delete_ignored),
         ]
         .iter()
@@ -564,13 +564,13 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         ));
         details.push(format!(
             "删除窗口、Worktree 和任务记录{}。",
-            if deletion.keep_branch {
+            if !deletion.delete_branch {
                 "，保留分支"
             } else {
                 "及本地分支"
             }
         ));
-        if deletion.keep_branch {
+        if !deletion.delete_branch {
             details.push("保留分支时跳过合并/推送检查。".into());
         }
         if !deletion.ignored.is_empty() {

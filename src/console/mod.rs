@@ -613,7 +613,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                     KeyCode::Down | KeyCode::Char('j') => deletion.option = 1,
                     KeyCode::Char(' ') => {
                         if deletion.option == 0 {
-                            deletion.keep_branch = !deletion.keep_branch;
+                            deletion.delete_branch = !deletion.delete_branch;
                         } else {
                             deletion.delete_ignored = !deletion.delete_ignored;
                         }
