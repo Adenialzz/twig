@@ -154,7 +154,7 @@ struct Pty {
 impl Pty {
     fn spawn(mut command: Command) -> Self {
         let (mut master, mut slave) = (0, 0);
-        let mut size = libc::winsize {
+        let size = libc::winsize {
             ws_row: 36,
             ws_col: 140,
             ws_xpixel: 0,
@@ -167,7 +167,7 @@ impl Pty {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut size,
+                    &size,
                 )
             },
             0

@@ -49,3 +49,5 @@ Zsh 补全在 compinit 之后加载 `source <(COMPLETE=zsh twig)`，详见 [补�
 先阅读 [AGENTS.md](AGENTS.md)、[DESIGN.md](DESIGN.md) 和 [CONTRIBUTING.md](CONTRIBUTING.md)。构建使用 `make build`，验证使用 `make check`（fmt、Clippy、测试）。生命周期测试使用临时仓库及独立 tmux socket，不操作真实项目；补全交互测试需要 Zsh。
 
 用户手册以 docs/ 下的 Markdown 为源文件，编译时嵌入 twig guide。命令参数变化时同步更新 Clap 帮助和对应主题。
+
+Control Mode 终端前端正在独立原型验证，运行方式和已知限制见 [实验说明](examples/README.md)。尚未接入正式 Console。

@@ -49,6 +49,7 @@
 - 补全测试需要 Zsh（含 `zpty`、`zselect` 模块）；升级 `clap_complete` 后验证动态协议和生成的 Zsh 接入脚本。展示或排序变更须用真实 Tab/ZLE 验证，不能只检查候选输出顺序。
 - 验证范围应与改动匹配；纯文档更新检查一致性和链接，不必重复运行完整代码测试。
 - 代码变更提交前执行 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`。
+- Control Mode 原型位于 examples/control_mode.rs，独立于正式 Console；原型测试额外执行 `cargo test --locked --example control_mode`。只使用显式指定的独立 tmux socket，不连接真实任务做输入、缩放或清理测试；静态文本重连不等于完整终端恢复，已知缺口记录在 examples/README.md。
 
 ## 开发
 

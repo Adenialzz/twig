@@ -2,7 +2,7 @@
 
 本文记录截至 2026-10-20 已确认的需求、实现边界和工程状态，供后续独立会话接续。使用方法以 [README.md](README.md) 为准，开发约定见 [AGENTS.md](AGENTS.md)。工程状态是交接时的快照，后续修改前应重新核实。
 
-最新讨论见文末「Control Mode 一体化终端工作台」。该节记录目标方向与评估，尚未实现，不替代前文描述的现有运行行为。
+最新讨论见「Control Mode 一体化终端工作台」，独立原型进展见文末。正式 Console 尚未改造，这些记录不替代前文描述的现有运行行为。
 
 ## 目标与需求演变
 
@@ -399,3 +399,17 @@ Control Mode 提供终端字节流与控制协议，不提供可直接嵌入 Rat
 - 本轮只更新设计文档，尚未实施 Control Mode 原型或正式改造。
 
 参考：[tmux Control Mode 官方文档](https://github.com/tmux/tmux/wiki/Control-Mode)、[iTerm2 tmux 集成说明](https://iterm2.com/documentation-tmux-integration.html)。iTerm2 证明了外部界面复用 tmux server 的可行性，但它已有完整终端能力，不能据此低估 twig 的前端工作量。
+
+### 独立原型进展（2026-10-20）
+
+用户授权开始推进。先增加 examples/control_mode.rs，验证 Control Mode、终端模拟和自绘分屏链路，暂不接管正式 Console。仍使用一个 Cargo 包，无后台服务、无异步运行时；原型单线程使用非阻塞管道读取输出，控制命令同步执行。
+
+使用现有 Ratatui/Crossterm 和开发依赖 vt100 0.15.2。尝试最新版 vt100 0.18.1 时，其 unicode-width ^0.2.2 与 Ratatui 0.29 固定的 =0.2.0 冲突，因此原型先使用兼容版本，不升级正式 UI 依赖。这不是最终库选型结论。依赖下载初期 crates.io 超时，检查代理变量后用命令级临时镜像完成下载，没有修改项目或用户 Cargo 源配置。
+
+已实现显式 socket/session 连接、屏幕渲染、常用键和粘贴转发、左右/上下分屏、焦点切换、放大、比例调整、窗口切换、前端历史滚动和断开。退出只结束自己的客户端，保留 server 和 Pane 进程。运行方式与完整限制见 [实验说明](examples/README.md)。
+
+关键发现：普通 Shell 的静态重连可行，但屏幕截图不等于完整终端状态。当前仅恢复可见屏幕、光标及部分输入模式；备用屏幕、完整历史、其他模式和未完成转义序列尚未恢复，屏幕与模式分开查询也存在持续输出时的一致性问题。布局变化会重建前端屏幕并清空其历史。下一步应优先解决这些问题，再进行真实 Codex 和 SSH 验收；不能将此原型当作日常工作台交付。
+
+Linux/tmux 3.8 的独立 server 自动测试覆盖分屏、放大、缩放、断开重连后 PID 保持和文本恢复；另通过临时真实 PTY 驱动验证键盘输入、分屏、焦点、Ctrl-C 后继续输入、退出后的 termios 还原和进程保留。没有连接真实用户会话，没有发送 Agent 提示词或审批。真实 Codex、SSH、macOS、鼠标和复制尚未验证。
+
+全量 Clippy 发现基线 tests/console.rs 的 openpty 参数不需要可变引用，已作两行最小修正。最终 cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked --all-targets 全部通过，共 68 项测试（原有 64 项与原型 4 项）；依赖缓存就绪后以 --offline 完成验证。改动未提交、未安装、未推送，完成通知功能仍在原 stash 中，尚未接入本分支。
