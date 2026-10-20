@@ -1,6 +1,6 @@
-use super::query;
+use super::{notifications::Completion, query};
 use crate::{
-    codex::{Client, Thread},
+    codex::{Client, Thread, Turn},
     config::{Config, Feature, Project},
     git::git,
     registry, tmux,
@@ -67,6 +67,7 @@ pub struct Request {
 pub struct Worker {
     pub requests: Sender<Request>,
     pub updates: Receiver<Snapshot>,
+    pub completions: Receiver<Completion>,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -74,15 +75,17 @@ impl Worker {
     pub fn start(registry: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
         let (out, updates) = mpsc::channel();
+        let (completed, completions) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
         let handle = thread::spawn(move || {
             query::install(stop.clone());
-            collect(registry, rx, out, stop);
+            collect(registry, rx, out, completed, stop);
         });
         Self {
             requests: tx,
             updates,
+            completions,
             cancel,
             handle: Some(handle),
         }
@@ -347,6 +350,7 @@ fn collect(
     registry: PathBuf,
     requests: Receiver<Request>,
     updates: Sender<Snapshot>,
+    completions: Sender<Completion>,
     cancel: Arc<AtomicBool>,
 ) {
     let mut snapshot = Snapshot {
@@ -355,6 +359,8 @@ fn collect(
     };
     let mut request = Request::default();
     let mut client: Option<Client> = None;
+    let mut watched: BTreeMap<String, (PathBuf, Option<Turn>)> = BTreeMap::new();
+    let mut announced = HashSet::new();
     let mut registry_at = None;
     let mut activity_at = None;
     let mut git_at = None;
@@ -422,7 +428,46 @@ fn collect(
                 if client.is_none() {
                     client = Some(Client::discover()?);
                 }
-                client.as_mut().unwrap().loaded()
+                let client = client.as_mut().unwrap();
+                let threads = client.loaded()?;
+                let mut paths: BTreeMap<_, _> = threads
+                    .iter()
+                    .filter(|t| owner(&t.cwd, &snapshot.repos).is_some())
+                    .map(|t| (t.id.clone(), t.cwd.clone()))
+                    .collect();
+                // 轮次结束后会话可能立即卸载，仍需读取已观察到的进行中轮次。
+                for (id, (path, turn)) in &watched {
+                    if turn.as_ref().is_some_and(|t| t.status == "inProgress") {
+                        paths.entry(id.clone()).or_insert_with(|| path.clone());
+                    }
+                }
+                for (id, path) in paths {
+                    let Some((project, task_path)) = owner(&path, &snapshot.repos) else {
+                        continue;
+                    };
+                    let (latest, turns) =
+                        client.completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
+                    for turn in turns {
+                        if announced.insert((id.clone(), turn.id)) {
+                            let task = snapshot
+                                .repos
+                                .iter()
+                                .find(|r| r.name == project)
+                                .unwrap()
+                                .tasks
+                                .iter()
+                                .find(|t| t.path == task_path)
+                                .unwrap();
+                            let _ = completions.send(Completion {
+                                project: project.to_owned(),
+                                path: task_path.to_owned(),
+                                task: task.name.clone(),
+                            });
+                        }
+                    }
+                    watched.insert(id, (path, latest));
+                }
+                Ok(threads)
             })();
             match result {
                 Ok(threads) => {

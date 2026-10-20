@@ -678,8 +678,17 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
             session,
         },
         None,
-        &mut || "twig 实验工作台".into(),
+        &mut |_, _| Status {
+            text: "twig 实验工作台".into(),
+            notification: None,
+        },
     )
+}
+
+#[derive(Default, PartialEq, Eq)]
+pub struct Status {
+    pub text: String,
+    pub notification: Option<crate::notification::CompletionNotice>,
 }
 
 /// 借用 Console 的终端，不退出 alternate screen，不启动原生 tmux 界面。
@@ -687,7 +696,7 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: String,
     window: &str,
-    mut status: impl FnMut() -> String,
+    mut status: impl FnMut(&str, &str) -> Status,
 ) -> Result<()> {
     // 防止把正在运行本前端的 Pane 捕获回来，形成递归显示和输入。
     if let Ok(pane) = std::env::var("TMUX_PANE") {
@@ -720,7 +729,7 @@ fn run_inner(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: Args,
     window: Option<&str>,
-    status: &mut impl FnMut() -> String,
+    status: &mut impl FnMut(&str, &str) -> Status,
 ) -> Result<()> {
     let mut client = Client::connect(&args)?;
     if let Some(window) = window {
@@ -738,20 +747,16 @@ fn run_inner(
     ))?;
     prepare_window(&mut client)?;
     let mut panes = reload(&mut client)?;
-    let mut window_name = client.command("display-message -p '#{window_name}'")?;
+    let mut window_name =
+        client.command("display-message -p '#{window_id}\t#{@twig-feature}\t#{window_name}'")?;
     let mut prefix = false;
     let mut drag: Option<Drag> = None;
-    let mut label = String::new();
+    let mut label = Status::default();
     let mut notice = "";
     let mut dirty = true;
     let mut pending = HashSet::new();
     let mut refreshed = Instant::now();
     loop {
-        let next_label = status();
-        if next_label != label {
-            label = next_label;
-            dirty = true;
-        }
         client.pump()?;
         client.events.append(&mut client.lines);
         let mut changed = false;
@@ -777,7 +782,19 @@ fn run_inner(
         if changed {
             prepare_window(&mut client)?;
             panes = reload(&mut client)?;
-            window_name = client.command("display-message -p '#{window_name}'")?;
+            window_name = client
+                .command("display-message -p '#{window_id}\t#{@twig-feature}\t#{window_name}'")?;
+            dirty = true;
+        }
+        let window_bytes = window_name.concat();
+        let window_text = String::from_utf8_lossy(&window_bytes);
+        let mut fields = window_text.trim_end_matches('\n').splitn(3, '\t');
+        let window_id = fields.next().unwrap_or_default();
+        let task = fields.next().unwrap_or_default();
+        let name = fields.next().unwrap_or_default();
+        let next_label = status(window_id, task);
+        if next_label != label {
+            label = next_label;
             dirty = true;
         }
         if refreshed.elapsed() >= Duration::from_millis(33) && !pending.is_empty() {
@@ -793,12 +810,18 @@ fn run_inner(
             dirty = true;
         }
         if dirty {
-            let name = String::from_utf8_lossy(&window_name.concat())
-                .chars()
-                .filter(|c| !c.is_control())
-                .collect::<String>();
-            terminal
-                .draw(|frame| draw(frame, &panes, prefix, &format!("{notice}{name} · {label}")))?;
+            let name = name.chars().filter(|c| !c.is_control()).collect::<String>();
+            terminal.draw(|frame| {
+                draw(
+                    frame,
+                    &panes,
+                    prefix,
+                    &format!("{notice}{name} · {}", label.text),
+                );
+                if let Some(notification) = &label.notification {
+                    crate::notification::draw(frame, notification);
+                }
+            })?;
             dirty = false;
         }
         if !event::poll(Duration::from_millis(16))? {

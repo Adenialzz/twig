@@ -1,5 +1,6 @@
 mod data;
 pub(crate) mod form;
+mod notifications;
 pub(crate) mod query;
 mod ui;
 
@@ -17,11 +18,12 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{
     io::{self, IsTerminal},
     path::PathBuf,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub(super) struct App {
     snapshot: Snapshot,
+    notifications: notifications::Notifications,
     project: Option<String>,
     task: Option<PathBuf>,
     thread: Option<String>,
@@ -61,6 +63,7 @@ struct SearchBackup {
 impl App {
     fn new(cwd: PathBuf) -> Self {
         Self {
+            notifications: Default::default(),
             snapshot: Snapshot {
                 codex_error: Some("正在连接 Codex…".into()),
                 ..Default::default()
@@ -92,6 +95,13 @@ impl App {
             delete_prefix: false,
         }
     }
+    fn receive_notifications(&mut self, worker: &Worker, viewed: Option<(&str, &std::path::Path)>) {
+        for completion in worker.completions.try_iter() {
+            self.notifications.receive(completion, viewed);
+        }
+        self.notifications.tick(Instant::now());
+    }
+
     fn begin_search(&mut self) {
         self.search_backup = Some(SearchBackup {
             filters: self.filters.clone(),
@@ -441,27 +451,54 @@ fn open_terminal(
     worker: &Worker,
     target: TerminalTarget,
 ) -> Result<()> {
-    let result = twig_cli::workbench::run(terminal, target.session, &target.window, || {
-        for snapshot in worker.updates.try_iter() {
-            app.snapshot = snapshot;
-        }
-        let summary = data::summary(app.snapshot.threads.iter());
-        format!(
-            "{} · 全局 Codex {}",
-            target.project,
-            if app.snapshot.codex_error.is_some() {
-                "连接异常"
-            } else if app
-                .snapshot
-                .codex_checked
-                .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
-            {
-                "状态过期"
-            } else {
-                &summary
+    let initial_task = app.task.clone();
+    let result =
+        twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
+            for snapshot in worker.updates.try_iter() {
+                app.snapshot = snapshot;
             }
-        )
-    });
+            let viewed = app
+                .snapshot
+                .repos
+                .iter()
+                .find(|r| r.name == target.project)
+                .and_then(|r| r.tasks.iter().find(|t| t.name == task))
+                .map(|t| t.path.clone())
+                .or_else(|| {
+                    (window == target.window)
+                        .then(|| initial_task.clone())
+                        .flatten()
+                });
+            app.receive_notifications(
+                worker,
+                viewed
+                    .as_deref()
+                    .map(|path| (target.project.as_str(), path)),
+            );
+            if let Some(path) = viewed {
+                app.notifications.read(&target.project, &path);
+            }
+            let summary = data::summary(app.snapshot.threads.iter());
+            let text = format!(
+                "{} · 全局 Codex {}",
+                target.project,
+                if app.snapshot.codex_error.is_some() {
+                    "连接异常"
+                } else if app
+                    .snapshot
+                    .codex_checked
+                    .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
+                {
+                    "状态过期"
+                } else {
+                    &summary
+                }
+            );
+            twig_cli::workbench::Status {
+                text,
+                notification: app.notifications.current().cloned(),
+            }
+        });
     app.refresh += 1;
     app.reconcile();
     app.message = result
@@ -539,6 +576,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             app.reconcile();
             worker.requests.send(app.request())?;
         }
+        app.receive_notifications(&worker, None);
         terminal.draw(|frame| ui::draw(frame, &app))?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
