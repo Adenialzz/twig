@@ -38,7 +38,7 @@ twig open myapp fix/bug
 
 `--no-open` 仍创建窗口并执行配置的启动命令，不是 dry-run。重复 new 接续自己登记的同名任务；已有窗口不重复启动程序。open 在窗口缺失时重建，但不恢复原进程或对话。
 
-从普通终端进入 tmux 后，可用默认前缀 Ctrl-b 再按 d 离开并保留进程；如果改过 tmux 前缀，使用自己的设置。输入 exit 会退出当前 Shell，可能关闭 Pane。
+Console 的任务终端使用 `Ctrl-G d` 返回导航并保留进程。通过 new/open 从普通终端进入原生 tmux 后，可用默认前缀 Ctrl-b 再按 d 离开并保留进程；如果改过 tmux 前缀，使用自己的设置。输入 exit 会退出当前 Shell，可能关闭 Pane。
 
 ## 查看控制台
 

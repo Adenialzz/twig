@@ -27,7 +27,7 @@
 
 ## 产品与安全边界
 
-- 裸 `twig` 和 `twig console` 打开全局面板；浏览不创建资源；显式提交表单可登记已有仓库、初始化及创建任务；任务区 /delete 经明确确认后复用 rm 安全删除，默认取消，不提供强制删除；默认保护 ignored 文件，仅显式 --delete-ignored 或弹窗勾选后允许一并移除，未提交/未跟踪文件与活动进程保护不变；任务区 Enter 按既有归属校验准备 Shell。Codex 是可选只读观察能力，不启动/重启服务、不恢复会话、不发送提示词或审批；缺失服务不阻止项目导航。
+- 裸 `twig` 和 `twig console` 打开全局面板；浏览不创建资源；显式提交表单可登记已有仓库、初始化及创建任务；任务区 /delete 经明确确认后复用 rm 安全删除，默认取消，不提供强制删除；默认保护 ignored 文件，仅显式 --delete-ignored 或弹窗勾选后允许一并移除，未提交/未跟踪文件与活动进程保护不变；任务区 Enter 按既有归属校验准备 Shell 并打开内置 Control Mode 工作台，Ctrl-G d 返回导航且保留进程；终端视图继续只读采集 Codex 状态。Codex 是可选只读观察能力，不启动/重启服务、不恢复会话、不发送提示词或审批；缺失服务不阻止项目导航。
 - `new` 默认创建并进入任务窗口，`--no-open` 仍创建 Pane 并执行配置的命令，但不进入；`open` 复用窗口，缺失时按启动配置重建。默认普通 Shell，允许显式配置启动程序，不恢复对话。不依赖 Codex Desktop，也不管理 Agent 生命周期。
 - CLI 使用顶层 add/ls/new/open/stop/rm/pr；任务操作显式指定项目别名和任务名，不按当前目录推断。ls 不带项目列项目，带项目列任务；rm PROJECT 仅取消登记，rm PROJECT TASK 才删除任务。任务删除选项必须指定任务名。
 - 用户配置默认在 `~/.twig/config.toml`，`[projects]` 保存项目别名与路径，`[tmux]` 保存默认任务窗口启动配置；登记变更必须保留启动配置。add 同时初始化并登记已有仓库，同路径复用、别名冲突不覆盖；已有配置可补登记，冲突初始化参数拒绝。不提供 init/config/clone/--repo 或旧登记字段兼容，克隆与 remote 管理由 Git 负责。
@@ -35,7 +35,7 @@
 - 登记与普通任务命令不联网，不隐式 fetch、pull 或 push。PR/MR 是显式联网操作。
 - `pr` 是显式联网命令，GitHub/GitLab 分别通过 `gh`/`glab` 操作。只有 `--push` 才允许推送，明确指定仓库与分支，不让平台 CLI 隐式推送或创建 Fork；不自动合并或清理。
 - Shell 补全必须只读，不创建配置/锁、不调用 tmux；复用 CLI 定义解析参数，不执行正在补全的命令。
-- 任务启动配置优先读取主仓库 `.twig/config.toml` 的 `[tmux]`，否则读取 `--config` 所选用户配置；整体覆盖、不合并 Pane。只创建任务窗口时执行，main 窗口不应用。配置错误直接报错，部分失败保留资源并标记，禁止重试时重复启动命令。Pane 的 mode 默认 shell，command 经参数引用后作为登录 Shell 的第一条输入；完成或 Ctrl-C 后回到提示符，Shell 退出关闭 Pane。process 模式必须提供 command，直接运行程序并按 Pane 保留退出输出/状态；允许混用，不把保留设置应用到同窗 Shell。交互测试须验证命令成功/失败、Ctrl-C 后可输入和 Ctrl-D 关闭。快捷键和外观由用户 tmux 配置管理。用户配置命令的联网行为不属于 twig 隐式 Git 联网。
+- 任务启动配置优先读取主仓库 `.twig/config.toml` 的 `[tmux]`，否则读取 `--config` 所选用户配置；整体覆盖、不合并 Pane。只创建任务窗口时执行，main 窗口不应用。配置错误直接报错，部分失败保留资源并标记，禁止重试时重复启动命令。Pane 的 mode 默认 shell，command 经参数引用后作为登录 Shell 的第一条输入；完成或 Ctrl-C 后回到提示符，Shell 退出关闭 Pane。process 模式必须提供 command，直接运行程序并按 Pane 保留退出输出/状态；允许混用，不把保留设置应用到同窗 Shell。交互测试须验证命令成功/失败、Ctrl-C 后可输入和 Ctrl-D 关闭。原生 new/open 的快捷键和外观由用户 tmux 配置管理；Console 工作台由 Twig 定义，不加载 tmux 状态栏或键绑定。用户配置命令的联网行为不属于 twig 隐式 Git 联网。
 - remote URL 以 Git 为准，不在 twig 登记表复制或管理。
 - 清理流程不得默认强制删除；部分失败应保留资源与可诊断记录，不能为“回滚干净”而删除用户工作。
 - 不把窗口存在等同于 Codex 正在运行；不把本地 upstream 引用等同于远端实时状态。
@@ -49,8 +49,8 @@
 - 补全测试需要 Zsh（含 `zpty`、`zselect` 模块）；升级 `clap_complete` 后验证动态协议和生成的 Zsh 接入脚本。展示或排序变更须用真实 Tab/ZLE 验证，不能只检查候选输出顺序。
 - 验证范围应与改动匹配；纯文档更新检查一致性和链接，不必重复运行完整代码测试。
 - 代码变更提交前执行 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`。
-- Control Mode 原型位于 examples/control_mode.rs，独立于正式 Console；原型测试额外执行 `cargo test --locked --example control_mode`。只使用显式指定的独立 tmux socket，不连接真实任务做输入、缩放或清理测试；静态文本重连不等于完整终端恢复，已知缺口记录在 examples/README.md。
-- 修改原型渲染、输入或恢复流程后，构建 example 并执行 `uv run examples/check_control_mode.py`，用独立临时会话验证真实 Vim 的 PTY 编辑与重连；依赖 Vim、tmux 和 uv，不向真实 Agent 会话发送输入。
+- Control Mode 实现在 src/workbench.rs，与正式 Console 和 examples/control_mode.rs 共用；库测试通过 cargo test --locked 执行。仅在显式隔离的 tmux socket 测试输入、缩放与清理；真实 Codex 会话不用于自动验收。屏幕以 tmux capture-pane 为准，不在前端重建第二套终端运行状态；输入特殊键与 bracketed paste 由 tmux 编码。禁止捕获前端自身所在 Session。
+- 修改终端渲染、输入或重连流程后，构建 example 并执行 `uv run examples/check_control_mode.py`，验证真实 Vim PTY 编辑与重连及有限输出时输入响应；依赖 Vim、tmux 和 uv。Console PTY 测试还覆盖导航往返、分屏、跨项目和断连，不向真实 Agent 会话发送输入。
 
 ## 开发
 

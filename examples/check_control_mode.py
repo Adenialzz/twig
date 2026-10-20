@@ -107,8 +107,16 @@ def main():
             assert target.read_text() == (
                 "ORIGINAL_MARKER\nBEFORE_DETACH\nAFTER_RECONNECT\n"
             )
+            # 有限输出负载：约 120 行，用于交互延迟回归，不是吞吐压测。
+            second.send(b"i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; i=$((i+1)); sleep 0.01; done\r")
+            second.wait("LOAD_10")
+            started = time.monotonic()
+            second.send(b"\x03printf 'INPUT_%s\\n' RESPONSIVE\r")
+            second.wait("INPUT_RESPONSIVE")
+            latency = time.monotonic() - started
+            assert latency < 2, latency
             second.detach()
-            print("通过：Vim 编辑、断开重连、继续编辑保存、返回 Shell、终端模式还原")
+            print(f"通过：Vim 编辑与重连、保存、Shell、终端还原；有限输出期间输入延迟 {latency:.3f}s")
         finally:
             for client in clients:
                 client.close()

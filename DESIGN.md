@@ -444,3 +444,18 @@ Linux/tmux 3.8 的独立 server 自动测试覆盖分屏、放大、缩放、断
 新增回归覆盖重连前仅改变绘制颜色、47/1047/1049 备用屏幕返回、清空历史后的视口截断。持续输出测试发现 tmux 普通比较按字符串处理数字，历史范围已使用数值表达式比较。仍使用独立 socket 和临时 FIFO，没有操作真实任务或发送 Agent 提示词。
 
 本阶段验证：cargo fmt --check、全部 targets 的 Clippy（-D warnings）、75 项 Rust 测试（正式代码 64 项、原型 11 项）及真实 Vim PTY 验收通过。准备提交本批原型、依赖和文档变更；尚未接入正式 Console、安装或推送，原通知实现的 stash 保持不动。下一阶段先验证有限输出负载下的输入延迟与刷新开销，再处理输入编码和 Console 接入，不把候选功能自动扩为本阶段范围。
+
+
+### Console 工作台集成（2026-10-20）
+
+用户要求继续直到完成，本轮将已验证的终端前端正式接入 Console。任务区 Enter 仍重新核验登记信息、Worktree 与 tmux 资源归属，并释放项目锁；随后在现有 Ratatui 终端中运行工作台，不退出 alternate screen，也不启动原生 tmux 界面。Ctrl-G d 返回原导航与选择；可再进入同一任务或切换项目，进程保留。new/open 的原生 tmux 入口保留，本次不变更其 CLI 语义。
+
+实现移入 src/workbench.rs，由同一 Cargo 包的库模块供 Console 和独立 example 共用。alacritty_terminal 从开发依赖调整为运行依赖，仅用于解析屏幕快照。前端支持分屏、Pane 切换与边界显示、缩放、窗口切换、历史浏览、中文、常用样式和输入。方向键/功能键改用 tmux send-keys 名称；粘贴使用按字节转义的临时命名缓冲区，再由 paste-buffer 按 server 当前模式发送并删除缓冲区，消除对上一帧输入模式的依赖。
+
+Console 采集线程在终端视图中继续工作，底部保留全局 Codex 状态摘要、错误与过期提示；没有添加 Agent 编排，也没有恢复原通知 stash。返回导航不重建采集线程。控制连接断开或命令错误返回导航并显示原因，不删除后台资源。终端退出与 panic 路径关闭 bracketed paste 并恢复终端。拒绝在目标项目自身的 tmux Session 中打开工作台，避免递归显示与影响外层窗口；其他 Session 或 tmux 外可以使用。
+
+新增库测试验证原始输入接收端确实收到应用方向键编码与完整中文多行 bracketed paste（含引号、分号、美元符和跨块 UTF-8）；Console PTY 测试覆盖分屏、缩放、焦点、粘贴、跨项目、断连、进程保留及嵌套拒绝。真实 Vim PTY 验收覆盖编辑中断开、重新接入继续保存、返回 Shell、终端属性还原。有限输出实验约 120 行，在输出期间 Ctrl-C 后发送命令直到显示结果约 0.30 秒，仅是该实验的端到端观测，不代表高吞吐或慢链路性能。
+
+README、内置 Console 手册、安装/快速开始/窗口说明、Clap 帮助与 AGENTS 已同步。Linux/tmux 3.8 是本轮验收环境。真实 Codex 人工交互、macOS、真实 SSH 断线和高负载仍未验收；鼠标选区、系统剪贴板、扩展键盘协议、图像/超链接、独立多客户端布局以及 stash 中的通知功能不属于这次完成的 Console 集成范围。文字可用外层终端自带选择与复制。
+
+本轮最终验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过，共 78 项 Rust 测试；独立 example 构建与真实 Vim PTY 验收通过，最后一次有限输出输入响应为 0.327 秒。准备提交并推送当前功能分支；未安装或替换本机二进制。原通知工作仍保存在描述为「保存 feat/codex-notify 工作区，开始 control-mode-console 开发」的 stash 中。

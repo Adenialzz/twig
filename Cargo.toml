@@ -22,5 +22,4 @@ crossterm = { version = "0.28", features = ["use-dev-tty"] }
 tungstenite = "0.26"
 libc = "0.2"
 
-[dev-dependencies]
 alacritty_terminal = "0.26.0"

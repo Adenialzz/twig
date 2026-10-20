@@ -5,7 +5,7 @@ mod ui;
 
 use anyhow::{Result, ensure};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, DisableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -406,7 +406,12 @@ impl Screen {
         if self.active {
             // 两项都尝试，避免其中一项失败跳过另一项。
             let raw = disable_raw_mode();
-            let screen = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+            let screen = execute!(
+                io::stdout(),
+                DisableBracketedPaste,
+                LeaveAlternateScreen,
+                crossterm::cursor::Show
+            );
             self.active = false;
             raw?;
             screen?;
@@ -429,7 +434,12 @@ pub fn run(registry: PathBuf, cwd: PathBuf) -> Result<()> {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = execute!(
+            io::stdout(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
         eprintln!("Console 异常：{info}");
     }));
     let result = run_inner(registry, cwd);
@@ -439,7 +449,7 @@ pub fn run(registry: PathBuf, cwd: PathBuf) -> Result<()> {
 fn run_inner(registry: PathBuf, cwd: PathBuf) -> Result<()> {
     let mut screen = Screen::start()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut worker = Worker::start(registry.clone());
+    let worker = Worker::start(registry.clone());
     let mut app = App::new(cwd);
     worker.requests.send(app.request())?;
     loop {
@@ -688,16 +698,34 @@ fn run_inner(registry: PathBuf, cwd: PathBuf) -> Result<()> {
                     .repo()
                     .map(|r| (r.name.clone(), app.task().map(|t| t.name.clone())));
                 if let Some((project, Some(task))) = target {
-                    screen.restore()?;
-                    // 停止采集后才能进入；防止与进入阶段共享终端或旧查询。
-                    drop(worker);
-                    match data::enter(&registry, &project, &task) {
-                        Ok(()) => app.message = None,
-                        Err(error) => app.message = Some(format!("进入失败：{error:#}")),
-                    }
-                    screen = Screen::start()?;
+                    let result = data::prepare_terminal(&registry, &project, &task).and_then(
+                        |(session, window)| {
+                            twig_cli::workbench::run(&mut terminal, session, &window, || {
+                                for snapshot in worker.updates.try_iter() {
+                                    app.snapshot = snapshot;
+                                }
+                                let summary = data::summary(app.snapshot.threads.iter());
+                                format!(
+                                    "{project} · 全局 Codex {}",
+                                    if app.snapshot.codex_error.is_some() {
+                                        "连接异常"
+                                    } else if app.snapshot.codex_checked.is_none_or(|checked| {
+                                        checked.elapsed() > Duration::from_secs(30)
+                                    }) {
+                                        "状态过期"
+                                    } else {
+                                        &summary
+                                    }
+                                )
+                            })
+                        },
+                    );
+                    app.message = result
+                        .err()
+                        .map(|error| format!("终端已返回导航：{error:#}"));
+                    app.refresh += 1;
+                    app.reconcile();
                     terminal.clear()?;
-                    worker = Worker::start(registry.clone());
                 }
             }
             _ => {}

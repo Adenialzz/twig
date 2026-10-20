@@ -50,7 +50,7 @@ enum Action {
     },
     /// 全局项目、任务与 Codex 会话控制台
     #[command(
-        after_help = "需要交互终端。浏览只读；提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
+        after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-G d 返回导航并保留进程。\n浏览只读；提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
     )]
     Console,
     /// 登记并初始化已有 Git 仓库（不联网）
