@@ -74,6 +74,13 @@ fn list(
     frame.render_stateful_widget(widget, area, &mut state);
 }
 pub fn draw(frame: &mut Frame, app: &App) {
+    draw_content(frame, app);
+    if let Some(notice) = app.notifications.current() {
+        twig_cli::notification::draw(frame, notice);
+    }
+}
+
+fn draw_content(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < 38 || area.height < 12 {
         frame.render_widget(Paragraph::new("终端过小，请扩大到至少 38×12；q 退出"), area);
@@ -240,8 +247,9 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
                     .is_some_and(|(name, _)| name == &repo.name)
             }));
             format!(
-                "{}  [{}]  {}",
+                "{}{}  [{}]  {}",
                 repo.name,
+                unread(app.notifications.count(&repo.name, None)),
                 repo.tasks.len().saturating_sub(1),
                 if repo.error.is_some() {
                     "异常".into()
@@ -261,6 +269,13 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
             .position(|r| Some(&r.name) == app.project.as_ref()),
         app.focus == 0,
     );
+}
+fn unread(count: usize) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        format!(" [未读 {count}]")
+    }
 }
 fn tasks(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(error) = app.repo().and_then(|r| r.error.as_ref()) {
@@ -295,6 +310,13 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 &task.name
             });
+            let name = format!(
+                "{name}{}",
+                unread(
+                    app.notifications
+                        .count(app.project.as_deref().unwrap_or_default(), Some(&task.path))
+                )
+            );
             let branch = safe(&task.branch);
             let git = safe(&format!("{}{freshness}", task.git));
             let window = safe(&task.window);

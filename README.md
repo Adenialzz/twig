@@ -51,3 +51,5 @@ Zsh 补全在 compinit 之后加载 `source <(COMPLETE=zsh twig)`，详见 [补�
 用户手册以 docs/ 下的 Markdown 为源文件，编译时嵌入 twig guide。命令参数变化时同步更新 Clap 帮助和对应主题。
 
 Console、`new` 和 `open` 统一使用 Control Mode 终端工作台；`Ctrl-W d` 返回 Console，`q` 退出，后台进程保留。工作台操作见 [Console 手册](docs/console.md)，独立验收入口和当前限制见 [实验说明](examples/README.md)。
+
+Twig 打开期间会提示 Codex 新完成的轮次：导航和终端工作台共用右上角浮动卡片（每条 8 秒），正在查看的任务完成时静默，其他任务保留未读标记，进入对应任务终端后清除。通知不持久化，详见 [Console 手册](docs/console.md)。

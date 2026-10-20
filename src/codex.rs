@@ -96,6 +96,12 @@ pub struct Page {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct Turn {
+    pub id: String,
+    pub status: String,
+}
+
 pub struct Client {
     socket: WebSocket<UnixStream>,
     next_id: u64,
@@ -240,6 +246,60 @@ impl Client {
             status, turn["startedAt"], turn["completedAt"], turn["error"]
         ))
     }
+
+    /// 首次只建立基线；之后读到上次最新轮次（包含它，以捕获进行中→完成）。
+    /// 整次查询成功后调用方才更新基线，分页失败不会丢失通知。
+    pub fn completed_turns(
+        &mut self,
+        id: &str,
+        previous: Option<&Option<Turn>>,
+    ) -> Result<(Option<Turn>, Vec<Turn>)> {
+        let anchor = previous.and_then(Option::as_ref);
+        let mut cursor: Option<String> = None;
+        let mut cursors = HashSet::new();
+        let mut newest = None;
+        let mut completed = Vec::new();
+        loop {
+            let result = self.request(
+                "thread/turns/list",
+                json!({"threadId":id,"limit":if previous.is_none() {1} else {50},
+                    "cursor":cursor,"sortDirection":"desc","itemsView":"notLoaded"}),
+            )?;
+            let turns: Vec<Turn> =
+                serde_json::from_value(result["data"].clone()).context("Codex 轮次格式不兼容")?;
+            for turn in turns {
+                if newest.is_none() {
+                    newest = Some(turn.clone());
+                }
+                let at_anchor = anchor.is_some_and(|old| old.id == turn.id);
+                if previous.is_some()
+                    && turn.status == "completed"
+                    && (!at_anchor || anchor.is_some_and(|old| old.status != "completed"))
+                {
+                    completed.push(turn);
+                }
+                if at_anchor {
+                    completed.reverse();
+                    return Ok((newest, completed));
+                }
+            }
+            if previous.is_none() {
+                return Ok((newest, completed));
+            }
+            cursor = serde_json::from_value(result["nextCursor"].clone())?;
+            match &cursor {
+                Some(c) => ensure!(cursors.insert(c.clone()), "Codex 返回重复分页游标"),
+                None => {
+                    // 历史被回退/裁剪后，不能将找不到锚点的旧轮次当作新完成。
+                    if anchor.is_some() {
+                        completed.clear();
+                    }
+                    completed.reverse();
+                    return Ok((newest, completed));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +312,116 @@ mod tests {
     };
     fn mock_thread(id: &str, status: Value) -> Value {
         json!({"id":id,"cwd":"/tmp","status":status,"source":"cli","name":"测试会话"})
+    }
+    #[test]
+    fn completion_baseline_pagination_and_retry_are_readonly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let turn = |id: &str, status: &str| json!({"id":id,"status":status});
+        let responses = vec![
+            json!({"data":[turn("old","completed")]}),
+            json!({"data":[turn("run","inProgress"),turn("old","completed")]}),
+            json!({"data":[turn("run","completed")]}),
+            json!({"data":[turn("run","completed")]}),
+            json!({"data":[turn("new","completed"),turn("failed","failed")],"nextCursor":"page2"}),
+            json!({"error":{"message":"分页失败"}}),
+            json!({"data":[turn("new","completed"),turn("failed","failed")],"nextCursor":"page2"}),
+            json!({"data":[turn("middle","completed"),turn("stop","interrupted"),turn("run","completed")]}),
+            json!({"data":[turn("historic","completed")]}),
+        ];
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut responses = responses.into_iter();
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                let result = match v["method"].as_str().unwrap() {
+                    "initialize" => json!({}),
+                    "initialized" => continue,
+                    "thread/turns/list" => {
+                        assert_eq!(v["params"]["itemsView"], "notLoaded");
+                        responses.next().unwrap()
+                    }
+                    other => panic!("不允许的请求：{other}"),
+                };
+                let response = if let Some(error) = result.get("error") {
+                    json!({"id":v["id"],"error":error})
+                } else {
+                    json!({"id":v["id"],"result":result})
+                };
+                ws.send(Message::Text(response.to_string().into())).unwrap();
+            }
+            assert!(responses.next().is_none());
+        });
+        let mut client = Client::connect(&path).unwrap();
+        let (old, events) = client.completed_turns("thread", None).unwrap();
+        assert!(events.is_empty());
+        let (running, events) = client.completed_turns("thread", Some(&old)).unwrap();
+        assert!(events.is_empty());
+        let (done, events) = client.completed_turns("thread", Some(&running)).unwrap();
+        assert_eq!(events[0].id, "run");
+        assert!(
+            client
+                .completed_turns("thread", Some(&done))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        assert!(client.completed_turns("thread", Some(&done)).is_err());
+        let (newest, events) = client.completed_turns("thread", Some(&done)).unwrap();
+        assert_eq!(
+            events.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["middle", "new"]
+        );
+        assert!(
+            client
+                .completed_turns("thread", Some(&newest))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn initially_empty_thread_can_complete_between_polls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut calls = 0;
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                let result = match v["method"].as_str().unwrap() {
+                    "initialize" => json!({}),
+                    "initialized" => continue,
+                    "thread/turns/list" => {
+                        calls += 1;
+                        if calls == 1 {
+                            json!({"data":[]})
+                        } else {
+                            json!({"data":[{"id":"fast","status":"completed"}]})
+                        }
+                    }
+                    other => panic!("不允许的请求：{other}"),
+                };
+                ws.send(Message::Text(
+                    json!({"id":v["id"],"result":result}).to_string().into(),
+                ))
+                .unwrap();
+            }
+        });
+        let mut client = Client::connect(&path).unwrap();
+        let (empty, _) = client.completed_turns("thread", None).unwrap();
+        assert!(empty.is_none());
+        let (_, events) = client.completed_turns("thread", Some(&empty)).unwrap();
+        assert_eq!(events[0].id, "fast");
+        drop(client);
+        server.join().unwrap();
     }
     #[test]
     fn reads_pages_status_and_turns_without_mutating_sessions() {
@@ -293,7 +463,7 @@ mod tests {
                     }
                     "thread/turns/list" => {
                         assert_eq!(v["params"]["itemsView"], "notLoaded");
-                        json!({"data":[{"status":"completed","startedAt":1,"completedAt":2,"error":null}]})
+                        json!({"data":[{"id":"turn-old","status":"completed","startedAt":1,"completedAt":2,"error":null}]})
                     }
                     _ => panic!("不允许的写操作：{method}"),
                 };

@@ -781,7 +781,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                         }
                     }
                     "thread/turns/list" => {
-                        json!({"data":[{"status":"completed","startedAt":1,"completedAt":2,"error":null}]})
+                        json!({"data":[{"id":"turn-old","status":"completed","startedAt":1,"completedAt":2,"error":null}]})
                     }
                     other => panic!("不允许的请求：{other}"),
                 };
@@ -858,6 +858,178 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
             .count()
             >= 2
     );
+}
+
+#[test]
+fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
+    use serde_json::{Value, json};
+    use std::{
+        os::unix::net::UnixListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
+    let f = Fixture::new();
+    f.init();
+    let sock = f.temp.path().join("notify.sock");
+    let listener = UnixListener::bind(&sock).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fs::write(
+        f.bin.join("codex"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            json!({"status":"running","socketPath":sock})
+                .to_string()
+                .replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let phase = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::new(AtomicUsize::new(usize::MAX));
+    let done = stop.clone();
+    let stage = phase.clone();
+    let seen = observed.clone();
+    let cwd = f
+        .repo
+        .with_file_name("repo.worktrees")
+        .join("auth")
+        .canonicalize()
+        .unwrap();
+    let server = thread::spawn(move || {
+        let mut disconnected = false;
+        while !done.load(Ordering::Relaxed) {
+            let (socket, _) = match listener.accept() {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            let mut ws = tungstenite::accept(socket).unwrap();
+            while !done.load(Ordering::Relaxed) {
+                let text = match ws.read() {
+                    Ok(tungstenite::Message::Text(t)) => t,
+                    Err(tungstenite::Error::Io(e))
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue;
+                    }
+                    _ => break,
+                };
+                let v: Value = serde_json::from_str(&text).unwrap();
+                let current = stage.load(Ordering::Relaxed);
+                let result = match v["method"].as_str().unwrap() {
+                    "initialize" => json!({}),
+                    "initialized" => continue,
+                    "thread/loaded/list" => json!({"data":["notify-thread"]}),
+                    "thread/read" => {
+                        json!({"thread":{"id":"notify-thread","cwd":cwd,"status":{"type":"idle"},"name":"NOTIFY_THREAD"}})
+                    }
+                    "thread/turns/list" => {
+                        if current == 2 && !disconnected {
+                            disconnected = true;
+                            let _ = ws.close(None);
+                            break;
+                        }
+                        seen.store(current, Ordering::Relaxed);
+                        let mut turns = vec![json!({"id":"old","status":"completed"})];
+                        if current > 0 {
+                            turns.insert(0, json!({"id":"first","status":if current == 1 {"inProgress"} else {"completed"}}));
+                        }
+                        if current == 3 {
+                            turns.insert(0, json!({"id":"second","status":"completed"}));
+                        }
+                        json!({"data":turns})
+                    }
+                    other => panic!("不允许的请求：{other}"),
+                };
+                if ws
+                    .send(tungstenite::Message::Text(
+                        json!({"id":v["id"],"result":result}).to_string().into(),
+                    ))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    });
+    struct Stop(Arc<AtomicBool>);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let guard = Stop(stop);
+    let wait_phase = |expected| {
+        let start = Instant::now();
+        while observed.load(Ordering::Relaxed) != expected {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    wait_phase(0);
+    p.send(b"\rgg\r");
+    p.wait("Ctrl-W d");
+    assert!(!p.text.contains("本轮已完成"));
+    phase.store(1, Ordering::Relaxed);
+    wait_phase(1);
+    phase.store(2, Ordering::Relaxed);
+    p.wait("Codex 本轮已完成");
+    p.wait("返回 Console 查看任务");
+    p.resize(80, 30);
+    p.send(b"printf 'NOTIFY_INPUT_%s\\n' OK\r");
+    p.wait("NOTIFY_INPUT_OK");
+    p.resize(140, 36);
+    p.send(b"\x17d");
+    p.wait("未读 1");
+    p.bytes.clear();
+    p.text.clear();
+    // 重新进入 main，再用工作台快捷键切到 auth；以实际窗口清除未读。
+    p.send(b"\r");
+    p.send(b"printf 'REENTERED_%s\\n' MAIN\r");
+    p.wait("REENTERED_MAIN");
+    p.send(b"\x17n");
+    p.send(b"printf 'WINDOW_DIR:%s\\n' \"$PWD\"\r");
+    p.wait(&format!(
+        "WINDOW_DIR:{}",
+        f.repo
+            .with_file_name("repo.worktrees")
+            .join("auth")
+            .display()
+    ));
+    phase.store(3, Ordering::Relaxed);
+    wait_phase(3);
+    // 当前实际打开的是 auth：第二轮应静默，不排入下一张卡片。
+    // 等第一张卡片到期后强制重绘，检查没有第二张卡片残留。
+    thread::sleep(Duration::from_secs(9));
+    p.bytes.clear();
+    p.text.clear();
+    p.resize(139, 36);
+    p.send(b"printf 'SILENT_TURN_%s\\n' OK\r");
+    p.wait("SILENT_TURN_OK");
+    assert!(!p.text.contains("Codex 本轮已完成"), "{}", p.text);
+    p.bytes.clear();
+    p.text.clear();
+    p.send(b"\x17d");
+    p.wait("任务 / ");
+    assert!(!p.text.contains("未读"), "{}", p.text);
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    drop(p);
+    drop(guard);
+    server.join().unwrap();
 }
 
 fn terminal_attributes(fd: std::os::fd::RawFd) -> libc::termios {
