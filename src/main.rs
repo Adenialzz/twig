@@ -3,6 +3,7 @@ mod completion;
 mod config;
 mod console;
 mod git;
+mod guide;
 mod pr;
 mod registry;
 mod startup;
@@ -19,7 +20,12 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(name = "twig", version, about = "Git Worktree + tmux 任务环境管理")]
+#[command(
+    name = "twig",
+    version,
+    about = "Git Worktree + tmux 任务环境管理",
+    after_help = "项目通过登记别名定位；任务命令显式指定项目和任务。裸 twig 打开交互控制台。\n\n开始使用：\n  twig add myapp --path /path/to/repo\n  twig new myapp auth\n  twig ls myapp\n\n深入阅读：twig <命令> --help；twig guide；twig guide --all"
+)]
 struct Cli {
     /// 使用其他登记表及同目录项目状态（默认 ~/.twig/config.toml）
     #[arg(long, global = true)]
@@ -30,61 +36,110 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// 阅读离线用户手册；不带主题时显示导航
+    #[command(
+        after_help = "示例：twig guide quickstart\n      twig guide windows\n      twig guide --all | less\n\n输出 Markdown 文本，不读取配置、不联网、不调用 Git/tmux，也不自动打开分页器。"
+    )]
+    Guide {
+        /// 要阅读的主题；省略时显示手册目录
+        #[arg(value_enum)]
+        topic: Option<guide::Topic>,
+        /// 输出目录及所有主题，不能与主题同时使用
+        #[arg(long, conflicts_with = "topic")]
+        all: bool,
+    },
     /// 全局项目、任务与 Codex 会话控制台
+    #[command(
+        after_help = "需要交互终端。浏览只读；提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
+    )]
     Console,
     /// 登记并初始化已有 Git 仓库（不联网）
+    #[command(
+        after_help = "需要已有提交的非裸仓库。同路径复用原别名，别名冲突不覆盖。\n首次初始化创建配置、根目录及主窗口；已有配置时只补登记，冲突初始化参数拒绝。\n示例：twig add myapp --path ~/projects/myapp --base develop\n详细规则：twig guide commands；twig guide configuration"
+    )]
     Add {
+        /// 项目别名：1–64 位 ASCII 字母数字、横线或下划线，首位为字母数字
         name: String,
+        /// 已有仓库路径；支持 ~/ 和相对调用目录的路径
         #[arg(long, value_hint = clap::ValueHint::DirPath)]
         path: PathBuf,
+        /// 首次初始化的已有本地基础分支；默认 main，其次 master
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
+        /// 安全删除的本地合并检查目标；默认等于基础分支
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         target: Option<String>,
+        /// Worktree 根目录；默认主仓库旁的 <目录名>.worktrees，不能与主目录相互包含
         #[arg(long, value_hint = clap::ValueHint::DirPath)]
         root: Option<PathBuf>,
         #[arg(long, hide = true)]
         print_name: bool,
     },
     /// 创建并进入任务 Shell 窗口；重复执行接续已有环境
+    #[command(
+        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n只接续自己登记的资源，不接管外部同名分支；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
+    )]
     New {
+        /// 已登记的项目别名，不根据当前目录推断
         #[arg(add = ArgValueCompleter::new(completion::projects))]
         project: String,
+        /// 任务名
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
+        /// 已有本地起点分支；默认项目 base，不联网更新分支
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
-        /// 只创建或接续任务环境，不进入窗口
+        /// 不进入窗口；仍创建 Pane 并执行配置的启动命令（不是 dry-run）
         #[arg(long)]
         no_open: bool,
     },
     /// 列出项目；指定项目时列出其任务及实际状态
+    #[command(
+        after_help = "Open 只表示窗口存在；Clean 不包含 ignored 文件，不代表已合并/推送。\nMissing/Mismatch 请检查目录和 stderr 诊断；Mismatch 可能伴随成功退出码。\n示例：twig ls；twig ls myapp\n详细状态：twig guide commands"
+    )]
     Ls {
+        /// 已登记的项目别名，不根据当前目录推断
         #[arg(add = ArgValueCompleter::new(completion::projects))]
         project: Option<String>,
     },
     /// 查找或创建草稿 PR/MR；仅 --push 才推送提交
     Pr(pr::Args),
     /// 进入任务窗口；窗口丢失时重建 Shell
+    #[command(
+        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n不恢复原进程或对话。通常需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
+    )]
     Open {
+        /// 已登记的项目别名，不根据当前目录推断
         #[arg(add = ArgValueCompleter::new(completion::projects))]
         project: String,
+        /// 任务名
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
     },
     /// 关闭窗口及其中的进程，保留 Worktree 和分支
+    #[command(
+        after_help = "默认确认后终止窗口内全部进程，保留代码、分支和任务记录。\n重新准备窗口用 open 或 new --no-open；缺失窗口不重建。\n示例：twig stop myapp auth\n详细说明：twig guide cleanup"
+    )]
     Stop {
+        /// 已登记的项目别名，不根据当前目录推断
         #[arg(add = ArgValueCompleter::new(completion::projects))]
         project: String,
+        /// 任务名
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
+        /// 跳过终止进程的确认
         #[arg(short = 'y', long)]
         yes: bool,
     },
     /// 取消项目登记；指定任务时安全删除该任务
+    #[command(
+        after_help = "rm PROJECT 立即取消登记，保留所有资源；rm PROJECT NAME 确认后安全删除任务。\n默认保护未提交、未跟踪、ignored 文件和活动进程，检查合并及本地 upstream；不提供强制删除。\n--target/--keep-branch/--delete-ignored 必须指定任务名。部分失败保留剩余资源。\n示例：twig rm myapp auth --keep-branch\n完整清理条件：twig guide cleanup"
+    )]
     Rm {
+        /// 已登记的项目别名，不根据当前目录推断
         #[arg(add = ArgValueCompleter::new(completion::projects))]
         project: String,
+        /// 任务名；rm 中省略时只取消项目登记
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: Option<String>,
         #[command(flatten)]
@@ -97,6 +152,7 @@ enum Action {
 
 #[derive(clap::Args)]
 struct RemoveOptions {
+    /// 保留本地分支，跳过合并/upstream 检查，仍保护文件和进程
     #[arg(long)]
     keep_branch: bool,
     /// 同时删除 Worktree 中被 Git 忽略的文件（仍保护未提交和未跟踪文件）
@@ -104,8 +160,10 @@ struct RemoveOptions {
     delete_ignored: bool,
     #[arg(long, hide = true)]
     expected_ignored: Option<String>,
+    /// 本次合并检查的已有本地目标分支；默认项目 target
     #[arg(long, add = ArgValueCompleter::new(completion::branches))]
     target: Option<String>,
+    /// 仅跳过确认，不绕过删除保护
     #[arg(short = 'y', long)]
     yes: bool,
 }
@@ -119,6 +177,9 @@ fn main() {
 }
 
 fn execute(cli: Cli) -> Result<()> {
+    if let Some(Action::Guide { topic, all }) = cli.command {
+        return Ok(guide::print(topic, all)?);
+    }
     let invocation_dir = std::env::current_dir()?;
     let registry_path = registry::location(cli.config)?;
     let action = cli.command.unwrap_or(Action::Console);
@@ -233,7 +294,7 @@ fn execute(cli: Cli) -> Result<()> {
             }
             remove(&project, &config, &mut state, &name, &options)
         }
-        Action::Console | Action::Add { .. } => unreachable!(),
+        Action::Guide { .. } | Action::Console | Action::Add { .. } => unreachable!(),
     }
 }
 
