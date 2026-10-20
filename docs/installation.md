@@ -2,7 +2,7 @@
 
 命令行阅读：`twig guide installation`。
 
-需要 Rust/Cargo、Git、tmux 和 Unix `ps`。历史人工验证环境为 macOS、Rust 1.93.1、Git 2.50.1、tmux 3.6a，这不是最低版本要求；Linux 的完整人工使用验收尚未完成。
+需要 Rust/Cargo、Git、tmux 和 Unix `ps`。历史人工验证环境为 macOS、Rust 1.93.1、Git 2.50.1、tmux 3.6a，这不是最低版本要求；Console 的 Control Mode 工作台另在 Linux、tmux 3.8 上完成自动化 PTY 验收；macOS 工作台尚未验收。
 
 ```bash
 cd /path/to/twig

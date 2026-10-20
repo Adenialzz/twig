@@ -154,7 +154,7 @@ struct Pty {
 impl Pty {
     fn spawn(mut command: Command) -> Self {
         let (mut master, mut slave) = (0, 0);
-        let mut size = libc::winsize {
+        let size = libc::winsize {
             ws_row: 36,
             ws_col: 140,
             ws_xpixel: 0,
@@ -167,7 +167,7 @@ impl Pty {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut size,
+                    &size,
                 )
             },
             0
@@ -350,7 +350,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         // 返回项目后重新 Enter，应清除任务筛选并选中主工作目录。
         p.send(b"\x1b[Z\r");
         p.send(keys);
-        p.wait("[twig-");
+        p.wait("Ctrl-W d");
         p.send(b"printf 'ENTERED_%s\\n' SHELL\r");
         p.wait("ENTERED_SHELL");
         p.send(b"printf 'SELECTED_DIR:%s\n' \"$PWD\"\r");
@@ -372,21 +372,304 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         );
         p.bytes.clear();
         p.text.clear();
-        p.send(b"\x02d");
+        p.send(b"\x17d");
         p.wait("任务 / ");
         // 返回后保留任务区焦点和选择，可以再次进入同一 Shell。
         p.send(b"\r");
-        p.wait("[twig-");
+        p.wait("Ctrl-W d");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
         p.bytes.clear();
         p.text.clear();
-        p.send(b"\x02d");
+        p.send(b"\x17d");
         p.wait("任务 / ");
         p.send(b"q");
         p.wait("TERMINAL_RESTORED:0");
         assert!(p.child.wait().unwrap().success());
     }
+}
+
+#[test]
+fn workbench_split_resize_paste_disconnect_and_process_survival() {
+    let f = Fixture::new();
+    f.init();
+    let mux = |args: &[&str]| {
+        let out = Command::new(&f.tmux)
+            .args(["-L", &f.socket])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"\tG\r");
+    p.wait("Ctrl-W d");
+    p.send(b"printf 'FIRST_%s\\n' PANE\r");
+    p.wait("FIRST_PANE");
+    let before = mux(&["list-panes", "-a", "-F", "#{pane_pid}"]);
+    p.send(b"\x17s");
+    p.send(b"printf 'SECOND_%s\\n' PANE\r");
+    p.wait("SECOND_PANE");
+    assert_eq!(mux(&["list-panes", "-a"]).lines().count(), 3);
+    p.send(b"\x17z");
+    p.resize(110, 30);
+    p.send(b"printf 'ZOOM_%s\\n' OK\r");
+    p.wait("ZOOM_OK");
+    p.send(b"\x17z\x17o");
+    p.send(b"\x1b[200~printf 'PASTE_%s\\n' OK\x1b[201~\r");
+    p.wait("PASTE_OK");
+    let pids = mux(&["list-panes", "-a", "-F", "#{pane_pid}"]);
+    assert!(
+        before
+            .lines()
+            .all(|pid| pids.lines().any(|after| after == pid))
+    );
+    p.text.clear();
+    p.bytes.clear();
+    p.send(b"\x17d");
+    p.wait("任务 / ");
+    assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
+    p.send(b"\r");
+    p.wait("Ctrl-W d");
+    // 仅断开专用测试 server 的 Control Mode 客户端；Pane 仍在。
+    let clients = mux(&["list-clients", "-F", "#{client_name}"]);
+    for client in clients.lines() {
+        mux(&["detach-client", "-t", client]);
+    }
+    p.text.clear();
+    p.bytes.clear();
+    p.wait("任务 / ");
+    assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+}
+
+#[test]
+fn workbench_switches_projects_and_rejects_its_own_session() {
+    let f = Fixture::new();
+    f.init();
+    let other = f.temp.path().join("other");
+    assert!(
+        Command::new("git")
+            .arg("clone")
+            .arg("--local")
+            .arg(&f.repo)
+            .arg(&other)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    f.twig(&["add", "other", "--path", other.to_str().unwrap()]);
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"/other\r\r\r");
+    p.wait("Ctrl-W d");
+    p.send(b"printf 'PROJECT_DIR:%s\\n' \"$PWD\"\r");
+    p.wait(&format!("PROJECT_DIR:{}", other.display()));
+    p.send(b"\x17d");
+    p.wait("任务 / ");
+    p.text.clear();
+    p.bytes.clear();
+    p.send(b"\x1b[Z/demo\r\rG\r");
+    p.wait("Ctrl-W d");
+    p.send(b"printf 'TASK_DIR:%s\\n' \"$PWD\"\r");
+    p.wait(&format!(
+        "TASK_DIR:{}",
+        f.repo
+            .with_file_name("repo.worktrees")
+            .join("auth")
+            .display()
+    ));
+    p.send(b"\x17d");
+    p.wait("任务 / ");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+
+    let out = Command::new(&f.tmux)
+        .args([
+            "-L",
+            &f.socket,
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id} #{pane_current_path}",
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let pane = text
+        .lines()
+        .find(|line| line.ends_with(f.repo.to_str().unwrap()))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let mut command = Command::new("sh");
+    f.env(&mut command);
+    command.env("TMUX_PANE", pane).args([
+        "-c",
+        "\"$TWIG_TEST_BIN\" --config \"$TWIG_TEST_CONFIG\"; printf '\\nTERMINAL_RESTORED:%s\\n' $?",
+    ]);
+    let mut p = Pty::spawn(command);
+    p.wait("auth");
+    p.send(b"\tG\r");
+    p.wait("终端已返回导航：不能在当前");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+}
+
+#[test]
+fn new_and_open_share_workbench_and_return_to_the_selected_task() {
+    let f = Fixture::new();
+    f.init();
+    let target = f.repo.with_file_name("repo.worktrees").join("feat/unified");
+    let mut previous_pids = None;
+    for action in ["new", "new", "open"] {
+        let mut command = Command::new("sh");
+        f.env(&mut command);
+        // 启动目录故意与目标任务无关，选中项必须来自显式命令参数。
+        command.args(["-c", "\"$TWIG_TEST_BIN\" --config \"$TWIG_TEST_CONFIG\" \"$@\"; printf '\\nTERMINAL_RESTORED:%s\\n' $?",
+            "test", action, "demo", "feat/unified"]);
+        let mut p = Pty::spawn(command);
+        p.wait("Ctrl-W d");
+        p.send(b"printf 'DIRECT_DIR:%s\\n' \"$PWD\"\r");
+        p.wait(&format!("DIRECT_DIR:{}", target.display()));
+        assert!(
+            !support::project_dir(&f.repo, &f.registry)
+                .join("lock")
+                .exists()
+        );
+        let output = Command::new(&f.tmux)
+            .args([
+                "-L",
+                &f.socket,
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_pid} #{pane_current_path}",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let pids = String::from_utf8(output.stdout).unwrap();
+        if let Some(previous) = &previous_pids {
+            assert_eq!(previous, &pids);
+        }
+        previous_pids = Some(pids);
+        p.text.clear();
+        p.bytes.clear();
+        p.send(b"\x17d");
+        p.wait(&format!("目录：{}", target.display()));
+        p.text.clear();
+        p.bytes.clear();
+        p.send(b"\r");
+        p.wait("Ctrl-W d");
+        p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
+        p.wait(&format!("REENTER_DIR:{}", target.display()));
+        p.text.clear();
+        p.bytes.clear();
+        p.send(b"\x17d");
+        p.wait("任务 / ");
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
+fn custom_prefix_directions_alt_resize_and_mouse_work_in_terminal() {
+    let f = Fixture::new();
+    f.init();
+    let mux = |args: &[&str]| {
+        let out = Command::new(&f.tmux)
+            .args(["-L", &f.socket])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"\tG\r");
+    p.wait("Ctrl-W d");
+    p.send(b"\x17s");
+    p.send(b"printf 'SPLIT_%s\\n' READY\r");
+    p.wait("SPLIT_READY");
+    let rows = mux(&[
+        "list-panes",
+        "-a",
+        "-F",
+        "#{@twig-feature} #{pane_id} #{pane_left} #{pane_top} #{pane_width}",
+    ]);
+    let left = rows
+        .lines()
+        .filter(|row| row.starts_with("auth "))
+        .map(|row| row.split_whitespace().collect::<Vec<_>>())
+        .find(|row| row[2] == "0")
+        .unwrap();
+    let id = left[1];
+    let y: u16 = left[3].parse().unwrap();
+    let width: u16 = left[4].parse().unwrap();
+    // Ctrl-W h 按方向切换；Alt-l 无前缀扩宽 3 列。
+    p.send(b"\x17h\x1bl");
+    p.send(b"printf 'KEYS_%s\\n' READY\r");
+    p.wait("KEYS_READY");
+    assert_eq!(
+        mux(&["display-message", "-p", "-t", id, "#{pane_active}"]).trim(),
+        "1"
+    );
+    assert_eq!(
+        mux(&["display-message", "-p", "-t", id, "#{pane_width}"]).trim(),
+        (width + 3).to_string()
+    );
+    p.send(b"\x17l");
+    p.send(b"printf 'RIGHT_%s\\n' READY\r");
+    p.wait("RIGHT_READY");
+    // SGR 鼠标坐标从 1 开始；点击左 Pane 后，命令应在那里执行。
+    p.send(format!("\x1b[<0;2;{}M\x1b[<0;2;{}m", y + 2, y + 2).as_bytes());
+    p.send(b"printf 'CLICK_%s\\n' READY\r");
+    p.wait("CLICK_READY");
+    assert_eq!(
+        mux(&["display-message", "-p", "-t", id, "#{pane_active}"]).trim(),
+        "1"
+    );
+    let edge = width + 3;
+    p.send(
+        format!(
+            "\x1b[<0;{};{}M\x1b[<32;{};{}M\x1b[<0;{};{}m",
+            edge + 1,
+            y + 2,
+            edge + 4,
+            y + 2,
+            edge + 4,
+            y + 2
+        )
+        .as_bytes(),
+    );
+    p.send(b"printf 'DRAG_%s\\n' READY\r");
+    p.wait("DRAG_READY");
+    assert_eq!(
+        mux(&["display-message", "-p", "-t", id, "#{pane_width}"]).trim(),
+        (width + 6).to_string()
+    );
+    p.text.clear();
+    p.bytes.clear();
+    p.send(b"\x17d");
+    p.wait("任务 / ");
+    assert!(
+        p.bytes
+            .windows(b"\x1b[?1006l".len())
+            .any(|bytes| bytes == b"\x1b[?1006l")
+    );
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
 }
 
 fn strip_terminal_codes(bytes: &[u8]) -> String {

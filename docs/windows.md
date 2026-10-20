@@ -30,7 +30,7 @@ twig new myapp auth
 | --- | --- |
 | `<主仓库>/.twig/config.toml` | 当前项目的启动配置，可纳入 Git 管理 |
 | `~/.twig/config.toml` | 用户默认启动配置，同时保存 `[projects]` 项目登记信息 |
-| `~/.tmux.conf` | tmux 快捷键、鼠标、外观及终端偏好，继续由 tmux 管理 |
+| `~/.tmux.conf` | Shell、进程及 server 设置；所有 Twig 入口的工作台按键与外观由 Twig 管理 |
 
 使用 `twig --config /path/config.toml ...` 时，指定文件同时替代用户级配置和登记表，不再读取默认的 `~/.twig/config.toml`。
 
@@ -259,7 +259,7 @@ twig open myapp auth
 
 - Ctrl-C：由前台程序处理；通常中断程序后回到 Shell，不关闭 Pane。
 - Ctrl-D：在空提示符下按 Shell 的正常行为退出，Pane 随之关闭，不留下 dead Pane；最后一个 Pane 退出时窗口关闭。
-- 想保留窗口和进程、暂时离开 tmux：使用自己的 tmux 前缀键，再按 `d`（detach）。
+- 想保留窗口和进程：所有 Twig 工作台入口均按 `Ctrl-W d` 返回 Console 导航，再按 q 退出；无需原生 tmux detach。
 
 `process` 模式的退出输出和状态由 tmux 保留，不会回到 Shell，也不会自动重启；同窗的 Shell Pane 仍按普通方式关闭。
 

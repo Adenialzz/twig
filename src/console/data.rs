@@ -560,7 +560,7 @@ fn due(at: Option<Instant>, seconds: u64) -> bool {
     at.is_none_or(|t| t.elapsed() >= Duration::from_secs(seconds))
 }
 
-pub fn enter(registry_path: &Path, name: &str, task: &str) -> Result<()> {
+pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<(String, String)> {
     // Enter 时重新解析登记信息，不能用陈旧快照决定写操作。
     let entry = registry::entry(registry_path, name)?;
     let path = registry::expand(&entry.path)?;
@@ -583,7 +583,7 @@ pub fn enter(registry_path: &Path, name: &str, task: &str) -> Result<()> {
         tmux::ensure_window(&config, &project, task, &feature.path)?
     };
     drop(lock);
-    tmux::enter(&config, &window)
+    Ok((config.session, window))
 }
 
 #[cfg(test)]
