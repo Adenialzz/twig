@@ -56,7 +56,7 @@ class Frontend:
         raise AssertionError((needle, self.screen.display))
 
     def detach(self):
-        self.send(b"\x07d")
+        self.send(b"\x17d")
         self.process.wait(timeout=4)
         assert self.process.returncode == 0
         assert termios.tcgetattr(self.slave) == self.before
@@ -107,6 +107,12 @@ def main():
             assert target.read_text() == (
                 "ORIGINAL_MARKER\nBEFORE_DETACH\nAFTER_RECONNECT\n"
             )
+            second.send(b"i=0; while [ $i -lt 60 ]; do printf 'SCROLL_%03d\\n' $i; i=$((i+1)); done\r")
+            second.wait("SCROLL_059")
+            second.send(b"\x1b[<64;2;3M" * 12)
+            second.wait("SCROLL_010")
+            second.send(b"\x1b[<65;2;3M" * 12)
+            second.wait("SCROLL_059")
             # 有限输出负载：约 120 行，用于交互延迟回归，不是吞吐压测。
             second.send(b"i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; i=$((i+1)); sleep 0.01; done\r")
             second.wait("LOAD_10")

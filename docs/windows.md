@@ -259,7 +259,7 @@ twig open myapp auth
 
 - Ctrl-C：由前台程序处理；通常中断程序后回到 Shell，不关闭 Pane。
 - Ctrl-D：在空提示符下按 Shell 的正常行为退出，Pane 随之关闭，不留下 dead Pane；最后一个 Pane 退出时窗口关闭。
-- 想保留窗口和进程：所有 Twig 工作台入口均按 `Ctrl-G d` 返回 Console 导航，再按 q 退出；无需原生 tmux detach。
+- 想保留窗口和进程：所有 Twig 工作台入口均按 `Ctrl-W d` 返回 Console 导航，再按 q 退出；无需原生 tmux detach。
 
 `process` 模式的退出输出和状态由 tmux 保留，不会回到 Shell，也不会自动重启；同窗的 Shell Pane 仍按普通方式关闭。
 

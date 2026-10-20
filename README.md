@@ -26,7 +26,7 @@ twig open myapp feat/login
 
 仓库须已有提交，默认基础分支为本地 main/master。任务名直接作为分支名。脚本使用 `new --no-open`，仍创建窗口并执行启动配置。
 
-裸 `twig` 或 `twig console` 打开交互控制台，任务区 Enter 在 Twig 内打开终端工作台；`Ctrl-G d` 返回导航，分屏和进程继续由 tmux server 托管。`stop PROJECT NAME` 停止窗口和进程，`rm PROJECT NAME` 安全删除任务，`rm PROJECT` 只取消登记。清理前阅读 [安全清理](docs/cleanup.md)。
+裸 `twig` 或 `twig console` 打开交互控制台，任务区 Enter 在 Twig 内打开终端工作台；`Ctrl-W d` 返回导航，分屏和进程继续由 tmux server 托管。`stop PROJECT NAME` 停止窗口和进程，`rm PROJECT NAME` 安全删除任务，`rm PROJECT` 只取消登记。清理前阅读 [安全清理](docs/cleanup.md)。
 
 ## 阅读文档
 
@@ -50,4 +50,4 @@ Zsh 补全在 compinit 之后加载 `source <(COMPLETE=zsh twig)`，详见 [补�
 
 用户手册以 docs/ 下的 Markdown 为源文件，编译时嵌入 twig guide。命令参数变化时同步更新 Clap 帮助和对应主题。
 
-Console、`new` 和 `open` 统一使用 Control Mode 终端工作台；`Ctrl-G d` 返回 Console，`q` 退出，后台进程保留。工作台操作见 [Console 手册](docs/console.md)，独立验收入口和当前限制见 [实验说明](examples/README.md)。
+Console、`new` 和 `open` 统一使用 Control Mode 终端工作台；`Ctrl-W d` 返回 Console，`q` 退出，后台进程保留。工作台操作见 [Console 手册](docs/console.md)，独立验收入口和当前限制见 [实验说明](examples/README.md)。

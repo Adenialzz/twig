@@ -5,7 +5,10 @@ mod ui;
 
 use anyhow::{Result, ensure};
 use crossterm::{
-    event::{self, DisableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -409,6 +412,7 @@ impl Screen {
             let screen = execute!(
                 io::stdout(),
                 DisableBracketedPaste,
+                DisableMouseCapture,
                 LeaveAlternateScreen,
                 crossterm::cursor::Show
             );
@@ -479,6 +483,7 @@ pub fn run(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> 
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );

@@ -1,6 +1,6 @@
 # Control Mode 独立验收入口
 
-正式实现位于 `src/workbench.rs`，由 Console 和 `control_mode.rs` 共用。Console 任务区 Enter、`new/open` 都打开同一个工作台，Ctrl-G d 返回导航并选中对应任务。用户操作见 [Console 手册](../docs/console.md)。
+正式实现位于 `src/workbench.rs`，由 Console 和 `control_mode.rs` 共用。Console 任务区 Enter、`new/open` 都打开同一个工作台，Ctrl-W d 返回导航并选中对应任务。用户操作见 [Console 手册](../docs/console.md)。
 
 实现使用现有 Ratatui/Crossterm 和 `alacritty_terminal 0.26.0`，后者只解析屏幕快照中的字符和样式，不启动 GUI 或 PTY。tmux 是终端状态的唯一来源：Control Mode 通知标记变化，合并后捕获可见屏幕；连续输出刷新间隔至少 33 ms，空闲不查询屏幕。方向键、功能键和 bracketed paste 由 tmux 按当前程序模式编码。
 
@@ -16,9 +16,9 @@ cargo run --locked --example control_mode -- \
   --socket "$demo_socket" --session demo
 ```
 
-需要交互终端，必须显式提供 socket 和已有 Session。独立入口中 Ctrl-G d 退出前端；Console 中该键返回导航。退出只结束本客户端，保留会话与进程。再次运行可以重新接入。分屏与尺寸调整会修改实际 Pane。
+需要交互终端，必须显式提供 socket 和已有 Session。独立入口中 Ctrl-W d 退出前端；Console 中该键返回导航。退出只结束本客户端，保留会话与进程。再次运行可以重新接入。分屏与尺寸调整会修改实际 Pane。
 
-Ctrl-G 后按 `%` / `"` 分屏、`o` 切 Pane、`z` 放大、`h/j/k/l` 调比例、`n/p` 切窗口；再按 Ctrl-G 发送原始按键，Esc 取消。Shift-PgUp/PgDn 浏览 tmux 历史，继续输入回到底部。Ctrl-C 交给程序，Ctrl-D/exit 按 Shell 语义关闭 Pane。没有强制关闭操作。
+Ctrl-W 后按 `s` / `v` 分屏、`h/j/k/l` 按方向切 Pane、`o` 循环切 Pane、`z` 放大、`r` 重载 tmux 配置；无前缀 Alt-h/j/k/l 每次调比例 3 格、`n/p` 切窗口；再按 Ctrl-W 发送原始按键，Esc 取消。Shift-PgUp/PgDn 浏览 tmux 历史，继续输入回到底部。Ctrl-C 交给程序，Ctrl-D/exit 按 Shell 语义关闭 Pane。没有强制关闭操作。
 
 确认实验资源不再需要后，仅清理该专用 server：
 
@@ -45,4 +45,4 @@ Python 脚本通过 uv 管理 pyte，需要 Vim 和 tmux。它解析真实前端
 
 目前在 Linux/tmux 3.8 验证。未验收 macOS、真实 SSH 断线、真实 Codex 人工交互、超链接、图像和完整扩展键盘协议；未进行高吞吐或慢链路压力测试。每次刷新读取有变化 Pane 的可见区域，仍要消费 control 输出流，33 ms 是调度限制而非帧率保证。超时或异常会返回导航并保留后台资源。
 
-多客户端共用 tmux 的尺寸与窗口选择规则，不提供独立布局。工作台不捕获鼠标，文本选择与复制可使用外层终端；尚无内置选区、系统剪贴板或 tmux 按键绑定集成。原通知功能仍留在单独 stash，本次没有恢复或集成。
+多客户端共用 tmux 的尺寸与窗口选择规则，不提供独立布局。工作台支持鼠标点击、滚轮历史与边框拖动，尚不向 Pane 内程序转发鼠标事件。文本选择需使用外层终端的绕过鼠标捕获操作；尚无内置选区、系统剪贴板或通用 tmux 按键绑定集成。原通知功能仍留在单独 stash，本次没有恢复或集成。

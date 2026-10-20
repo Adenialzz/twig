@@ -205,7 +205,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.help {
         frame.render_widget(Clear, rows[1]);
-        frame.render_widget(Paragraph::new("项目 → 任务 → Codex 会话\n\nTab / Shift+Tab：切换区域；窄终端按区域切页\nCtrl-W 后按 h/l/j/k：左侧项目 / 右侧任务 / 下方会话 / 上方任务\n↑↓ 或 j/k：选择；gg / G：列表顶部 / 底部；/：搜索当前区域，显示命令候选\nEnter：项目切到任务列表，任务进入终端工作台，会话展开最近轮次\nn：项目区登记仓库，任务区新建任务，会话区历史下一页\ndd：任务区打开删除确认（默认取消）\nh：切换已加载与历史会话\na：历史查询包含子目录（分页扫描，不自动全量加载）\n/new /delete /refresh /help /quit：精确关键字或选择候选后 Enter 执行\n↑↓ 选择命令，Tab 补全；// 强制搜索，Esc 取消并恢复选择\nr：重新查询；Esc：取消搜索/详情或返回上一层\nq / Ctrl+C：退出导航，保留所有任务和 Agent\n终端工作台：Ctrl-G d 返回导航；Ctrl-G 后 %/双引号 分屏、o 切 Pane、z 放大\n工作台内 Ctrl-C 发送给程序，Shift-PgUp/PgDn 浏览历史\n\n窗口已打开不代表 Codex 正在运行；空闲不代表任务完成。\n历史 notLoaded 只表示当前服务未加载，不推断其他服务状态。\n会话创建/更新时间为北京时间 UTC+8；Git 干净不包含 ignored 文件。\n\n任意键返回").block(block(" 帮助 ".into(),true)).wrap(Wrap{trim:false}),rows[1]);
+        frame.render_widget(Paragraph::new("项目 → 任务 → Codex 会话\n\nTab / Shift+Tab：切换区域；窄终端按区域切页\nCtrl-W 后按 h/l/j/k：左侧项目 / 右侧任务 / 下方会话 / 上方任务\n↑↓ 或 j/k：选择；gg / G：列表顶部 / 底部；/：搜索当前区域，显示命令候选\nEnter：项目切到任务列表，任务进入终端工作台，会话展开最近轮次\nn：项目区登记仓库，任务区新建任务，会话区历史下一页\ndd：任务区打开删除确认（默认取消）\nh：切换已加载与历史会话\na：历史查询包含子目录（分页扫描，不自动全量加载）\n/new /delete /refresh /help /quit：精确关键字或选择候选后 Enter 执行\n↑↓ 选择命令，Tab 补全；// 强制搜索，Esc 取消并恢复选择\nr：重新查询；Esc：取消搜索/详情或返回上一层\nq / Ctrl+C：退出导航，保留所有任务和 Agent\n终端工作台：Ctrl-W d 返回导航；Ctrl-W 后 s/v 分屏、h/j/k/l 切 Pane、z 放大；Alt-h/j/k/l 调比例\n工作台内 Ctrl-C 发送给程序，Shift-PgUp/PgDn 浏览历史\n\n窗口已打开不代表 Codex 正在运行；空闲不代表任务完成。\n历史 notLoaded 只表示当前服务未加载，不推断其他服务状态。\n会话创建/更新时间为北京时间 UTC+8；Git 干净不包含 ignored 文件。\n\n任意键返回").block(block(" 帮助 ".into(),true)).wrap(Wrap{trim:false}),rows[1]);
     }
     if let Some(form) = &app.form {
         draw_form(frame, area, form);

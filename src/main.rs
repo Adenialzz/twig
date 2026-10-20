@@ -50,7 +50,7 @@ enum Action {
     },
     /// 全局项目、任务与 Codex 会话控制台
     #[command(
-        after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-G d 返回导航并保留进程。\n浏览只读；提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
+        after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-W d 返回导航并保留进程。\n浏览只读；提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
     )]
     Console,
     /// 登记并初始化已有 Git 仓库（不联网）
@@ -77,7 +77,7 @@ enum Action {
     },
     /// 创建并进入任务 Shell 窗口；重复执行接续已有环境
     #[command(
-        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-G d 返回 Console；--no-open 仅准备环境。\n只接续自己登记的资源，不接管外部同名分支；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
+        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-W d 返回 Console；--no-open 仅准备环境。\n只接续自己登记的资源，不接管外部同名分支；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
     )]
     New {
         /// 已登记的项目别名，不根据当前目录推断
@@ -106,7 +106,7 @@ enum Action {
     Pr(pr::Args),
     /// 进入任务窗口；窗口丢失时重建 Shell
     #[command(
-        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n打开内置终端工作台，Ctrl-G d 返回 Console 并选中任务。不恢复原进程或对话。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
+        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n打开内置终端工作台，Ctrl-W d 返回 Console 并选中任务。不恢复原进程或对话。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
     )]
     Open {
         /// 已登记的项目别名，不根据当前目录推断

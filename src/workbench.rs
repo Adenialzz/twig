@@ -12,7 +12,10 @@ use alacritty_terminal::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -248,6 +251,7 @@ struct Pane {
     parser: TerminalState,
     cursor: Option<(u16, u16)>,
     scroll_offset: usize,
+    title: String,
 }
 
 struct TerminalSize {
@@ -361,6 +365,7 @@ fn snapshot(client: &mut Client, id: &str, offset: usize) -> Result<Option<Pane>
     let parts = client.batch(&[
         format!("display-message -p -t {id} '{format} {offset}'"),
         format!("capture-pane -p -e -N -S '{start}' -E '{end}' -t {id}"),
+        format!("display-message -p -t {id} '#{{pane_index}} #{{pane_current_command}}'"),
     ])?;
     client.events.retain(|event| output_pane(event) != Some(id));
     let state = String::from_utf8(parts[0].concat())?;
@@ -383,7 +388,76 @@ fn snapshot(client: &mut Client, id: &str, offset: usize) -> Result<Option<Pane>
         cursor: (s[8] == 1 && s[9] == 0)
             .then_some(((s[6] as u16).min(rect.width.saturating_sub(1)), s[7] as u16)),
         scroll_offset: s[9],
+        title: String::from_utf8_lossy(&parts[2].concat())
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect(),
     }))
+}
+
+fn prepare_window(client: &mut Client) -> Result<()> {
+    if client
+        .command("show-options -w -v pane-border-status")?
+        .concat()
+        != b"top"
+    {
+        client.command("set-option -w pane-border-status top")?;
+    }
+    Ok(())
+}
+
+fn pane_at(panes: &[Pane], x: u16, y: u16) -> Option<&Pane> {
+    panes.iter().find(|pane| {
+        pane.rect.contains((x, y).into())
+            || (pane.rect.y > 0
+                && y == pane.rect.y - 1
+                && x >= pane.rect.x
+                && x < pane.rect.right())
+    })
+}
+
+struct Drag {
+    id: String,
+    origin: u16,
+    size: u16,
+    horizontal: bool,
+}
+impl Drag {
+    fn at(panes: &[Pane], x: u16, y: u16) -> Option<Self> {
+        for pane in panes {
+            let horizontal = x == pane.rect.right() && y >= pane.rect.y && y < pane.rect.bottom();
+            let vertical = y == pane.rect.bottom() && x >= pane.rect.x && x < pane.rect.right();
+            let neighbor = panes.iter().any(|other| {
+                if horizontal {
+                    other.rect.x == x + 1 && y >= other.rect.y && y < other.rect.bottom()
+                } else {
+                    other.rect.y == y + 1 && x >= other.rect.x && x < other.rect.right()
+                }
+            });
+            if (horizontal || vertical) && neighbor {
+                return Some(Self {
+                    id: pane.id.clone(),
+                    origin: if horizontal { x } else { y },
+                    size: if horizontal {
+                        pane.rect.width
+                    } else {
+                        pane.rect.height
+                    },
+                    horizontal,
+                });
+            }
+        }
+        None
+    }
+    fn command(&self, x: u16, y: u16) -> String {
+        let position = if self.horizontal { x } else { y };
+        let size = (i32::from(self.size) + i32::from(position) - i32::from(self.origin)).max(1);
+        format!(
+            "resize-pane -t {} -{} {size}",
+            self.id,
+            if self.horizontal { 'x' } else { 'y' }
+        )
+    }
 }
 
 fn color(c: AnsiColor) -> Color {
@@ -400,21 +474,50 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool, status: &str) 
     let buffer = frame.buffer_mut();
     for pane in panes {
         let border = Style::default().fg(if pane.active {
-            Color::Cyan
+            Color::Indexed(45)
         } else {
-            Color::DarkGray
+            Color::Indexed(238)
         });
         if pane.rect.x > 0 && pane.rect.x <= area.width {
             for y in
                 pane.rect.y..(pane.rect.y + pane.rect.height).min(area.height.saturating_sub(1))
             {
-                buffer.set_string(pane.rect.x - 1, y, "│", border);
+                let edge = if panes.iter().any(|other| {
+                    other.active
+                        && other.rect.right() == pane.rect.x - 1
+                        && y >= other.rect.y
+                        && y < other.rect.bottom()
+                }) {
+                    border.fg(Color::Indexed(45))
+                } else {
+                    border
+                };
+                buffer.set_string(pane.rect.x - 1, y, "║", edge);
             }
         }
         if pane.rect.y > 0 && pane.rect.y < area.height {
             for x in pane.rect.x..(pane.rect.x + pane.rect.width).min(area.width) {
-                buffer.set_string(x, pane.rect.y - 1, "─", border);
+                let edge = if panes.iter().any(|other| {
+                    other.active
+                        && other.rect.bottom() == pane.rect.y - 1
+                        && x >= other.rect.x
+                        && x < other.rect.right()
+                }) {
+                    border.fg(Color::Indexed(45))
+                } else {
+                    border
+                };
+                buffer.set_string(x, pane.rect.y - 1, "═", edge);
             }
+        }
+        if pane.rect.y > 0 && pane.rect.y < area.height {
+            buffer.set_stringn(
+                pane.rect.x,
+                pane.rect.y - 1,
+                format!(" {} {} ", pane.id, pane.title),
+                usize::from(pane.rect.width.min(area.width.saturating_sub(pane.rect.x))),
+                border,
+            );
         }
         let screen = &pane.parser;
         for y in 0..pane.rect.height {
@@ -461,10 +564,10 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool, status: &str) 
     }
     let active = panes.iter().find(|p| p.active);
     let label = if prefix {
-        "Ctrl-G: d 返回导航 | % 左右分屏 | \" 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 调比例 | Esc 取消".to_string()
+        "Ctrl-W: d 返回导航 | s 左右分屏 | v 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 切 Pane | Alt-h/j/k/l 调比例 | Esc 取消".to_string()
     } else {
         format!(
-            "Ctrl-G d 导航 · Ctrl-G ? 帮助 | {} | {status} | Shift-PgUp/PgDn 历史",
+            "Ctrl-W d 导航 · Ctrl-W ? 帮助 | {} | {status} | Shift-PgUp/PgDn 历史",
             active.map_or("", |p| p.id.as_str())
         )
     };
@@ -538,7 +641,12 @@ impl Screen {
     fn start() -> Result<Self> {
         enable_raw_mode()?;
         let screen = Self;
-        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )?;
         Ok(screen)
     }
 }
@@ -547,6 +655,7 @@ impl Drop for Screen {
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
@@ -591,7 +700,7 @@ pub fn run(
             "不能在当前 tmux Session 内打开同一项目工作台；请从其他 Session 或 tmux 外运行 twig"
         );
     }
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     let result = run_inner(
         terminal,
         Args {
@@ -601,7 +710,7 @@ pub fn run(
         Some(window),
         &mut status,
     );
-    let restore = execute!(io::stdout(), DisableBracketedPaste);
+    let restore = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
     result?;
     restore?;
     Ok(())
@@ -627,10 +736,13 @@ fn run_inner(
         size.width,
         size.height.saturating_sub(1)
     ))?;
+    prepare_window(&mut client)?;
     let mut panes = reload(&mut client)?;
     let mut window_name = client.command("display-message -p '#{window_name}'")?;
     let mut prefix = false;
+    let mut drag: Option<Drag> = None;
     let mut label = String::new();
+    let mut notice = "";
     let mut dirty = true;
     let mut pending = HashSet::new();
     let mut refreshed = Instant::now();
@@ -663,6 +775,7 @@ fn run_inner(
         }
         ensure!(!client.closed, "tmux control 连接中断，后台资源未删除");
         if changed {
+            prepare_window(&mut client)?;
             panes = reload(&mut client)?;
             window_name = client.command("display-message -p '#{window_name}'")?;
             dirty = true;
@@ -684,20 +797,65 @@ fn run_inner(
                 .chars()
                 .filter(|c| !c.is_control())
                 .collect::<String>();
-            terminal.draw(|frame| draw(frame, &panes, prefix, &format!("{name} · {label}")))?;
+            terminal
+                .draw(|frame| draw(frame, &panes, prefix, &format!("{notice}{name} · {label}")))?;
             dirty = false;
         }
         if !event::poll(Duration::from_millis(16))? {
             continue;
         }
         dirty = true;
-        match event::read()? {
+        let input = event::read()?;
+        if matches!(input, Event::Key(_)) {
+            notice = "";
+        }
+        match input {
             Event::Resize(width, height) => {
                 client.command(&format!(
                     "refresh-client -C {width},{}",
                     height.saturating_sub(1)
                 ))?;
                 panes = reload(&mut client)?;
+            }
+            Event::Mouse(mouse) => {
+                let x = mouse.column;
+                let y = mouse.row;
+                if y >= terminal.size()?.height.saturating_sub(1) {
+                    continue;
+                }
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        drag = Drag::at(&panes, x, y);
+                        if let Some(pane) = pane_at(&panes, x, y) {
+                            client.command(&format!("select-pane -t {}", pane.id))?;
+                            panes = reload(&mut client)?;
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(drag) = &drag {
+                            client.command(&drag.command(x, y))?;
+                            panes = reload(&mut client)?;
+                        }
+                    }
+                    MouseEventKind::Up(_) => drag = None,
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        if let Some(pane) = panes
+                            .iter_mut()
+                            .find(|pane| pane.rect.contains((x, y).into()))
+                        {
+                            pane.scroll_offset = if mouse.kind == MouseEventKind::ScrollUp {
+                                pane.scroll_offset + 3
+                            } else {
+                                pane.scroll_offset.saturating_sub(3)
+                            };
+                            pending.insert(pane.id.clone());
+                        }
+                    }
+                    MouseEventKind::Moved => {
+                        dirty = false;
+                    }
+                    _ => {}
+                }
             }
             Event::Paste(text) => {
                 if let Some(pane) = panes.iter_mut().find(|p| p.active) {
@@ -715,19 +873,20 @@ fn run_inner(
                             prefix = true;
                             None
                         }
-                        KeyCode::Char('%') => Some("split-window -h -c '#{pane_current_path}'"),
-                        KeyCode::Char('"') => Some("split-window -v -c '#{pane_current_path}'"),
+                        KeyCode::Char('s') => Some("split-window -h -c '#{pane_current_path}'"),
+                        KeyCode::Char('v') => Some("split-window -v -c '#{pane_current_path}'"),
                         KeyCode::Char('o') => Some("select-pane -t :.+"),
                         KeyCode::Char('z') => Some("resize-pane -Z"),
                         KeyCode::Char('n') => Some("next-window"),
                         KeyCode::Char('p') => Some("previous-window"),
-                        KeyCode::Char('h') => Some("resize-pane -L 3"),
-                        KeyCode::Char('j') => Some("resize-pane -D 2"),
-                        KeyCode::Char('k') => Some("resize-pane -U 2"),
-                        KeyCode::Char('l') => Some("resize-pane -R 3"),
-                        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('r') => Some("source-file ~/.tmux.conf"),
+                        KeyCode::Char('h') => Some("select-pane -L"),
+                        KeyCode::Char('j') => Some("select-pane -D"),
+                        KeyCode::Char('k') => Some("select-pane -U"),
+                        KeyCode::Char('l') => Some("select-pane -R"),
+                        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if let Some(pane) = panes.iter().find(|p| p.active) {
-                                client.send(&pane.id, &[7])?;
+                                client.send(&pane.id, &[23])?;
                             }
                             None
                         }
@@ -735,12 +894,26 @@ fn run_inner(
                     };
                     if let Some(command) = command {
                         client.command(command)?;
+                        if key.code == KeyCode::Char('r') {
+                            notice = "tmux.conf 已重载 · ";
+                        }
                         panes = reload(&mut client)?;
                     }
-                } else if key.code == KeyCode::Char('g')
+                } else if key.code == KeyCode::Char('w')
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     prefix = true;
+                } else if key.modifiers == KeyModifiers::ALT
+                    && matches!(key.code, KeyCode::Char('h' | 'j' | 'k' | 'l'))
+                {
+                    let direction = match key.code {
+                        KeyCode::Char('h') => 'L',
+                        KeyCode::Char('j') => 'D',
+                        KeyCode::Char('k') => 'U',
+                        _ => 'R',
+                    };
+                    client.command(&format!("resize-pane -{direction} 3"))?;
+                    panes = reload(&mut client)?;
                 } else if let Some(pane) = panes.iter_mut().find(|p| p.active) {
                     if key.modifiers.contains(KeyModifiers::SHIFT)
                         && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
@@ -1114,6 +1287,35 @@ mod tests {
     }
 
     #[test]
+    fn top_headers_and_drag_geometry_match_real_tmux_layouts() {
+        let server = Server::start();
+        let mut client = Client::connect(&server.args).unwrap();
+        prepare_window(&mut client).unwrap();
+        client.command("split-window -h").unwrap();
+        let panes = reload(&mut client).unwrap();
+        let left = panes.iter().min_by_key(|p| p.rect.x).unwrap();
+        assert_eq!(left.rect.y, 1);
+        assert_eq!(pane_at(&panes, left.rect.x, 0).unwrap().id, left.id);
+        let drag = Drag::at(&panes, left.rect.right(), left.rect.y + 1).unwrap();
+        client
+            .command(&drag.command(left.rect.right() + 3, left.rect.y + 1))
+            .unwrap();
+        let updated = snapshot(&mut client, &left.id, 0).unwrap().unwrap();
+        assert_eq!(updated.rect.width, left.rect.width + 3);
+        client
+            .command(&format!("split-window -v -t {}", left.id))
+            .unwrap();
+        let panes = reload(&mut client).unwrap();
+        let upper = panes.iter().find(|p| p.id == left.id).unwrap();
+        let drag = Drag::at(&panes, upper.rect.x + 1, upper.rect.bottom()).unwrap();
+        client
+            .command(&drag.command(upper.rect.x + 1, upper.rect.bottom() + 2))
+            .unwrap();
+        let updated = snapshot(&mut client, &upper.id, 0).unwrap().unwrap();
+        assert_eq!(updated.rect.height, upper.rect.height + 2);
+    }
+
+    #[test]
     fn real_server_split_resize_detach_and_reconnect() {
         let server = Server::start();
         let mut client = Client::connect(&server.args).unwrap();
@@ -1209,6 +1411,7 @@ mod tests {
             parser,
             cursor: None,
             scroll_offset: 0,
+            title: "shell".into(),
         };
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 8)).unwrap();
         terminal
@@ -1218,5 +1421,8 @@ mod tests {
         assert_eq!(buffer[(2, 1)].symbol(), "中");
         assert_eq!(buffer[(4, 1)].symbol(), "文");
         assert_eq!(buffer[(2, 1)].fg, Color::Indexed(1));
+        assert_eq!(buffer[(1, 2)].symbol(), "║");
+        assert_eq!(buffer[(1, 2)].fg, Color::Indexed(45));
+        assert_eq!(buffer[(2, 0)].fg, Color::Indexed(45));
     }
 }

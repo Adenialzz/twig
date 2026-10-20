@@ -845,7 +845,7 @@ fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
             f.registry_path().to_str().unwrap().replace('\'', "'\\''")
         );
         f.mux(&["send-keys", "-t", "driver:", &command, "Enter"]);
-        wait_screen("Ctrl-G d");
+        wait_screen("Ctrl-W d");
         let sessions = f.mux(&["list-clients", "-F", "#{session_name}"]);
         assert!(sessions.lines().any(|session| session == "driver"));
         assert!(sessions.lines().any(|session| session == f.session()));
@@ -854,7 +854,7 @@ fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
                 .join("lock")
                 .exists()
         );
-        f.mux(&["send-keys", "-t", "driver:", "C-g", "d"]);
+        f.mux(&["send-keys", "-t", "driver:", "C-w", "d"]);
         wait_screen("任务 / ");
         f.mux(&["send-keys", "-t", "driver:", "q"]);
         wait_screen(&format!("RETURN_{i}_DONE"));
