@@ -50,6 +50,7 @@
 - 验证范围应与改动匹配；纯文档更新检查一致性和链接，不必重复运行完整代码测试。
 - 代码变更提交前执行 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`。
 - Control Mode 原型位于 examples/control_mode.rs，独立于正式 Console；原型测试额外执行 `cargo test --locked --example control_mode`。只使用显式指定的独立 tmux socket，不连接真实任务做输入、缩放或清理测试；静态文本重连不等于完整终端恢复，已知缺口记录在 examples/README.md。
+- 修改原型渲染、输入或恢复流程后，构建 example 并执行 `uv run examples/check_control_mode.py`，用独立临时会话验证真实 Vim 的 PTY 编辑与重连；依赖 Vim、tmux 和 uv，不向真实 Agent 会话发送输入。
 
 ## 开发
 

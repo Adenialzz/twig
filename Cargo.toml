@@ -23,4 +23,4 @@ tungstenite = "0.26"
 libc = "0.2"
 
 [dev-dependencies]
-vt100 = "0.15.2"
+alacritty_terminal = "0.26.0"

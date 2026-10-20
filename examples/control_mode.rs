@@ -1,5 +1,16 @@
 //! 独立终端原型；只连接显式指定的已有 tmux socket/session。
 //! cargo run --example control_mode -- --socket /tmp/demo.sock --session demo
+use alacritty_terminal::{
+    Term,
+    event::VoidListener,
+    grid::Dimensions,
+    index::{Column, Line, Point},
+    term::{
+        Config,
+        cell::{Cell, Flags},
+    },
+    vte::ansi::{Color as AnsiColor, Processor},
+};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use crossterm::{
@@ -15,7 +26,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     io::{self, IsTerminal, Read, Write},
     os::fd::AsRawFd,
     path::PathBuf,
@@ -141,9 +152,15 @@ impl Client {
     }
 
     fn command(&mut self, command: &str) -> Result<Vec<Vec<u8>>> {
-        writeln!(self.input, "{command}")?;
+        Ok(self.batch(&[command.to_owned()])?.remove(0))
+    }
+
+    /// 只批量执行不等待外部事件的 tmux 内建命令。
+    /// tmux 在一次 cmdq_next 中执行整组命令，不在快照组成部分间读取 PTY。
+    fn batch(&mut self, commands: &[String]) -> Result<Vec<Vec<Vec<u8>>>> {
+        writeln!(self.input, "{}", commands.join(" ; "))?;
         self.input.flush()?;
-        self.response()
+        commands.iter().map(|_| self.response()).collect()
     }
 
     fn send(&mut self, pane: &str, text: &[u8]) -> Result<()> {
@@ -167,106 +184,169 @@ impl Drop for Client {
     }
 }
 
-fn decode_output(line: &[u8]) -> Result<Option<(String, Vec<u8>)>> {
-    let Some(rest) = line.strip_prefix(b"%output ") else {
-        return Ok(None);
-    };
-    let split = rest
-        .iter()
-        .position(|&b| b == b' ')
-        .context("输出缺少 Pane")?;
-    let pane = String::from_utf8(rest[..split].to_vec())?;
-    let mut bytes = &rest[split + 1..];
-    let mut output = Vec::new();
-    while let Some((&first, tail)) = bytes.split_first() {
-        if first == b'\\' {
-            ensure!(
-                tail.len() >= 3 && tail[..3].iter().all(|b| (b'0'..=b'7').contains(b)),
-                "非法 control 八进制转义"
-            );
-            let value = (tail[0] - b'0') as u16 * 64
-                + (tail[1] - b'0') as u16 * 8
-                + (tail[2] - b'0') as u16;
-            output.push(u8::try_from(value)?);
-            bytes = &tail[3..];
-        } else {
-            output.push(first);
-            bytes = tail;
-        }
-    }
-    Ok(Some((pane, output)))
+fn output_pane(line: &[u8]) -> Option<&str> {
+    let rest = line.strip_prefix(b"%output ")?;
+    let end = rest.iter().position(|&b| b == b' ')?;
+    std::str::from_utf8(&rest[..end]).ok()
 }
 
 struct Pane {
     id: String,
     rect: Rect,
     active: bool,
-    parser: vt100::Parser,
+    parser: TerminalState,
+    cursor: Option<(u16, u16)>,
+    scroll_offset: usize,
+    app_cursor: bool,
+    bracketed_paste: bool,
+}
+
+struct TerminalSize {
+    rows: usize,
+    cols: usize,
+}
+impl Dimensions for TerminalSize {
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+    fn columns(&self) -> usize {
+        self.cols
+    }
+}
+
+struct TerminalState {
+    term: Term<VoidListener>,
+    processor: Processor,
+}
+impl TerminalState {
+    fn new(rows: u16, cols: u16, history: usize) -> Self {
+        let size = TerminalSize {
+            rows: rows.into(),
+            cols: cols.into(),
+        };
+        let config = Config {
+            scrolling_history: history,
+            ..Config::default()
+        };
+        Self {
+            term: Term::new(config, &size, VoidListener),
+            processor: Processor::new(),
+        }
+    }
+    fn process(&mut self, bytes: &[u8]) {
+        // 协议应答由 tmux 负责；此处只解析屏幕快照，不回传终端查询或剪贴板事件。
+        self.processor.advance(&mut self.term, bytes);
+    }
+    fn cell(&self, row: u16, col: u16) -> &Cell {
+        &self.term.grid()[Point::new(Line(i32::from(row)), Column(col.into()))]
+    }
+    #[cfg(test)]
+    fn text(&self) -> String {
+        (0..self.term.screen_lines())
+            .map(|row| {
+                (0..self.term.columns())
+                    .filter_map(|col| {
+                        let cell = self.cell(row as u16, col as u16);
+                        (!cell.flags.contains(Flags::WIDE_CHAR_SPACER)).then_some(cell.c)
+                    })
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end_matches('\n')
+            .to_owned()
+    }
 }
 
 fn reload(client: &mut Client) -> Result<Vec<Pane>> {
-    let lines = client.command(
-        "list-panes -F '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{pane_active} #{window_zoomed_flag}'",
-    )?;
+    let lines = client.command("list-panes -F '#{pane_id}'")?;
     let mut panes = Vec::new();
     for line in lines {
-        let text = String::from_utf8(line)?;
-        let f: Vec<_> = text.split_whitespace().collect();
-        ensure!(f.len() == 7, "非法 Pane 布局：{text}");
-        if f[6] == "1" && f[5] != "1" {
-            continue;
-        }
+        let id = String::from_utf8(line)?;
         ensure!(
-            f[0].starts_with('%') && f[0][1..].bytes().all(|b| b.is_ascii_digit()),
+            id.starts_with('%') && id[1..].bytes().all(|b| b.is_ascii_digit()),
             "非法 Pane ID"
         );
-        let rect = Rect::new(f[1].parse()?, f[2].parse()?, f[3].parse()?, f[4].parse()?);
-        let mut parser = vt100::Parser::new(rect.height, rect.width, 2000);
-        // 先捕获屏幕再衔接实时输出；捕获前排队的此 Pane 输出不能重复播放。
-        let snapshot = client.command(&format!("capture-pane -p -e -N -t {}", f[0]))?;
-        client
-            .events
-            .retain(|event| !event.starts_with(format!("%output {} ", f[0]).as_bytes()));
-        for (index, row) in snapshot.iter().enumerate() {
-            if index != 0 {
-                parser.process(b"\r\n");
-            }
-            parser.process(row);
+        if let Some(pane) = snapshot(client, &id, 0)? {
+            panes.push(pane);
         }
-        // 此原型只恢复可查询的常用模式；不能将截图等同于完整终端状态。
-        let state = client.command(&format!(
-            "display-message -p -t {} '#{{cursor_x}} #{{cursor_y}} #{{cursor_flag}} #{{keypad_cursor_flag}} #{{bracket_paste_flag}}'",
-            f[0]
-        ))?;
-        let state = String::from_utf8(state.concat())?;
-        let s: Vec<_> = state.split_whitespace().collect();
-        ensure!(s.len() == 5, "无法恢复 Pane 光标模式：{state}");
-        parser.process(
-            format!(
-                "\x1b[{};{}H\x1b[?25{}\x1b[?1{}\x1b[?2004{}",
-                s[1].parse::<u16>()? + 1,
-                s[0].parse::<u16>()? + 1,
-                if s[2] == "1" { 'h' } else { 'l' },
-                if s[3] == "1" { 'h' } else { 'l' },
-                if s[4] == "1" { 'h' } else { 'l' }
-            )
-            .as_bytes(),
-        );
-        panes.push(Pane {
-            id: f[0].into(),
-            rect,
-            active: f[5] == "1",
-            parser,
-        });
     }
     Ok(panes)
 }
 
-fn color(c: vt100::Color) -> Color {
+fn feed_rows(parser: &mut TerminalState, rows: &[Vec<u8>]) {
+    for (index, row) in rows.iter().enumerate() {
+        if index != 0 {
+            parser.process(b"\r\n");
+        }
+        parser.process(row);
+    }
+}
+
+fn snapshot(client: &mut Client, id: &str, offset: usize) -> Result<Option<Pane>> {
+    let fields = [
+        "pane_left",
+        "pane_top",
+        "pane_width",
+        "pane_height",
+        "pane_active",
+        "window_zoomed_flag",
+        "cursor_x",
+        "cursor_y",
+        "cursor_flag",
+        "keypad_cursor_flag",
+        "bracket_paste_flag",
+    ];
+    let format = fields
+        .iter()
+        .map(|f| format!("#{{{f}}}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // 捕获范围在 server 内求值，与状态查询处于同一个命令批次。
+    let offset = format!("#{{?#{{e|<:#{{history_size}},{offset}}},#{{history_size}},{offset}}}");
+    let start = format!("#{{e|-:0,{offset}}}");
+    let end = format!("#{{e|-:#{{e|-:#{{pane_height}},1}},{offset}}}");
+    let parts = client.batch(&[
+        format!("display-message -p -t {id} '{format} {offset}'"),
+        format!("capture-pane -p -e -N -S '{start}' -E '{end}' -t {id}"),
+    ])?;
+    client.events.retain(|event| output_pane(event) != Some(id));
+    let state = String::from_utf8(parts[0].concat())?;
+    let s = state
+        .split_whitespace()
+        .map(str::parse::<usize>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(s.len() == fields.len() + 1, "无法读取 Pane 状态：{state}");
+    if s[5] == 1 && s[4] != 1 {
+        return Ok(None);
+    }
+    let rect = Rect::new(s[0] as u16, s[1] as u16, s[2] as u16, s[3] as u16);
+    let mut parser = TerminalState::new(rect.height, rect.width, 0);
+    feed_rows(&mut parser, &parts[1]);
+    Ok(Some(Pane {
+        id: id.into(),
+        rect,
+        active: s[4] == 1,
+        parser,
+        cursor: (s[8] == 1 && s[11] == 0)
+            .then_some(((s[6] as u16).min(rect.width.saturating_sub(1)), s[7] as u16)),
+        scroll_offset: s[11],
+        app_cursor: s[9] == 1,
+        bracketed_paste: s[10] == 1,
+    }))
+}
+
+fn color(c: AnsiColor) -> Color {
     match c {
-        vt100::Color::Default => Color::Reset,
-        vt100::Color::Idx(n) => Color::Indexed(n),
-        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        AnsiColor::Named(n) if (n as usize) < 16 => Color::Indexed(n as u8),
+        AnsiColor::Named(_) => Color::Reset,
+        AnsiColor::Indexed(n) => Color::Indexed(n),
+        AnsiColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
     }
 }
 
@@ -274,7 +354,7 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool) {
     let area = frame.area();
     let buffer = frame.buffer_mut();
     for pane in panes {
-        let screen = pane.parser.screen();
+        let screen = &pane.parser;
         for y in 0..pane.rect.height {
             for x in 0..pane.rect.width {
                 let px = pane.rect.x + x;
@@ -282,26 +362,25 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool) {
                 if px >= area.width || py >= area.height.saturating_sub(1) {
                     continue;
                 }
-                let Some(cell) = screen.cell(y, x) else {
-                    continue;
-                };
-                if cell.is_wide_continuation() {
+                let cell = screen.cell(y, x);
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
-                let mut style = Style::default()
-                    .fg(color(cell.fgcolor()))
-                    .bg(color(cell.bgcolor()));
+                let mut style = Style::default().fg(color(cell.fg)).bg(color(cell.bg));
                 for (enabled, modifier) in [
-                    (cell.bold(), Modifier::BOLD),
-                    (cell.italic(), Modifier::ITALIC),
-                    (cell.underline(), Modifier::UNDERLINED),
-                    (cell.inverse(), Modifier::REVERSED),
+                    (cell.flags.contains(Flags::BOLD), Modifier::BOLD),
+                    (cell.flags.contains(Flags::ITALIC), Modifier::ITALIC),
+                    (cell.flags.contains(Flags::UNDERLINE), Modifier::UNDERLINED),
+                    (cell.flags.contains(Flags::INVERSE), Modifier::REVERSED),
                 ] {
                     if enabled {
                         style = style.add_modifier(modifier);
                     }
                 }
-                let symbol = cell.contents();
+                let mut symbol = cell.c.to_string();
+                if let Some(extra) = cell.zerowidth() {
+                    symbol.extend(extra);
+                }
                 buffer.set_stringn(
                     px,
                     py,
@@ -325,16 +404,12 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool) {
         Paragraph::new(label).style(Style::default().fg(Color::Black).bg(Color::Cyan)),
         Rect::new(0, area.height.saturating_sub(1), area.width, 1),
     );
-    if let Some(pane) = active {
-        let screen = pane.parser.screen();
-        let (y, x) = screen.cursor_position();
-        if !screen.hide_cursor()
-            && screen.scrollback() == 0
-            && pane.rect.x + x < area.width
-            && pane.rect.y + y < area.height.saturating_sub(1)
-        {
-            frame.set_cursor_position((pane.rect.x + x, pane.rect.y + y));
-        }
+    if let Some(pane) = active
+        && let Some((x, y)) = pane.cursor
+        && pane.rect.x + x < area.width
+        && pane.rect.y + y < area.height.saturating_sub(1)
+    {
+        frame.set_cursor_position((pane.rect.x + x, pane.rect.y + y));
     }
 }
 
@@ -421,14 +496,17 @@ fn run(args: Args) -> Result<()> {
     ))?;
     let mut panes = reload(&mut client)?;
     let mut prefix = false;
+    let mut dirty = true;
+    let mut pending = HashSet::new();
+    let mut refreshed = Instant::now();
     loop {
         client.pump()?;
         client.events.append(&mut client.lines);
         let mut changed = false;
         while let Some(event) = client.events.pop_front() {
-            if let Some((id, bytes)) = decode_output(&event)? {
-                if let Some(pane) = panes.iter_mut().find(|p| p.id == id) {
-                    pane.parser.process(&bytes);
+            if let Some(id) = output_pane(&event) {
+                if panes.iter().any(|p| p.id == id) {
+                    pending.insert(id.to_owned());
                 }
             } else if event.starts_with(b"%exit") {
                 return Ok(());
@@ -445,11 +523,28 @@ fn run(args: Args) -> Result<()> {
         }
         if changed {
             panes = reload(&mut client)?;
+            dirty = true;
         }
-        terminal.draw(|frame| draw(frame, &panes, prefix))?;
+        if refreshed.elapsed() >= Duration::from_millis(33) && !pending.is_empty() {
+            for pane in &mut panes {
+                if pending.remove(&pane.id)
+                    && let Some(updated) = snapshot(&mut client, &pane.id, pane.scroll_offset)?
+                {
+                    *pane = updated;
+                }
+            }
+            pending.clear();
+            refreshed = Instant::now();
+            dirty = true;
+        }
+        if dirty {
+            terminal.draw(|frame| draw(frame, &panes, prefix))?;
+            dirty = false;
+        }
         if !event::poll(Duration::from_millis(16))? {
             continue;
         }
+        dirty = true;
         match event::read()? {
             Event::Resize(width, height) => {
                 client.command(&format!(
@@ -460,8 +555,9 @@ fn run(args: Args) -> Result<()> {
             }
             Event::Paste(text) => {
                 if let Some(pane) = panes.iter_mut().find(|p| p.active) {
-                    pane.parser.set_scrollback(0);
-                    let bytes = if pane.parser.screen().bracketed_paste() {
+                    pane.scroll_offset = 0;
+                    pending.insert(pane.id.clone());
+                    let bytes = if pane.bracketed_paste {
                         format!("\x1b[200~{text}\x1b[201~")
                     } else {
                         text
@@ -504,16 +600,16 @@ fn run(args: Args) -> Result<()> {
                     if key.modifiers.contains(KeyModifiers::SHIFT)
                         && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
                     {
-                        let offset = pane.parser.screen().scrollback();
-                        pane.parser.set_scrollback(if key.code == KeyCode::PageUp {
+                        let offset = pane.scroll_offset;
+                        pane.scroll_offset = if key.code == KeyCode::PageUp {
                             offset + 10
                         } else {
                             offset.saturating_sub(10)
-                        });
-                    } else if let Some(bytes) =
-                        key_bytes(key, pane.parser.screen().application_cursor())
-                    {
-                        pane.parser.set_scrollback(0);
+                        };
+                        pending.insert(pane.id.clone());
+                    } else if let Some(bytes) = key_bytes(key, pane.app_cursor) {
+                        pane.scroll_offset = 0;
+                        pending.insert(pane.id.clone());
                         client.send(&pane.id, &bytes)?;
                     }
                 }
@@ -535,6 +631,15 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn visible_text(text: &str) -> String {
+        text.lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end_matches('\n')
+            .into()
+    }
 
     struct Server {
         _dir: tempfile::TempDir,
@@ -582,6 +687,48 @@ mod tests {
             assert!(out.status.success());
             String::from_utf8(out.stdout).unwrap()
         }
+        fn stream() -> (Self, std::fs::File) {
+            use std::{ffi::CString, fs::OpenOptions, os::unix::ffi::OsStrExt};
+            let dir = tempfile::tempdir().unwrap();
+            let fifo = dir.path().join("output");
+            let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            // SAFETY: name 是存活的 NUL 结尾路径；FIFO 仅在本测试临时目录中。
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            let stream = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo)
+                .unwrap();
+            let args = Args {
+                socket: dir.path().join("tmux.sock"),
+                session: "test".into(),
+            };
+            let out = Command::new("tmux")
+                .arg("-S")
+                .arg(&args.socket)
+                .args([
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "test",
+                    "-x",
+                    "80",
+                    "-y",
+                    "24",
+                    "/bin/cat",
+                ])
+                .arg(&fifo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            (Self { _dir: dir, args }, stream)
+        }
         fn wait_for(&self, pane: &str, needle: &str) {
             let until = Instant::now() + Duration::from_secs(3);
             loop {
@@ -600,8 +747,191 @@ mod tests {
                 .arg("-S")
                 .arg(&self.args.socket)
                 .arg("kill-server")
-                .status();
+                .output();
         }
+    }
+
+    fn drain_output(client: &mut Client, pane: &mut Pane, needle: &str) {
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            client.pump().unwrap();
+            client.events.append(&mut client.lines);
+            while let Some(event) = client.events.pop_front() {
+                if output_pane(&event) == Some(pane.id.as_str()) {
+                    *pane = snapshot(client, &pane.id, pane.scroll_offset)
+                        .unwrap()
+                        .unwrap();
+                }
+            }
+            if pane.parser.text().contains(needle) {
+                return;
+            }
+            assert!(
+                Instant::now() < until,
+                "缺少 {needle}: {}",
+                pane.parser.text()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn reconnect_restores_alternate_screen_and_returns_to_primary() {
+        let (server, mut output) = Server::stream();
+        for i in 0..60 {
+            writeln!(output, "PRIMARY_HISTORY_{i:03}\r").unwrap();
+        }
+        output
+            .write_all(b"PRIMARY_MARKER\r\n\x1b[?1049h\x1b[H\x1b[2JALT_MARKER")
+            .unwrap();
+        server.wait_for("%0", "ALT_MARKER");
+        let mut client = Client::connect(&server.args).unwrap();
+        let mut pane = reload(&mut client).unwrap().remove(0);
+        assert!(pane.parser.text().contains("ALT_MARKER"));
+        output.write_all(b"\x1b[?1049lRETURNED").unwrap();
+        server.wait_for("%0", "RETURNED");
+        drain_output(&mut client, &mut pane, "RETURNED");
+        assert!(pane.parser.text().contains("PRIMARY_MARKER"));
+        assert_eq!(
+            visible_text(&pane.parser.text()),
+            visible_text(&server.capture("%0"))
+        );
+        pane = snapshot(&mut client, "%0", 2000).unwrap().unwrap();
+        assert!(pane.parser.text().contains("PRIMARY_HISTORY_000"));
+    }
+
+    #[test]
+    fn reconnect_keeps_history_and_pending_escape_sequence() {
+        let (server, mut output) = Server::stream();
+        for i in 0..60 {
+            writeln!(output, "ROW_{i:03}\r").unwrap();
+        }
+        output.write_all(b"BEFORE_PENDING\x1b[").unwrap();
+        server.wait_for("%0", "BEFORE_PENDING");
+        let mut client = Client::connect(&server.args).unwrap();
+        let mut pane = snapshot(&mut client, "%0", 50).unwrap().unwrap();
+        assert!(pane.parser.text().contains("ROW_000"));
+        pane = snapshot(&mut client, "%0", 0).unwrap().unwrap();
+        output.write_all(b"31mRED_MARKER").unwrap();
+        server.wait_for("%0", "RED_MARKER");
+        drain_output(&mut client, &mut pane, "RED_MARKER");
+        let (x, y) = pane.cursor.unwrap();
+        assert_eq!(
+            pane.parser.cell(y, x - 1).fg,
+            AnsiColor::Named(alacritty_terminal::vte::ansi::NamedColor::Red)
+        );
+        assert_eq!(
+            visible_text(&pane.parser.text()),
+            visible_text(&server.capture("%0"))
+        );
+    }
+
+    #[test]
+    fn reconnect_uses_server_drawing_attributes() {
+        let (server, mut output) = Server::stream();
+        output.write_all(b"UNCHANGED\x1b[31m").unwrap();
+        server.wait_for("%0", "UNCHANGED");
+        let mut client = Client::connect(&server.args).unwrap();
+        let mut pane = reload(&mut client).unwrap().remove(0);
+        output.write_all(b"RED").unwrap();
+        server.wait_for("%0", "UNCHANGEDRED");
+        drain_output(&mut client, &mut pane, "UNCHANGEDRED");
+        assert_eq!(
+            pane.parser.cell(0, 9).fg,
+            AnsiColor::Named(alacritty_terminal::vte::ansi::NamedColor::Red)
+        );
+    }
+
+    #[test]
+    fn reconnect_handles_all_tmux_alternate_screen_modes() {
+        for mode in [47, 1047, 1049] {
+            let (server, mut output) = Server::stream();
+            write!(output, "PRIMARY\x1b[?{mode}h\x1b[H\x1b[2JALTERNATE").unwrap();
+            server.wait_for("%0", "ALTERNATE");
+            let mut client = Client::connect(&server.args).unwrap();
+            let mut pane = reload(&mut client).unwrap().remove(0);
+            assert!(pane.parser.text().contains("ALTERNATE"));
+            write!(output, "\x1b[?{mode}l\r\nRETURNED").unwrap();
+            server.wait_for("%0", "RETURNED");
+            drain_output(&mut client, &mut pane, "RETURNED");
+            assert!(pane.parser.text().contains("PRIMARY"), "mode {mode}");
+            assert_eq!(pane.parser.text(), visible_text(&server.capture("%0")));
+        }
+    }
+
+    #[test]
+    fn history_view_clamps_after_server_history_is_cleared() {
+        let (server, mut output) = Server::stream();
+        for i in 0..60 {
+            writeln!(output, "ROW_{i:03}\r").unwrap();
+        }
+        output.write_all(b"DONE").unwrap();
+        server.wait_for("%0", "DONE");
+        let mut client = Client::connect(&server.args).unwrap();
+        let pane = snapshot(&mut client, "%0", 2000).unwrap().unwrap();
+        assert!(pane.parser.text().starts_with("ROW_000"));
+        assert!(pane.cursor.is_none());
+        client.command("clear-history -t %0").unwrap();
+        let pane = snapshot(&mut client, "%0", pane.scroll_offset)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pane.scroll_offset, 0);
+        assert_eq!(pane.parser.text(), visible_text(&server.capture("%0")));
+    }
+
+    #[test]
+    fn snapshots_during_output_do_not_duplicate_or_drop_stream_bytes() {
+        let (server, mut output) = Server::stream();
+        output.write_all(b"BEGIN\r\n").unwrap();
+        server.wait_for("%0", "BEGIN");
+        let mut client = Client::connect(&server.args).unwrap();
+        let producer = thread::spawn(move || {
+            for i in 0..80 {
+                write!(output, "{i:03}\r\n").unwrap();
+                thread::sleep(Duration::from_millis(2));
+            }
+            output.write_all(b"STREAM_DONE").unwrap();
+            output
+        });
+        let mut pane = reload(&mut client).unwrap().remove(0);
+        for _ in 0..8 {
+            pane = snapshot(&mut client, "%0", 0).unwrap().unwrap();
+        }
+        let _output = producer.join().unwrap();
+        server.wait_for("%0", "STREAM_DONE");
+        drain_output(&mut client, &mut pane, "STREAM_DONE");
+        assert_eq!(
+            visible_text(&pane.parser.text()),
+            visible_text(&server.capture("%0"))
+        );
+        pane = snapshot(&mut client, "%0", 2000).unwrap().unwrap();
+        assert!(
+            pane.parser.text().starts_with("BEGIN\n000\n001\n002"),
+            "{}",
+            pane.parser.text()
+        );
+    }
+
+    #[test]
+    fn reconnect_restores_insert_mode_and_pending_wrap() {
+        let (server, mut output) = Server::stream();
+        output.write_all(b"abc\r\x1b[4h").unwrap();
+        server.wait_for("%0", "abc");
+        let mut client = Client::connect(&server.args).unwrap();
+        let mut pane = reload(&mut client).unwrap().remove(0);
+        output.write_all(b"X\x1b[4l\r\n").unwrap();
+        server.wait_for("%0", "Xabc");
+        drain_output(&mut client, &mut pane, "Xabc");
+        output.write_all(&[b'A'; 80]).unwrap();
+        server.wait_for("%0", &"A".repeat(80));
+        pane = snapshot(&mut client, "%0", 0).unwrap().unwrap();
+        output.write_all(b"WRAPPED").unwrap();
+        server.wait_for("%0", "WRAPPED");
+        drain_output(&mut client, &mut pane, "WRAPPED");
+        assert_eq!(
+            visible_text(&pane.parser.text()),
+            visible_text(&server.capture("%0"))
+        );
     }
 
     #[test]
@@ -638,11 +968,7 @@ mod tests {
         let mut client = Client::connect(&server.args).unwrap();
         assert_eq!(client.command("list-panes -F '#{pane_pid}'").unwrap(), pids);
         let panes = reload(&mut client).unwrap();
-        assert!(
-            panes
-                .iter()
-                .any(|p| p.parser.screen().contents().contains("重连标记"))
-        );
+        assert!(panes.iter().any(|p| p.parser.text().contains("重连标记")));
         // 任意字符作为输入传递，不能逃逸为 tmux 命令。
         client
             .send(&first, b"printf '%s\\n' '; kill-server'\r")
@@ -656,14 +982,9 @@ mod tests {
     }
 
     #[test]
-    fn output_preserves_bytes_and_escape_boundaries() {
-        let (pane, data) = decode_output(b"%output %3 hi\\015\\012\\033[31m\\134\\377")
-            .unwrap()
-            .unwrap();
-        assert_eq!(pane, "%3");
-        assert_eq!(data, b"hi\r\n\x1b[31m\\\xff");
-        assert!(decode_output(b"%output %1 \\9").is_err());
-        assert!(decode_output(b"%output %1 \\777").is_err());
+    fn output_notifications_only_identify_dirty_panes() {
+        assert_eq!(output_pane(b"%output %3 hi\\015\\033[31m"), Some("%3"));
+        assert_eq!(output_pane(b"%layout-change @1"), None);
     }
 
     #[test]
@@ -691,13 +1012,17 @@ mod tests {
 
     #[test]
     fn renderer_keeps_chinese_colors_and_pane_coordinates() {
-        let mut parser = vt100::Parser::new(3, 12, 10);
+        let mut parser = TerminalState::new(3, 12, 10);
         parser.process("\x1b[31m中文\x1b[0m ok".as_bytes());
         let pane = Pane {
             id: "%0".into(),
             rect: Rect::new(2, 1, 12, 3),
             active: true,
             parser,
+            cursor: None,
+            scroll_offset: 0,
+            app_cursor: false,
+            bracketed_paste: false,
         };
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 8)).unwrap();
         terminal.draw(|frame| draw(frame, &[pane], false)).unwrap();
