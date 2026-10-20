@@ -108,7 +108,7 @@ twig --config ./config.toml    # 使用指定登记表
 
 `exit` / `Ctrl-D` 按 Shell 自身语义退出，可关闭 Pane；关闭最后一个窗口时返回导航。希望保留任务环境时使用 `Ctrl-G d`。连接错误也会返回导航并显示原因，不清理后台资源，重新 Enter 可重连。停止进程仍使用显式的 `twig stop`，工作台没有强制关闭快捷键。
 
-从目标项目自己的 tmux Session 中打开工作台会被拒绝，避免递归捕获当前终端以及改变外层窗口。请从 tmux 外或另一个 Session 运行 Twig。原生 `twig new/open` 继续使用 tmux 原有的 attach/switch 行为和用户快捷键。
+从目标项目自己的 tmux Session 中打开工作台会被拒绝，避免递归捕获当前终端以及改变外层窗口。请从 tmux 外或另一个 Session 运行 Twig。`twig new/open` 也使用相同工作台与嵌套保护，不切换外层 tmux 客户端；`Ctrl-G d` 返回 Console 并选中命令指定的项目与任务，随后可继续切换任务或按 q 退出。`new --no-open` 仍只准备资源、不打开界面。
 
 当前终端前端在 Linux、tmux 3.8 上完成自动验收，使用现有 tmux 默认尺寸协调策略；同时连接多个不同尺寸客户端时，实际 Pane 尺寸可能受其他客户端影响。尚未验收 macOS、真实 SSH 断线、图像、超链接和扩展键盘协议。大量输出时合并刷新，最多约每 33 ms 发起一次变化屏幕查询，这不是帧率保证。
 

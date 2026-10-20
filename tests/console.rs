@@ -525,6 +525,63 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("TERMINAL_RESTORED:0");
 }
 
+#[test]
+fn new_and_open_share_workbench_and_return_to_the_selected_task() {
+    let f = Fixture::new();
+    f.init();
+    let target = f.repo.with_file_name("repo.worktrees").join("feat/unified");
+    let mut previous_pids = None;
+    for action in ["new", "new", "open"] {
+        let mut command = Command::new("sh");
+        f.env(&mut command);
+        // 启动目录故意与目标任务无关，选中项必须来自显式命令参数。
+        command.args(["-c", "\"$TWIG_TEST_BIN\" --config \"$TWIG_TEST_CONFIG\" \"$@\"; printf '\\nTERMINAL_RESTORED:%s\\n' $?",
+            "test", action, "demo", "feat/unified"]);
+        let mut p = Pty::spawn(command);
+        p.wait("Ctrl-G d");
+        p.send(b"printf 'DIRECT_DIR:%s\\n' \"$PWD\"\r");
+        p.wait(&format!("DIRECT_DIR:{}", target.display()));
+        assert!(
+            !support::project_dir(&f.repo, &f.registry)
+                .join("lock")
+                .exists()
+        );
+        let output = Command::new(&f.tmux)
+            .args([
+                "-L",
+                &f.socket,
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_pid} #{pane_current_path}",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let pids = String::from_utf8(output.stdout).unwrap();
+        if let Some(previous) = &previous_pids {
+            assert_eq!(previous, &pids);
+        }
+        previous_pids = Some(pids);
+        p.text.clear();
+        p.bytes.clear();
+        p.send(b"\x07d");
+        p.wait(&format!("目录：{}", target.display()));
+        p.text.clear();
+        p.bytes.clear();
+        p.send(b"\r");
+        p.wait("Ctrl-G d");
+        p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
+        p.wait(&format!("REENTER_DIR:{}", target.display()));
+        p.text.clear();
+        p.bytes.clear();
+        p.send(b"\x07d");
+        p.wait("任务 / ");
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
 fn strip_terminal_codes(bytes: &[u8]) -> String {
     let mut out = Vec::new();
     let mut i = 0;

@@ -459,3 +459,14 @@ Console 采集线程在终端视图中继续工作，底部保留全局 Codex �
 README、内置 Console 手册、安装/快速开始/窗口说明、Clap 帮助与 AGENTS 已同步。Linux/tmux 3.8 是本轮验收环境。真实 Codex 人工交互、macOS、真实 SSH 断线和高负载仍未验收；鼠标选区、系统剪贴板、扩展键盘协议、图像/超链接、独立多客户端布局以及 stash 中的通知功能不属于这次完成的 Console 集成范围。文字可用外层终端自带选择与复制。
 
 本轮最终验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过，共 78 项 Rust 测试；独立 example 构建与真实 Vim PTY 验收通过，最后一次有限输出输入响应为 0.327 秒。准备提交并推送当前功能分支；未安装或替换本机二进制。原通知工作仍保存在描述为「保存 feat/codex-notify 工作区，开始 control-mode-console 开发」的 stash 中。
+
+
+### 统一 new/open 与 Console 入口（2026-10-20）
+
+用户明确要求完全统一交互入口。new 创建或接续任务、open 复用或重建窗口后，释放项目锁并进入同一个 Console 工作台，不再调用原生 attach-session/switch-client。Ctrl-G d 返回 Console，按显式项目和任务路径定位并聚焦任务区；与启动目录无关。之后可以切换项目/任务、再次进入终端或按 q 退出。new --no-open 仍仅准备资源，不开启界面。
+
+Console 增加可选的初始终端目标，直接使用命令已校验并准备好的 session/window；初始进入与导航 Enter 共用终端运行及错误处理函数。不重复执行启动配置。移除旧 tmux::enter 实现。非交互进入失败继续保留已经准备的环境，同 Session 嵌套保护统一生效；从其他 Session 启动时外层客户端留在原 Session。
+
+PTY 回归覆盖 new、新任务重复 new、open 直接进入目标目录、释放锁、返回导航后目标选中与再次进入、已有 PID 不变；隔离 tmux 测试覆盖在另一个 Session 内启动 new/open，外层客户端不切换及 --no-open 不新增客户端。README、内置命令/Console/窗口/快速开始手册、Clap 帮助和 AGENTS 同步更新。此前保留原生 new/open 的阶段记录已被本节取代。
+
+本轮验证：fmt、Clippy（all-targets、-D warnings）、79 项 Rust 测试与真实 Vim PTY 验收通过；有限输出期间输入响应观测 0.302 秒。未安装或替换本机二进制，原通知 stash 未恢复。

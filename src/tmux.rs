@@ -3,7 +3,7 @@ use crate::{
     git::{checked, run},
 };
 use anyhow::{Context, Result, bail, ensure};
-use std::{ffi::OsStr, path::Path, process::Command};
+use std::{ffi::OsStr, path::Path};
 
 pub fn tmux(args: &[&str]) -> Result<String> {
     checked(
@@ -238,21 +238,4 @@ pub fn idle(window: &str) -> Result<bool> {
         }
     }
     Ok(true)
-}
-
-pub fn enter(config: &Config, window: &str) -> Result<()> {
-    tmux(&["select-window", "-t", window])?;
-    let action = if std::env::var_os("TMUX").is_some() {
-        "switch-client"
-    } else {
-        "attach-session"
-    };
-    let status = Command::new("tmux")
-        .args([action, "-t", &format!("={}", config.session)])
-        .status()?;
-    ensure!(
-        status.success(),
-        "tmux 进入失败；环境已保留，可在交互式终端执行 twig open <项目名> <任务名>"
-    );
-    Ok(())
 }

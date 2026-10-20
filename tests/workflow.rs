@@ -601,7 +601,7 @@ fn lifecycle_and_recovery() {
     assert!(f.root.join("auth").is_dir());
     assert!(f.ok(&["ls", "local"]).contains("Closed"));
     f.ok(&["new", "local", "--no-open", "auth"]);
-    // open 的非交互 attach 会失败，但必须已经重建窗口。
+    // open 的非交互工作台会失败，但必须已经重建窗口。
     f.ok(&["stop", "local", "auth", "-y"]);
     let _ = f.run(&["open", "local", "auth"]);
     assert!(
@@ -809,18 +809,11 @@ fn rechecks_files_after_confirmation_prompt() {
 }
 
 #[test]
-fn new_and_open_switch_an_attached_client_between_sessions() {
+fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
     use std::process::Stdio;
     let f = Fixture::new();
-    f.ok(&["new", "local", "--no-open", "auth"]);
-    f.mux(&[
-        "new-session",
-        "-d",
-        "-s",
-        "driver",
-        "-c",
-        f.repo.to_str().unwrap(),
-    ]);
+    f.ok(&["new", "local", "auth", "--no-open"]);
+    f.mux(&["new-session", "-d", "-s", "driver", "-x", "140", "-y", "36"]);
     let mut client = Command::new(&f.tmux)
         .args(["-L", &f.socket, "-C", "attach-session", "-t", "driver"])
         .stdin(Stdio::piped())
@@ -828,71 +821,57 @@ fn new_and_open_switch_an_attached_client_between_sessions() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let wait_for = |session: &str| {
-        for _ in 0..100 {
-            if f.mux(&["list-clients", "-F", "#{session_name}"])
-                .lines()
-                .any(|line| line == session)
+    let wait_screen = |needle: &str| {
+        for _ in 0..200 {
+            if f.mux(&["capture-pane", "-p", "-t", "driver:"])
+                .contains(needle)
             {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        panic!("客户端未进入 {session}");
+        panic!(
+            "未看到 {needle}: {}",
+            f.mux(&["capture-pane", "-p", "-t", "driver:"])
+        );
     };
-    wait_for("driver");
-    for action in ["open local auth", "new local fresh", "new local fresh"] {
-        f.mux(&["switch-client", "-t", "driver"]);
-        wait_for("driver");
+    for (i, action) in ["open local auth", "new local fresh", "new local fresh"]
+        .iter()
+        .enumerate()
+    {
         let command = format!(
-            "'{}' --config '{}' {action}",
+            "'{}' --config '{}' {action}; printf 'RETURN_{i}_%s\\n' DONE",
             env!("CARGO_BIN_EXE_twig").replace('\'', "'\\''"),
             f.registry_path().to_str().unwrap().replace('\'', "'\\''")
         );
         f.mux(&["send-keys", "-t", "driver:", &command, "Enter"]);
-        wait_for(&f.session());
-        let expected = if action == "open local auth" {
-            "auth"
-        } else {
-            "fresh"
-        };
-        assert_eq!(
-            f.mux(&[
-                "display-message",
-                "-p",
-                "-t",
-                &format!("{}:", f.session()),
-                "#{@twig-feature}"
-            ])
-            .trim(),
-            expected
-        );
+        wait_screen("Ctrl-G d");
+        let sessions = f.mux(&["list-clients", "-F", "#{session_name}"]);
+        assert!(sessions.lines().any(|session| session == "driver"));
+        assert!(sessions.lines().any(|session| session == f.session()));
         assert!(
             !support::project_dir(&f.repo, &f.registry_path())
                 .join("lock")
                 .exists()
         );
+        f.mux(&["send-keys", "-t", "driver:", "C-g", "d"]);
+        wait_screen("任务 / ");
+        f.mux(&["send-keys", "-t", "driver:", "q"]);
+        wait_screen(&format!("RETURN_{i}_DONE"));
     }
-    f.ok(&["new", "local", "--no-open", "background"]);
+    f.ok(&["new", "local", "background", "--no-open"]);
     assert_eq!(
-        f.mux(&[
-            "display-message",
-            "-p",
-            "-t",
-            &format!("{}:", f.session()),
-            "#{@twig-feature}"
-        ])
-        .trim(),
-        "fresh"
+        f.mux(&["list-clients", "-F", "#{session_name}"]).trim(),
+        "driver"
     );
     drop(client.stdin.take());
     client.wait().unwrap();
 }
 
 #[test]
-fn new_preserves_environment_when_attach_fails_without_a_terminal() {
+fn new_preserves_environment_when_workbench_requires_a_terminal() {
     let f = Fixture::new();
-    f.fail(&["new", "local", "auth"], "tmux 进入失败；环境已保留");
+    f.fail(&["new", "local", "auth"], "工作台需要交互式终端");
     assert!(f.root.join("auth/.git").exists());
     assert!(
         !support::project_dir(&f.repo, &f.registry_path())

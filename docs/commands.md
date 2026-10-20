@@ -56,7 +56,7 @@ twig new myapp auth
 twig new myapp feat/login --base develop --no-open
 ```
 
-PROJECT 和 NAME 必填。`--base BRANCH` 选择已有本地起点，默认项目 base；不会 fetch。`--no-open` 仅跳过进入，仍创建窗口并执行启动配置。默认成功后进入 Shell；非交互环境进入失败时已经创建的资源仍保留。
+PROJECT 和 NAME 必填。`--base BRANCH` 选择已有本地起点，默认项目 base；不会 fetch。`--no-open` 仅跳过进入，仍创建窗口并执行启动配置。默认成功后打开 Twig 内置终端工作台，Ctrl-G d 返回 Console 并选中该任务；非交互环境进入失败时已经创建的资源仍保留。
 
 重复 new 接续自己登记的资源，不接管外部同名分支、目录或窗口。已有任务按记录中的分支/路径接续；传入与原记录不同的 --base 会报错，不会重置分支。任务路径不能与已有任务相互包含，中间目录不能是符号链接或其他仓库。创建失败不强制回滚；恢复方式见 `twig guide troubleshooting`。
 
@@ -66,7 +66,7 @@ PROJECT 和 NAME 必填。`--base BRANCH` 选择已有本地起点，默认项�
 twig open myapp auth
 ```
 
-PROJECT 和 NAME 必填。已有窗口直接复用；缺失窗口按当前配置重建并启动程序。Worktree 缺失或归属错误时报错。普通终端 attach，tmux 内切换客户端；通常需要交互终端。不会恢复原程序状态或 Agent 对话。主工作目录通过 Console 进入。
+PROJECT 和 NAME 必填。已有窗口直接复用；缺失窗口按当前配置重建并启动程序。Worktree 缺失或归属错误时报错。打开 Twig 内置终端工作台，需要交互终端；Ctrl-G d 返回 Console 并选中该任务，q 退出导航。不会切换外层 tmux 客户端；在目标项目自身 Session 中打开工作台会被拒绝，请从 tmux 外或其他 Session 使用。不会恢复原程序状态或 Agent 对话。主工作目录通过 Console 进入。
 
 ## stop：停止任务窗口
 

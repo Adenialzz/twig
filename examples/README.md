@@ -1,6 +1,6 @@
 # Control Mode 独立验收入口
 
-正式实现位于 `src/workbench.rs`，由 Console 和 `control_mode.rs` 共用。Console 任务区 Enter 打开工作台，Ctrl-G d 返回导航；`new/open` 仍使用原生 tmux。用户操作见 [Console 手册](../docs/console.md)。
+正式实现位于 `src/workbench.rs`，由 Console 和 `control_mode.rs` 共用。Console 任务区 Enter、`new/open` 都打开同一个工作台，Ctrl-G d 返回导航并选中对应任务。用户操作见 [Console 手册](../docs/console.md)。
 
 实现使用现有 Ratatui/Crossterm 和 `alacritty_terminal 0.26.0`，后者只解析屏幕快照中的字符和样式，不启动 GUI 或 PTY。tmux 是终端状态的唯一来源：Control Mode 通知标记变化，合并后捕获可见屏幕；连续输出刷新间隔至少 33 ms，空闲不查询屏幕。方向键、功能键和 bracketed paste 由 tmux 按当前程序模式编码。
 

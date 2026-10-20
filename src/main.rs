@@ -77,7 +77,7 @@ enum Action {
     },
     /// 创建并进入任务 Shell 窗口；重复执行接续已有环境
     #[command(
-        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n只接续自己登记的资源，不接管外部同名分支；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
+        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-G d 返回 Console；--no-open 仅准备环境。\n只接续自己登记的资源，不接管外部同名分支；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
     )]
     New {
         /// 已登记的项目别名，不根据当前目录推断
@@ -106,7 +106,7 @@ enum Action {
     Pr(pr::Args),
     /// 进入任务窗口；窗口丢失时重建 Shell
     #[command(
-        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n不恢复原进程或对话。通常需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
+        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n打开内置终端工作台，Ctrl-G d 返回 Console 并选中任务。不恢复原进程或对话。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
     )]
     Open {
         /// 已登记的项目别名，不根据当前目录推断
@@ -184,7 +184,7 @@ fn execute(cli: Cli) -> Result<()> {
     let registry_path = registry::location(cli.config)?;
     let action = cli.command.unwrap_or(Action::Console);
     match action {
-        Action::Console => return console::run(registry_path, invocation_dir),
+        Action::Console => return console::run(registry_path, invocation_dir, None),
         Action::Add {
             name,
             path,
@@ -248,24 +248,44 @@ fn execute(cli: Cli) -> Result<()> {
             project: alias,
         } => {
             let window = new(&project, &config, &mut state, &alias, &name, base)?;
-            drop(lock); // attach 不能持有项目锁。
+            drop(lock); // 工作台交互期间不能持有项目锁。
             if no_open {
                 Ok(())
             } else {
-                tmux::enter(&config, &window)
+                let path = feature(&state, &name)?.path.clone();
+                console::run(
+                    registry_path,
+                    path,
+                    Some(console::TerminalTarget {
+                        project: alias,
+                        session: config.session,
+                        window,
+                    }),
+                )
             }
         }
         Action::Ls { .. } => list(&project, &config, &state),
         Action::Pr(args) => pr::execute(&config, &state, &invocation_dir, args),
-        Action::Open { name, .. } => {
+        Action::Open {
+            name,
+            project: alias,
+        } => {
             let feature = feature(&state, &name)?;
             ensure!(
                 check_worktree(&config, feature)?,
                 "Worktree 不存在；请检查 twig ls <项目名>，必要时重试 twig new <项目名> {name}"
             );
             let window = tmux::ensure_window(&config, &project, &name, &feature.path)?;
-            drop(lock); // attach 不能持有项目锁。
-            tmux::enter(&config, &window)
+            drop(lock); // 工作台交互期间不能持有项目锁。
+            console::run(
+                registry_path,
+                feature.path.clone(),
+                Some(console::TerminalTarget {
+                    project: alias,
+                    session: config.session,
+                    window,
+                }),
+            )
         }
         Action::Stop { name, yes, .. } => {
             feature(&state, &name)?;

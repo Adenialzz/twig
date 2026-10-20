@@ -425,10 +425,52 @@ impl Drop for Screen {
     }
 }
 
-pub fn run(registry: PathBuf, cwd: PathBuf) -> Result<()> {
+pub struct TerminalTarget {
+    pub project: String,
+    pub session: String,
+    pub window: String,
+}
+
+fn open_terminal(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    worker: &Worker,
+    target: TerminalTarget,
+) -> Result<()> {
+    let result = twig_cli::workbench::run(terminal, target.session, &target.window, || {
+        for snapshot in worker.updates.try_iter() {
+            app.snapshot = snapshot;
+        }
+        let summary = data::summary(app.snapshot.threads.iter());
+        format!(
+            "{} · 全局 Codex {}",
+            target.project,
+            if app.snapshot.codex_error.is_some() {
+                "连接异常"
+            } else if app
+                .snapshot
+                .codex_checked
+                .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
+            {
+                "状态过期"
+            } else {
+                &summary
+            }
+        )
+    });
+    app.refresh += 1;
+    app.reconcile();
+    app.message = result
+        .err()
+        .map(|error| format!("终端已返回导航：{error:#}"));
+    terminal.clear()?;
+    Ok(())
+}
+
+pub fn run(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> Result<()> {
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "Console 需要交互式终端；脚本请使用 twig ls 或 twig ls <项目名>"
+        "Console 工作台需要交互式终端；已准备的环境保留，脚本创建请用 new --no-open，查询请用 twig ls"
     );
     // panic 时先恢复终端，再输出诊断；退出后还原原 hook。
     let previous = std::panic::take_hook();
@@ -442,16 +484,25 @@ pub fn run(registry: PathBuf, cwd: PathBuf) -> Result<()> {
         );
         eprintln!("Console 异常：{info}");
     }));
-    let result = run_inner(registry, cwd);
+    let result = run_inner(registry, cwd, initial);
     std::panic::set_hook(previous);
     result
 }
-fn run_inner(registry: PathBuf, cwd: PathBuf) -> Result<()> {
+fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> Result<()> {
     let mut screen = Screen::start()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let worker = Worker::start(registry.clone());
     let mut app = App::new(cwd);
+    if let Some(target) = &initial {
+        app.project = Some(target.project.clone());
+        app.task = Some(app.initial_cwd.clone());
+        app.focus = 1;
+    }
     worker.requests.send(app.request())?;
+    if let Some(target) = initial {
+        open_terminal(&mut app, &mut terminal, &worker, target)?;
+        worker.requests.send(app.request())?;
+    }
     loop {
         if let Some(form) = &mut app.form {
             match form.poll() {
@@ -698,34 +749,19 @@ fn run_inner(registry: PathBuf, cwd: PathBuf) -> Result<()> {
                     .repo()
                     .map(|r| (r.name.clone(), app.task().map(|t| t.name.clone())));
                 if let Some((project, Some(task))) = target {
-                    let result = data::prepare_terminal(&registry, &project, &task).and_then(
-                        |(session, window)| {
-                            twig_cli::workbench::run(&mut terminal, session, &window, || {
-                                for snapshot in worker.updates.try_iter() {
-                                    app.snapshot = snapshot;
-                                }
-                                let summary = data::summary(app.snapshot.threads.iter());
-                                format!(
-                                    "{project} · 全局 Codex {}",
-                                    if app.snapshot.codex_error.is_some() {
-                                        "连接异常"
-                                    } else if app.snapshot.codex_checked.is_none_or(|checked| {
-                                        checked.elapsed() > Duration::from_secs(30)
-                                    }) {
-                                        "状态过期"
-                                    } else {
-                                        &summary
-                                    }
-                                )
-                            })
-                        },
-                    );
-                    app.message = result
-                        .err()
-                        .map(|error| format!("终端已返回导航：{error:#}"));
-                    app.refresh += 1;
-                    app.reconcile();
-                    terminal.clear()?;
+                    match data::prepare_terminal(&registry, &project, &task) {
+                        Ok((session, window)) => open_terminal(
+                            &mut app,
+                            &mut terminal,
+                            &worker,
+                            TerminalTarget {
+                                project,
+                                session,
+                                window,
+                            },
+                        )?,
+                        Err(error) => app.message = Some(format!("进入失败：{error:#}")),
+                    }
                 }
             }
             _ => {}

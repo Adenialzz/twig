@@ -50,4 +50,4 @@ Zsh 补全在 compinit 之后加载 `source <(COMPLETE=zsh twig)`，详见 [补�
 
 用户手册以 docs/ 下的 Markdown 为源文件，编译时嵌入 twig guide。命令参数变化时同步更新 Clap 帮助和对应主题。
 
-Console 已使用 Control Mode 终端前端；`new/open` 保留原生 tmux 入口。工作台操作见 [Console 手册](docs/console.md)，独立验收入口和当前限制见 [实验说明](examples/README.md)。
+Console、`new` 和 `open` 统一使用 Control Mode 终端工作台；`Ctrl-G d` 返回 Console，`q` 退出，后台进程保留。工作台操作见 [Console 手册](docs/console.md)，独立验收入口和当前限制见 [实验说明](examples/README.md)。
