@@ -19,7 +19,7 @@ twig rm myapp payment --keep-branch     # 允许保留尚未合并的分支
 - 配置 upstream 时，相对本地 upstream 引用没有额外提交。此检查不连接远端；远端状态的新鲜程度取决于你最近的 fetch/push。无 upstream 时明确提示无法判断推送状态，但允许删除已合并到本地目标的分支。
 - 所有 Pane 都是无子进程的已知 Shell，或已经退出。前台/后台任务及未知进程状态都会阻止删除。请先退出任务，或明确执行 `stop`。
 
-`--keep-branch` 跳过合并和推送检查，仍检查工作目录和活动进程。`-y` 仅跳过确认，不绕过安全检查。始终使用 `git worktree remove` 和 `git branch -d`，不提供强制删除开关。
+`--keep-branch` 跳过合并和推送检查，仍检查工作目录和活动进程。`-y` 仅跳过确认，不绕过安全检查。CLI 使用 `git worktree remove` 和 `git branch -d`，不提供公开的强制删除开关。
 
 删除顺序为窗口、Worktree、分支、任务记录。若 Git 拒绝某一步，已完成步骤不会撤销，其余资源和记录保留，错误会说明下一步。Git 的 `branch -d` 自身还会执行检查；例如 `--target` 与当前主工作目录分支不同，可能在 Worktree 移除后拒绝删除分支，此时可用 `rm --keep-branch` 完成记录清理。
 
@@ -41,6 +41,6 @@ twig rm myapp auth --delete-ignored
 
 命令在确认前列出要删除的 ignored 文件/目录；目录项包含目录内全部内容。该选项仅放行 ignored 文件，未提交、未跟踪文件及活动进程仍阻止删除。它不执行 git clean，也不强制移除 Worktree。加 `-y` 会跳过确认，因此先核对数据是否仍需要。
 
-Console 的 `/delete` 或 `dd` 提供相同清理能力，默认取消；「删除本地分支」默认不勾选（保留分支），「同时删除被忽略文件」默认勾选；确认前须核对清单，详见 [Console](console.md)（`twig guide console`）。
+Console 的 `/delete` 或 `dd` 提供相同清理能力，默认取消；「删除本地分支」默认勾选（取消勾选则保留分支），勾选后跳过合并和推送检查，以 `git branch -D` 删除本地分支，文件和活动进程保护仍生效，「同时删除被忽略文件」默认勾选；确认前须核对清单，详见 [Console](console.md)（`twig guide console`）。
 
 清理不删除远端分支、不合并代码、不关闭 PR/MR。部分失败的处理见 [故障排查](troubleshooting.md)。

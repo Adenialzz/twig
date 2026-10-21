@@ -620,3 +620,7 @@ Console 表单先只读检查，取消返回原表单；确认后通过隐藏的
 确认快照绑定仓库、完整引用与提交，执行前重新检查。远端来源在任务记录 remote_start 中保存引用与提交，创建使用 worktree add --track，建立本地分支及 upstream。部分失败仍保留记录与资源；尚未创建本地分支时重试检查所选引用，引用变更明确报错，不回退到项目 base。原 base 保留表单输入以维持重试参数校验，远端创建实际使用 remote_start。
 
 验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过，共 107 项测试。新增 PTY 测试覆盖唯一远端来源、本地优先、多 remote 选择与默认取消、非交互拒绝、确认期间引用变化、upstream 设置及 post-checkout 失败后的接续。使用临时 bare remote 实际 fetch 后将 remote URL 设为不可访问，验证任务创建不联网。未改动真实 aisp-core 任务，未安装、未提交。
+
+### Console 显式删除未合并分支（2026-10-21）
+
+用户确认选项名为「删除本地分支」，默认勾选；确认按钮仍默认取消。勾选并确认后跳过合并和本地 upstream 检查，使用 git branch -D 删除分支；未提交/未跟踪文件、活动进程、任务归属和 ignored 清单保护不变。Console 通过要求 expected-task 且与 keep-branch/target 互斥的隐藏参数传递意图，CLI 默认仍执行合并和推送检查并使用 branch -d。此决定取代此前 Console 勾选后检查合并和推送的行为。
