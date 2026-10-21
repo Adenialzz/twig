@@ -53,23 +53,18 @@ fn list(
     frame: &mut Frame,
     area: Rect,
     title: String,
-    items: Vec<String>,
+    items: Vec<Line<'static>>,
     selected: Option<usize>,
     focused: bool,
 ) {
-    let widget = List::new(
-        items
-            .into_iter()
-            .map(|s| ListItem::new(safe(&s)))
-            .collect::<Vec<_>>(),
-    )
-    .block(block(title, focused))
-    .highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("› ");
+    let widget = List::new(items)
+        .block(block(title, focused))
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(widget, area, &mut state);
 }
@@ -232,6 +227,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                         }
                     )
                 })
+                .map(|text| Line::from(safe(&text)))
                 .collect();
             list(
                 frame,
@@ -279,17 +275,19 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
                     .get(&t.id)
                     .is_some_and(|(name, _)| name == &repo.name)
             }));
-            format!(
-                "{}{}  [{}]  {}",
-                repo.name,
+            Line::from(vec![
+                Span::raw(safe(&repo.name)),
                 unread(app.notifications.count(&repo.name, None)),
-                repo.tasks.len().saturating_sub(1),
-                if repo.error.is_some() {
-                    "异常".into()
-                } else {
-                    summary
-                }
-            )
+                Span::raw(safe(&format!(
+                    "  [{}]  {}",
+                    repo.tasks.len().saturating_sub(1),
+                    if repo.error.is_some() {
+                        "异常".into()
+                    } else {
+                        summary
+                    }
+                ))),
+            ])
         })
         .collect();
     list(
@@ -303,11 +301,16 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
         app.focus == 0,
     );
 }
-fn unread(count: usize) -> String {
+fn unread(count: usize) -> Span<'static> {
     if count == 0 {
-        String::new()
+        Span::raw("")
     } else {
-        format!(" [未读 {count}]")
+        Span::styled(
+            format!(" [未读 {count}]"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
     }
 }
 fn tasks(frame: &mut Frame, area: Rect, app: &App) {
@@ -343,26 +346,32 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 &task.name
             });
-            let name = format!(
-                "{name}{}",
+            let name = Line::from(vec![
+                Span::raw(name),
                 unread(
                     app.notifications
-                        .count(app.project.as_deref().unwrap_or_default(), Some(&task.path))
-                )
-            );
+                        .count(app.project.as_deref().unwrap_or_default(), Some(&task.path)),
+                ),
+            ]);
             let branch = safe(&task.branch);
             let git = safe(&format!("{}{freshness}", task.git));
             let window = safe(&task.window);
             let codex = safe(&data::summary(sessions.into_iter()));
             if compact {
                 Row::new(vec![
-                    Cell::from(Text::from(vec![Line::from(name), Line::from(branch)])),
+                    Cell::from(Text::from(vec![name, Line::from(branch)])),
                     Cell::from(Text::from(vec![Line::from(git), Line::from(window)])),
                     Cell::from(codex),
                 ])
                 .height(2)
             } else {
-                Row::new(vec![name, branch, git, window, codex])
+                Row::new(vec![
+                    Cell::from(name),
+                    Cell::from(branch),
+                    Cell::from(git),
+                    Cell::from(window),
+                    Cell::from(codex),
+                ])
             }
         })
         .collect::<Vec<_>>();
@@ -976,6 +985,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
                         .unwrap_or(path)
                 )
             })
+            .map(|text| Line::from(safe(&text)))
             .collect();
         list(
             frame,
