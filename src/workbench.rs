@@ -473,13 +473,7 @@ fn color(c: AnsiColor) -> Color {
     }
 }
 
-fn draw(
-    frame: &mut ratatui::Frame,
-    panes: &[Pane],
-    prefix: bool,
-    status: &str,
-    selection: Option<&Selection>,
-) {
+fn draw(frame: &mut ratatui::Frame, panes: &[Pane], status: &str, selection: Option<&Selection>) {
     let area = frame.area();
     let buffer = frame.buffer_mut();
     for pane in panes {
@@ -582,14 +576,7 @@ fn draw(
         }
     }
     let active = panes.iter().find(|p| p.active);
-    let label = if prefix {
-        "Ctrl-W: d 返回导航 | f 跳转完成任务 | u 未读任务 | s 左右分屏 | v 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 切 Pane | Alt-h/j/k/l 调比例 | Esc 取消".to_string()
-    } else {
-        format!(
-            "Ctrl-W d 导航 · Ctrl-W ? 帮助 | {} | {status} | 拖选即复制 · Esc 清除 | Shift-PgUp/PgDn 历史",
-            active.map_or("", |p| p.id.as_str())
-        )
-    };
+    let label = format!("{} | {status}", active.map_or("", |p| p.id.as_str()));
     frame.render_widget(
         Paragraph::new(label).style(Style::default().fg(Color::Black).bg(Color::Cyan)),
         Rect::new(0, area.height.saturating_sub(1), area.width, 1),
@@ -856,7 +843,6 @@ fn run_inner(
                 draw(
                     frame,
                     &panes,
-                    prefix,
                     &format!("{notice}{name} · {}", label.text),
                     selection.as_ref(),
                 );
@@ -1542,7 +1528,7 @@ mod tests {
         };
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 8)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &[pane], false, "twig", None))
+            .draw(|frame| draw(frame, &[pane], "twig", None))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(2, 1)].symbol(), "中");

@@ -141,7 +141,7 @@ def main():
             second.send(f"\x1b[<0;{col+10};{row+1}m".encode())
             second.wait("已请求复制 10 chars")
             assert "已请求复制 10 chars" in second.screen.display[-3]
-            assert "Ctrl-W d" in second.screen.display[-1]
+            assert "twig 实验工作台" in second.screen.display[-1]
             second.until(lambda: "已请求复制" not in "\n".join(second.screen.display), "复制提示自动消失")
             assert second.screen.buffer[row][col].reverse != old_reverse
             copies = re.findall(rb"\x1b\]52;c;([^\x07]*)\x07", second.output)

@@ -392,7 +392,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         // 返回项目后重新 Enter，应清除任务筛选并选中主工作目录。
         p.send(b"\x1b[Z\r");
         p.send(keys);
-        p.wait("Ctrl-W d");
+        p.wait(" · 全局 Codex ");
         p.send(b"printf 'ENTERED_%s\\n' SHELL\r");
         p.wait("ENTERED_SHELL");
         p.send(b"printf 'SELECTED_DIR:%s\n' \"$PWD\"\r");
@@ -418,7 +418,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait("任务 / ");
         // 返回后聚焦项目区，Tab 保留任务选择，可以再次进入同一 Shell。
         p.send(b"\t\r");
-        p.wait("Ctrl-W d");
+        p.wait(" · 全局 Codex ");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
         p.bytes.clear();
@@ -451,7 +451,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\tG\r");
-    p.wait("Ctrl-W d");
+    p.wait(" · 全局 Codex ");
     p.send(b"printf 'FIRST_%s\\n' PANE\r");
     p.wait("FIRST_PANE");
     let before = mux(&["list-panes", "-a", "-F", "#{pane_pid}"]);
@@ -478,7 +478,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
     p.send(b"\t\r");
-    p.wait("Ctrl-W d");
+    p.wait(" · 全局 Codex ");
     // 仅断开专用测试 server 的 Control Mode 客户端；Pane 仍在。
     let clients = mux(&["list-clients", "-F", "#{client_name}"]);
     for client in clients.lines() {
@@ -512,7 +512,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"/other\r\r\r");
-    p.wait("Ctrl-W d");
+    p.wait(" · 全局 Codex ");
     p.send(b"printf 'PROJECT_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!("PROJECT_DIR:{}", other.display()));
     p.send(b"\x17d");
@@ -520,7 +520,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.text.clear();
     p.bytes.clear();
     p.send(b"/demo\r\rG\r");
-    p.wait("Ctrl-W d");
+    p.wait(" · 全局 Codex ");
     p.send(b"printf 'TASK_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
         "TASK_DIR:{}",
@@ -580,7 +580,7 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         command.args(["-c", "\"$TWIG_TEST_BIN\" --config \"$TWIG_TEST_CONFIG\" \"$@\"; printf '\\nTERMINAL_RESTORED:%s\\n' $?",
             "test", action, "demo", "feat/unified"]);
         let mut p = Pty::spawn(command);
-        p.wait("Ctrl-W d");
+        p.wait(" · 全局 Codex ");
         p.send(b"printf 'DIRECT_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("DIRECT_DIR:{}", target.display()));
         assert!(
@@ -619,7 +619,7 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         p.text.clear();
         p.bytes.clear();
         p.send(b"\t\r");
-        p.wait("Ctrl-W d");
+        p.wait(" · 全局 Codex ");
         p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("REENTER_DIR:{}", target.display()));
         p.text.clear();
@@ -647,7 +647,7 @@ fn custom_prefix_directions_alt_resize_and_mouse_work_in_terminal() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\tG\r");
-    p.wait("Ctrl-W d");
+    p.wait(" · 全局 Codex ");
     p.send(b"\x17s");
     p.send(b"printf 'SPLIT_%s\\n' READY\r");
     p.wait("SPLIT_READY");
@@ -1061,7 +1061,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
     p.wait("auth");
     wait_phase(0);
     p.send(b"/other\r\r\r");
-    p.wait("Ctrl-W d");
+    p.wait(" · 全局 Codex ");
     assert!(!p.text.contains("本轮已完成"));
     if use_picker {
         p.send(b"\x17u");
@@ -1249,6 +1249,8 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
             .join("state.json")
             .exists()
     );
+    p.bytes.clear();
+    p.text.clear();
     p.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fmain\r");
     p.wait("操作成功");
     let state: serde_json::Value = serde_json::from_slice(
@@ -1335,11 +1337,11 @@ fn ctrl_w_directions_switch_lists_without_triggering_history_or_forms() {
     }
     // 前缀取消后 n 仍打开项目表单；表单内 Ctrl-W 不改变焦点。
     p.send(b"\x17");
-    p.wait("Ctrl-W：");
     p.bytes.clear();
     p.text.clear();
     p.send(b"\x1b");
-    p.wait("Tab / Ctrl-W");
+    // 等待独立 Esc 被解析，避免与后续 n 合并为 Alt-n。
+    thread::sleep(Duration::from_millis(100));
     p.send(b"n");
     p.wait("登记已有仓库");
     p.send(b"\x17l");
@@ -1430,7 +1432,6 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\rGd");
-    p.wait("再按 d 打开删除确认");
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     p.send(b"d");
     p.wait("确认删除");

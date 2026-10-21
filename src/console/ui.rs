@@ -68,11 +68,11 @@ fn list(
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(widget, area, &mut state);
 }
-fn panels(area: Rect) -> [Rect; 4] {
+fn panels(area: Rect, searching: bool) -> [Rect; 4] {
     let rows = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(6),
-        Constraint::Length(3),
+        Constraint::Length(if searching { 2 } else { 1 }),
     ])
     .split(area);
     if area.width < 100 {
@@ -93,7 +93,7 @@ pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
     if area.width < 38 || area.height < 12 || app.form.is_some() || app.help || app.searching {
         return Vec::new();
     }
-    let areas = panels(area);
+    let areas = panels(area, app.searching);
     let mut regions = Vec::new();
     // 全局监控不参与拖选，避免选区快照冻结实时状态。
     for (index, panel) in areas.into_iter().take(3).enumerate() {
@@ -126,7 +126,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(2),
             Constraint::Min(6),
-            Constraint::Length(3),
+            Constraint::Length(if app.searching { 2 } else { 1 }),
         ])
         .split(area);
     let count: usize = app
@@ -153,7 +153,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         )),
         rows[0],
     );
-    let areas = panels(area);
+    let areas = panels(area, app.searching);
     if area.width >= 100 {
         projects(frame, areas[0], app);
         tasks(frame, areas[1], app);
@@ -174,31 +174,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let connection = message.map(safe).unwrap_or_else(|| {
         match app.snapshot.codex_checked {
             None => "正在读取 Codex 状态…",
-            Some(at) if is_stale(Some(at)) => "Codex 状态过期 · 超过 30 秒未更新 · r 刷新",
+            Some(at) if is_stale(Some(at)) => "Codex 状态过期 · 超过 30 秒未更新",
             Some(_) => "Codex 已连接 · 仅当前服务可见会话",
         }
         .into()
     });
-    let hint = if app.pane_prefix {
-        "Ctrl-W：h 左侧项目 · l 右侧任务 · j 右下详情 · k 上方任务 · f 跳转完成任务 · u 未读任务 · Esc 取消"
-            .into()
-    } else if app.top_prefix {
-        "g：再按 g 跳到列表顶部 · Esc 取消".into()
-    } else if app.delete_prefix {
-        "d：再按 d 打开删除确认 · Esc 取消".into()
-    } else if app.searching {
-        format!(
-            "搜索：/{}  [↑↓ 命令 · Tab 补全 · Enter 确认 · Esc 取消]",
-            safe(&app.search_input)
-        )
-    } else {
-        "Tab / Ctrl-W hjkl 切区  ↑↓ 选择  Enter 进入/轮次  i 信息  / 搜索  n 新建/下一页  h 历史  r 刷新  ? 帮助  q 退出"
-            .into()
-    };
-    frame.render_widget(
-        Paragraph::new(vec![Line::from(connection), Line::from(hint)]).wrap(Wrap { trim: false }),
-        rows[2],
-    );
+    let mut status = vec![Line::from(connection)];
+    if app.searching {
+        status.push(Line::from(format!("搜索：/{}", safe(&app.search_input))));
+    }
+    frame.render_widget(Paragraph::new(status).wrap(Wrap { trim: false }), rows[2]);
     if app.searching {
         let candidates = app.command_candidates();
         if !candidates.is_empty() {
@@ -1170,7 +1155,7 @@ mod tests {
                 let regions = selection_regions(area, &app);
                 assert_eq!(regions.len(), if width >= 100 { 3 } else { 1 });
                 for region in regions {
-                    assert!(!region.intersects(panels(area)[3]));
+                    assert!(!region.intersects(panels(area, app.searching)[3]));
                 }
                 let output = text(&render(&app, width, height, |frame, _, app| {
                     super::draw(frame, app)

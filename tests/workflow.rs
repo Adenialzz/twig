@@ -845,7 +845,7 @@ fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
             f.registry_path().to_str().unwrap().replace('\'', "'\\''")
         );
         f.mux(&["send-keys", "-t", "driver:", &command, "Enter"]);
-        wait_screen("Ctrl-W d");
+        wait_screen(" · 全局 Codex ");
         let sessions = f.mux(&["list-clients", "-F", "#{session_name}"]);
         assert!(sessions.lines().any(|session| session == "driver"));
         assert!(sessions.lines().any(|session| session == f.session()));
