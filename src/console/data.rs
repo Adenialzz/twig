@@ -226,7 +226,8 @@ fn refresh_git(repo: &mut Repo) {
                         &Feature {
                             path: task.path.clone(),
                             branch: task.branch.clone(),
-                            base: String::new()
+                            base: String::new(),
+                            remote_start: None
                         }
                     )?,
                     "Worktree 尚未创建"

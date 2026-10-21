@@ -19,9 +19,16 @@ pub struct Form {
     pub directory_error: Option<String>,
     pub operation_started: bool,
     pub deletion: Option<Deletion>,
+    pub existing: Option<ExistingBranch>,
     default_alias: Option<String>,
     completion_input: Option<String>,
     job: Option<Job>,
+}
+pub struct ExistingBranch {
+    pub branches: Vec<crate::config::BranchStart>,
+    pub common: std::path::PathBuf,
+    pub selected: usize,
+    pub confirmed: bool,
 }
 pub struct Deletion {
     pub branch: String,
@@ -50,6 +57,7 @@ impl Form {
             directory_error: None,
             operation_started: false,
             deletion: None,
+            existing: None,
             default_alias: None,
             completion_input: None,
             job: None,
@@ -173,14 +181,41 @@ impl Form {
             }
         } else if let Some(project) = &self.project {
             crate::config::task_name(&self.fields[0])?;
-            command.args([
-                "new",
-                project,
-                &self.fields[0],
-                "--base",
-                &self.fields[1],
-                "--no-open",
-            ]);
+            ensure!(self.fields[0] != "main", "main 保留给项目主窗口");
+            if let Some(existing) = self.existing.take() {
+                ensure!(existing.confirmed, "操作已取消");
+                let expected = serde_json::to_string(&(
+                    &existing.common,
+                    &existing.branches[existing.selected],
+                ))?;
+                command.args([
+                    "new",
+                    project,
+                    &self.fields[0],
+                    "--expected-branch",
+                    &expected,
+                ]);
+            } else {
+                command.args(["new", project, &self.fields[0]]);
+                let entry = registry::entry(registry, project)?;
+                let path = registry::expand(&entry.path)?;
+                let repository = crate::config::Project::discover_at(&path, registry)?;
+                if !repository.state()?.contains_key(&self.fields[0]) {
+                    let branches =
+                        crate::existing_branches(&repository.config()?, &self.fields[0])?;
+                    if !branches.is_empty() {
+                        self.existing = Some(ExistingBranch {
+                            branches,
+                            common: repository.common,
+                            selected: 0,
+                            confirmed: false,
+                        });
+                        self.error = None;
+                        return Ok(());
+                    }
+                }
+            }
+            command.args(["--base", &self.fields[1], "--no-open"]);
         } else {
             crate::config::name(&self.fields[1])?;
             command.args([

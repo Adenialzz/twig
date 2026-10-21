@@ -880,6 +880,23 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         );
         return;
     }
+    if let Some(existing) = &form.existing {
+        let border = block(" 使用已有分支 ".into(), true);
+        let inner = border.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(border, area);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "分支 {} 已存在，是否使用它创建任务？\n保留已有提交，忽略起点分支；远端来源建立跟踪。\n↑↓ 选择来源（{}/{}）\n{}取消    {}使用分支\nTab / ←→ 切换 · Enter 确认 · Esc 返回",
+                safe(existing.branches[existing.selected].label()),
+                existing.selected + 1, existing.branches.len(),
+                if existing.confirmed { "  " } else { "› " },
+                if existing.confirmed { "› " } else { "  " },
+            )).wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
     let border = block(
         if form.project.is_some() {
             " 新建任务 "
