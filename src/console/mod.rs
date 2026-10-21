@@ -1,3 +1,4 @@
+use twig_cli::notification::{PickerAction, UnreadPicker};
 mod data;
 pub(crate) mod form;
 mod notifications;
@@ -5,7 +6,7 @@ pub(crate) mod query;
 mod selection;
 mod ui;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
@@ -448,62 +449,110 @@ pub struct TerminalTarget {
     pub window: String,
 }
 
+fn notification_target(
+    app: &mut App,
+    registry: &std::path::Path,
+    notice: &twig_cli::notification::CompletionNotice,
+) -> Result<TerminalTarget> {
+    let path = app
+        .snapshot
+        .repos
+        .iter()
+        .find(|repo| repo.name == notice.project)
+        .and_then(|repo| repo.tasks.iter().find(|task| task.name == notice.task))
+        .map(|task| task.path.clone())
+        .context("通知对应的项目或任务已不可用")?;
+    let (session, window) = data::prepare_terminal(registry, &notice.project, &notice.task)?;
+    app.project = Some(notice.project.clone());
+    app.task = Some(path);
+    app.filters = Default::default();
+    app.detail = false;
+    app.history = false;
+    app.scroll = 0;
+    app.located = true;
+    Ok(TerminalTarget {
+        project: notice.project.clone(),
+        session,
+        window,
+    })
+}
+
 fn open_terminal(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     worker: &Worker,
-    target: TerminalTarget,
+    mut target: TerminalTarget,
+    registry: &std::path::Path,
+    mut jump: Option<twig_cli::notification::CompletionNotice>,
 ) -> Result<()> {
-    let initial_task = app.task.clone();
-    let result =
-        twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
-            for snapshot in worker.updates.try_iter() {
-                app.snapshot = snapshot;
-            }
-            let viewed = app
-                .snapshot
-                .repos
-                .iter()
-                .find(|r| r.name == target.project)
-                .and_then(|r| r.tasks.iter().find(|t| t.name == task))
-                .map(|t| t.path.clone())
-                .or_else(|| {
-                    (window == target.window)
-                        .then(|| initial_task.clone())
-                        .flatten()
-                });
-            app.receive_notifications(
-                worker,
-                viewed
-                    .as_deref()
-                    .map(|path| (target.project.as_str(), path)),
-            );
-            if let Some(path) = viewed {
-                app.notifications.read(&target.project, &path);
-            }
-            let summary = data::summary(app.snapshot.threads.iter());
-            let text = format!(
-                "{} · 全局 Codex {}",
-                target.project,
-                if app.snapshot.codex_error.is_some() {
-                    "连接异常"
-                } else if app
-                    .snapshot
-                    .codex_checked
-                    .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
-                {
-                    "状态过期"
-                } else {
-                    &summary
+    let result = loop {
+        let initial_task = app.task.clone();
+        let result =
+            twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
+                if let Some(notice) = jump.take() {
+                    app.notifications.dismiss(&notice);
                 }
-            );
-            twig_cli::workbench::Status {
-                text,
-                notification: app.notifications.current().cloned(),
-            }
-        });
+                for snapshot in worker.updates.try_iter() {
+                    app.snapshot = snapshot;
+                }
+                let viewed = app
+                    .snapshot
+                    .repos
+                    .iter()
+                    .find(|r| r.name == target.project)
+                    .and_then(|r| r.tasks.iter().find(|t| t.name == task))
+                    .map(|t| t.path.clone())
+                    .or_else(|| {
+                        (window == target.window)
+                            .then(|| initial_task.clone())
+                            .flatten()
+                    });
+                app.receive_notifications(
+                    worker,
+                    viewed
+                        .as_deref()
+                        .map(|path| (target.project.as_str(), path)),
+                );
+                if let Some(path) = viewed {
+                    app.notifications.read(&target.project, &path);
+                }
+                let summary = data::summary(app.snapshot.threads.iter());
+                let text = format!(
+                    "{} · 全局 Codex {}",
+                    target.project,
+                    if app.snapshot.codex_error.is_some() {
+                        "连接异常"
+                    } else if app
+                        .snapshot
+                        .codex_checked
+                        .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
+                    {
+                        "状态过期"
+                    } else {
+                        &summary
+                    }
+                );
+                twig_cli::workbench::Status {
+                    text,
+                    notification: app.notifications.current().cloned(),
+                    unread: app.notifications.tasks(),
+                }
+            });
+        match result {
+            Ok(Some(notice)) => match notification_target(app, registry, &notice) {
+                Ok(next) => {
+                    target = next;
+                    jump = Some(notice);
+                }
+                Err(error) => break Err(error),
+            },
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        }
+    };
     app.refresh += 1;
     app.reconcile();
+    app.focus = 0;
     app.message = result
         .err()
         .map(|error| format!("终端已返回导航：{error:#}"));
@@ -546,10 +595,11 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
     }
     worker.requests.send(app.request())?;
     if let Some(target) = initial {
-        open_terminal(&mut app, &mut terminal, &worker, target)?;
+        open_terminal(&mut app, &mut terminal, &worker, target, &registry, None)?;
         worker.requests.send(app.request())?;
     }
     let mut selection: Option<selection::Selection> = None;
+    let mut unread_picker: Option<UnreadPicker> = None;
     let mut copy_notice: Option<twig_cli::clipboard::Notice> = None;
     loop {
         if let Some(form) = &mut app.form {
@@ -583,6 +633,10 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             worker.requests.send(app.request())?;
         }
         app.receive_notifications(&worker, None);
+        let unread_tasks = app.notifications.tasks();
+        if let Some(picker) = &mut unread_picker {
+            picker.sync(&unread_tasks);
+        }
         if copy_notice
             .as_ref()
             .is_some_and(twig_cli::clipboard::Notice::expired)
@@ -610,11 +664,38 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             if let Some(notice) = &copy_notice {
                 notice.draw(frame);
             }
+            if let Some(picker) = &unread_picker {
+                picker.draw(frame, &unread_tasks);
+            }
         })?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
         let event = event::read()?;
+        if let Some(picker) = &mut unread_picker {
+            if let Event::Key(key) = event {
+                match picker.key(key, &unread_tasks) {
+                    PickerAction::Stay => {}
+                    PickerAction::Close => unread_picker = None,
+                    PickerAction::Open(notice) => {
+                        unread_picker = None;
+                        match notification_target(&mut app, &registry, &notice) {
+                            Ok(target) => open_terminal(
+                                &mut app,
+                                &mut terminal,
+                                &worker,
+                                target,
+                                &registry,
+                                Some(notice),
+                            )?,
+                            Err(error) => app.message = Some(format!("跳转失败：{error:#}")),
+                        }
+                        worker.requests.send(app.request())?;
+                    }
+                }
+            }
+            continue;
+        }
         match event {
             Event::Resize(_, _) => {
                 selection = None;
@@ -765,7 +846,24 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
         }
         if app.pane_prefix {
             app.pane_prefix = false;
-            if let KeyCode::Char(direction) = key.code {
+            if key.code == KeyCode::Char('u') {
+                unread_picker = Some(UnreadPicker::default());
+                selection = None;
+            } else if key.code == KeyCode::Char('f') {
+                if let Some(notice) = app.notifications.current().cloned() {
+                    match notification_target(&mut app, &registry, &notice) {
+                        Ok(target) => open_terminal(
+                            &mut app,
+                            &mut terminal,
+                            &worker,
+                            target,
+                            &registry,
+                            Some(notice),
+                        )?,
+                        Err(error) => app.message = Some(format!("跳转失败：{error:#}")),
+                    }
+                }
+            } else if let KeyCode::Char(direction) = key.code {
                 app.focus = match (app.focus, direction.to_ascii_lowercase()) {
                     (_, 'h') => 0,
                     (0, 'l') => 1,
@@ -887,6 +985,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                                 session,
                                 window,
                             },
+                            &registry,
+                            None,
                         )?,
                         Err(error) => app.message = Some(format!("进入失败：{error:#}")),
                     }

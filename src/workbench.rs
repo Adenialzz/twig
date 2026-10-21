@@ -1,5 +1,6 @@
 //! Console 的 tmux Control Mode 终端视图；tmux 保存唯一的终端运行状态。
 use crate::clipboard;
+use crate::notification::{PickerAction, UnreadPicker, UnreadTask};
 mod selection;
 use alacritty_terminal::{
     Term,
@@ -582,7 +583,7 @@ fn draw(
     }
     let active = panes.iter().find(|p| p.active);
     let label = if prefix {
-        "Ctrl-W: d 返回导航 | s 左右分屏 | v 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 切 Pane | Alt-h/j/k/l 调比例 | Esc 取消".to_string()
+        "Ctrl-W: d 返回导航 | f 跳转完成任务 | u 未读任务 | s 左右分屏 | v 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 切 Pane | Alt-h/j/k/l 调比例 | Esc 取消".to_string()
     } else {
         format!(
             "Ctrl-W d 导航 · Ctrl-W ? 帮助 | {} | {status} | 拖选即复制 · Esc 清除 | Shift-PgUp/PgDn 历史",
@@ -700,14 +701,17 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
         &mut |_, _| Status {
             text: "twig 实验工作台".into(),
             notification: None,
+            unread: Vec::new(),
         },
     )
+    .map(|_| ())
 }
 
 #[derive(Default, PartialEq, Eq)]
 pub struct Status {
     pub text: String,
     pub notification: Option<crate::notification::CompletionNotice>,
+    pub unread: Vec<UnreadTask>,
 }
 
 /// 借用 Console 的终端，不退出 alternate screen，不启动原生 tmux 界面。
@@ -716,7 +720,7 @@ pub fn run(
     session: String,
     window: &str,
     mut status: impl FnMut(&str, &str) -> Status,
-) -> Result<()> {
+) -> Result<Option<crate::notification::CompletionNotice>> {
     // 防止把正在运行本前端的 Pane 捕获回来，形成递归显示和输入。
     if let Ok(pane) = std::env::var("TMUX_PANE") {
         let output = Command::new("tmux")
@@ -739,9 +743,9 @@ pub fn run(
         &mut status,
     );
     let restore = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
-    result?;
+    let outcome = result?;
     restore?;
-    Ok(())
+    Ok(outcome)
 }
 
 fn run_inner(
@@ -749,7 +753,7 @@ fn run_inner(
     args: Args,
     window: Option<&str>,
     status: &mut impl FnMut(&str, &str) -> Status,
-) -> Result<()> {
+) -> Result<Option<crate::notification::CompletionNotice>> {
     let mut client = Client::connect(&args)?;
     if let Some(window) = window {
         ensure!(
@@ -769,6 +773,7 @@ fn run_inner(
     let mut window_name =
         client.command("display-message -p '#{window_id}\t#{@twig-feature}\t#{window_name}'")?;
     let mut prefix = false;
+    let mut unread_picker: Option<UnreadPicker> = None;
     let mut drag: Option<Drag> = None;
     let mut selection: Option<Selection> = None;
     let mut label = Status::default();
@@ -791,7 +796,7 @@ fn run_inner(
                     pending.insert(id.to_owned());
                 }
             } else if event.starts_with(b"%exit") {
-                return Ok(());
+                return Ok(None);
             } else if [
                 b"%layout-change".as_slice(),
                 b"%window-pane-changed",
@@ -821,6 +826,9 @@ fn run_inner(
         if next_label != label {
             label = next_label;
             dirty = true;
+        }
+        if let Some(picker) = &mut unread_picker {
+            picker.sync(&label.unread);
         }
         if refreshed.elapsed() >= Duration::from_millis(33) && !pending.is_empty() {
             for pane in &mut panes {
@@ -858,6 +866,9 @@ fn run_inner(
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
                 }
+                if let Some(picker) = &unread_picker {
+                    picker.draw(frame, &label.unread);
+                }
             })?;
             dirty = false;
         }
@@ -868,6 +879,18 @@ fn run_inner(
         let input = event::read()?;
         if matches!(input, Event::Key(_)) {
             notice.clear();
+        }
+        if let Some(picker) = &mut unread_picker {
+            if let Event::Key(key) = input {
+                match picker.key(key, &label.unread) {
+                    PickerAction::Stay => {}
+                    PickerAction::Close => unread_picker = None,
+                    PickerAction::Open(notice) => return Ok(Some(notice)),
+                }
+            }
+            if !matches!(input, Event::Resize(..)) {
+                continue;
+            }
         }
         match input {
             Event::Resize(width, height) => {
@@ -964,7 +987,15 @@ fn run_inner(
                 if prefix {
                     prefix = false;
                     let command = match key.code {
-                        KeyCode::Char('d') => return Ok(()),
+                        KeyCode::Char('d') => return Ok(None),
+                        KeyCode::Char('u') => {
+                            unread_picker = Some(UnreadPicker::default());
+                            drag = None;
+                            None
+                        }
+                        KeyCode::Char('f') if label.notification.is_some() => {
+                            return Ok(label.notification);
+                        }
                         KeyCode::Char('?') => {
                             prefix = true;
                             None

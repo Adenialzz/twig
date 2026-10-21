@@ -416,8 +416,8 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.text.clear();
         p.send(b"\x17d");
         p.wait("任务 / ");
-        // 返回后保留任务区焦点和选择，可以再次进入同一 Shell。
-        p.send(b"\r");
+        // 返回后聚焦项目区，Tab 保留任务选择，可以再次进入同一 Shell。
+        p.send(b"\t\r");
         p.wait("Ctrl-W d");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
@@ -477,7 +477,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
-    p.send(b"\r");
+    p.send(b"\t\r");
     p.wait("Ctrl-W d");
     // 仅断开专用测试 server 的 Control Mode 客户端；Pane 仍在。
     let clients = mux(&["list-clients", "-F", "#{client_name}"]);
@@ -519,7 +519,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("任务 / ");
     p.text.clear();
     p.bytes.clear();
-    p.send(b"\x1b[Z/demo\r\rG\r");
+    p.send(b"/demo\r\rG\r");
     p.wait("Ctrl-W d");
     p.send(b"printf 'TASK_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
@@ -618,7 +618,7 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         p.wait("更多");
         p.text.clear();
         p.bytes.clear();
-        p.send(b"\r");
+        p.send(b"\t\r");
         p.wait("Ctrl-W d");
         p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("REENTER_DIR:{}", target.display()));
@@ -910,7 +910,26 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
 }
 
 #[test]
-fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
+fn codex_completion_shortcut_from_workbench() {
+    completion_shortcut(false, false);
+}
+
+#[test]
+fn codex_completion_shortcut_from_navigation() {
+    completion_shortcut(true, false);
+}
+
+#[test]
+fn unread_picker_from_workbench() {
+    completion_shortcut(false, true);
+}
+
+#[test]
+fn unread_picker_from_navigation() {
+    completion_shortcut(true, true);
+}
+
+fn completion_shortcut(from_navigation: bool, use_picker: bool) {
     use serde_json::{Value, json};
     use std::{
         os::unix::net::UnixListener,
@@ -921,6 +940,18 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
     };
     let f = Fixture::new();
     f.init();
+    let other = f.temp.path().join("other");
+    assert!(
+        Command::new("git")
+            .args(["clone", "--local"])
+            .arg(&f.repo)
+            .arg(&other)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    f.twig(&["add", "other", "--path", other.to_str().unwrap()]);
     let sock = f.temp.path().join("notify.sock");
     let listener = UnixListener::bind(&sock).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -1029,27 +1060,49 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
     let mut p = f.terminal(false);
     p.wait("auth");
     wait_phase(0);
-    p.send(b"\rgg\r");
+    p.send(b"/other\r\r\r");
     p.wait("Ctrl-W d");
     assert!(!p.text.contains("本轮已完成"));
+    if use_picker {
+        p.send(b"\x17u");
+        p.wait("暂无未读任务");
+        p.send(b"jk\x17u");
+        p.send(b"printf 'PICKER_CLOSED_%s\\n' OK\r");
+        p.wait("PICKER_CLOSED_OK");
+    }
     phase.store(1, Ordering::Relaxed);
     wait_phase(1);
     phase.store(2, Ordering::Relaxed);
     p.wait("Codex 本轮已完成");
-    p.wait("返回 Console 查看任务");
+    p.wait("Ctrl-W f 跳转");
     p.resize(80, 30);
     p.send(b"printf 'NOTIFY_INPUT_%s\\n' OK\r");
     p.wait("NOTIFY_INPUT_OK");
     p.resize(140, 36);
-    p.send(b"\x17d");
-    p.wait("未读 1");
+    if from_navigation {
+        p.send(b"\x17d");
+        p.wait("任务 / ");
+    }
     p.bytes.clear();
     p.text.clear();
-    // 重新进入 main，再用工作台快捷键切到 auth；以实际窗口清除未读。
-    p.send(b"\r");
-    p.send(b"printf 'REENTERED_%s\\n' MAIN\r");
-    p.wait("REENTERED_MAIN");
-    p.send(b"\x17n");
+    if use_picker {
+        // 卡片到期后仍能选择未读；取消不会清除记录。
+        thread::sleep(Duration::from_secs(9));
+        p.send(b"\x17u");
+        p.wait("demo / auth / 未读 1");
+        p.send(b"\x1b");
+        // 独立 Esc 与下一个快捷键分开，避免终端编码为 Alt-Ctrl-W。
+        thread::sleep(Duration::from_millis(200));
+        p.bytes.clear();
+        p.text.clear();
+        p.send(b"\x17u");
+        p.wait("demo / auth / 未读 1");
+        p.send(b"jk\x1b[B\x1b[A\r");
+    } else {
+        p.send(b"\x17f");
+    }
+    // 无提示时快捷键不退出终端，也不向 Shell 输入 f。
+    p.send(b"\x17f");
     p.send(b"printf 'WINDOW_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
         "WINDOW_DIR:{}",
@@ -1058,10 +1111,16 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
             .join("auth")
             .display()
     ));
+    p.bytes.clear();
+    p.text.clear();
+    p.resize(138, 36);
+    p.send(b"printf 'DISMISSED_%s\\n' OK\r");
+    p.wait("DISMISSED_OK");
+    assert!(!p.text.contains("Codex 本轮已完成"), "{}", p.text);
     phase.store(3, Ordering::Relaxed);
     wait_phase(3);
     // 当前实际打开的是 auth：第二轮应静默，不排入下一张卡片。
-    // 等第一张卡片到期后强制重绘，检查没有第二张卡片残留。
+    // 强制重绘，确认成功跳转后旧提示已关闭，静默轮次也没有提示。
     thread::sleep(Duration::from_secs(9));
     p.bytes.clear();
     p.text.clear();
@@ -1073,7 +1132,7 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
     p.text.clear();
     p.send(b"\x17d");
     p.wait("任务 / ");
-    assert!(!p.text.contains("未读"), "{}", p.text);
+    assert!(!p.text.contains("[未读"), "{}", p.text);
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     drop(p);
