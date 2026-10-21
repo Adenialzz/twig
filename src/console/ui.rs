@@ -73,14 +73,52 @@ fn list(
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(widget, area, &mut state);
 }
-pub fn draw(frame: &mut Frame, app: &App) {
-    draw_content(frame, app);
-    if let Some(notice) = app.notifications.current() {
-        twig_cli::notification::draw(frame, notice);
+fn panels(area: Rect) -> [Rect; 3] {
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(6),
+        Constraint::Length(3),
+    ])
+    .split(area);
+    if area.width < 100 {
+        return [rows[1]; 3];
     }
+    let columns =
+        Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)]).split(rows[1]);
+    let right = Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(columns[1]);
+    [columns[0], right[0], right[1]]
 }
 
-fn draw_content(frame: &mut Frame, app: &App) {
+pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
+    if area.width < 38 || area.height < 12 || app.form.is_some() || app.help || app.searching {
+        return Vec::new();
+    }
+    let areas = panels(area);
+    let mut regions = Vec::new();
+    for (index, panel) in areas.into_iter().enumerate() {
+        if area.width < 100 && index != app.focus {
+            continue;
+        }
+        if index == 2 {
+            regions.extend(
+                Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)])
+                    .split(panel)
+                    .iter()
+                    .copied(),
+            );
+        } else {
+            regions.push(panel);
+        }
+    }
+    regions
+        .into_iter()
+        .map(|area| area.inner(ratatui::layout::Margin::new(1, 1)))
+        .filter(|area| area.width > 0 && area.height > 0)
+        .collect()
+}
+
+pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     if area.width < 38 || area.height < 12 {
         frame.render_widget(Paragraph::new("终端过小，请扩大到至少 38×12；q 退出"), area);
@@ -125,13 +163,10 @@ fn draw_content(frame: &mut Frame, app: &App) {
         rows[0],
     );
     if area.width >= 100 {
-        let columns = Layout::horizontal([Constraint::Percentage(28), Constraint::Percentage(72)])
-            .split(rows[1]);
-        projects(frame, columns[0], app);
-        let right = Layout::vertical([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(columns[1]);
-        tasks(frame, right[0], app);
-        sessions(frame, right[1], app);
+        let areas = panels(area);
+        projects(frame, areas[0], app);
+        tasks(frame, areas[1], app);
+        sessions(frame, areas[2], app);
     } else {
         match app.focus {
             0 => projects(frame, rows[1], app),

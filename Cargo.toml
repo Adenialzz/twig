@@ -23,3 +23,5 @@ tungstenite = "0.26"
 libc = "0.2"
 
 alacritty_terminal = "0.26.0"
+arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
+base64 = "0.22"
