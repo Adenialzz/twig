@@ -52,6 +52,6 @@ Zsh 补全在 compinit 之后加载 `source <(COMPLETE=zsh twig)`，详见 [补�
 
 Console、`new` 和 `open` 统一使用 Control Mode 终端工作台；`Ctrl-W d` 返回 Console，`q` 退出，后台进程保留。工作台操作见 [Console 手册](docs/console.md)，独立验收入口和当前限制见 [实验说明](examples/README.md)。
 
-Twig 打开期间会提示 Codex 新完成的轮次：导航和终端工作台共用右上角浮动卡片（每条 8 秒），正在查看的任务完成时静默，其他任务保留未读标记，进入对应任务终端后清除。卡片显示时按 `Ctrl-W f` 可直接跳到对应任务，支持跨项目。通知不持久化，详见 [Console 手册](docs/console.md)。
+Twig 打开期间会提示 Codex 新完成的轮次：导航和终端工作台共用右上角浮动卡片（每条 8 秒），正在查看的任务完成时静默，其他任务保留未读标记，进入对应任务终端后清除。卡片显示时按 `Ctrl-W f` 可直接跳到对应任务，支持跨项目。错过卡片后，可按 `Ctrl-W u` 打开未读任务列表，用 j/k 选择、Enter 进入。通知不持久化，详见 [Console 手册](docs/console.md)。
 
 Console 导航页的列表、详情和终端工作台均支持鼠标拖选文字，松开自动复制，右下角显示字符数；选区期间画面固定，后台程序继续运行。`Esc` 清除选区，`Ctrl-C` 仍交给程序。本机使用系统剪贴板，SSH 通过终端请求复制，详见 [Console 手册](docs/console.md)。

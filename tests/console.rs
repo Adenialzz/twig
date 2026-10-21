@@ -911,15 +911,25 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
 
 #[test]
 fn codex_completion_shortcut_from_workbench() {
-    completion_shortcut(false);
+    completion_shortcut(false, false);
 }
 
 #[test]
 fn codex_completion_shortcut_from_navigation() {
-    completion_shortcut(true);
+    completion_shortcut(true, false);
 }
 
-fn completion_shortcut(from_navigation: bool) {
+#[test]
+fn unread_picker_from_workbench() {
+    completion_shortcut(false, true);
+}
+
+#[test]
+fn unread_picker_from_navigation() {
+    completion_shortcut(true, true);
+}
+
+fn completion_shortcut(from_navigation: bool, use_picker: bool) {
     use serde_json::{Value, json};
     use std::{
         os::unix::net::UnixListener,
@@ -1053,6 +1063,13 @@ fn completion_shortcut(from_navigation: bool) {
     p.send(b"/other\r\r\r");
     p.wait("Ctrl-W d");
     assert!(!p.text.contains("本轮已完成"));
+    if use_picker {
+        p.send(b"\x17u");
+        p.wait("暂无未读任务");
+        p.send(b"jk\x17u");
+        p.send(b"printf 'PICKER_CLOSED_%s\\n' OK\r");
+        p.wait("PICKER_CLOSED_OK");
+    }
     phase.store(1, Ordering::Relaxed);
     wait_phase(1);
     phase.store(2, Ordering::Relaxed);
@@ -1068,7 +1085,22 @@ fn completion_shortcut(from_navigation: bool) {
     }
     p.bytes.clear();
     p.text.clear();
-    p.send(b"\x17f");
+    if use_picker {
+        // 卡片到期后仍能选择未读；取消不会清除记录。
+        thread::sleep(Duration::from_secs(9));
+        p.send(b"\x17u");
+        p.wait("demo / auth / 未读 1");
+        p.send(b"\x1b");
+        // 独立 Esc 与下一个快捷键分开，避免终端编码为 Alt-Ctrl-W。
+        thread::sleep(Duration::from_millis(200));
+        p.bytes.clear();
+        p.text.clear();
+        p.send(b"\x17u");
+        p.wait("demo / auth / 未读 1");
+        p.send(b"jk\x1b[B\x1b[A\r");
+    } else {
+        p.send(b"\x17f");
+    }
     // 无提示时快捷键不退出终端，也不向 Shell 输入 f。
     p.send(b"\x17f");
     p.send(b"printf 'WINDOW_DIR:%s\\n' \"$PWD\"\r");
@@ -1100,7 +1132,7 @@ fn completion_shortcut(from_navigation: bool) {
     p.text.clear();
     p.send(b"\x17d");
     p.wait("任务 / ");
-    assert!(!p.text.contains("未读"), "{}", p.text);
+    assert!(!p.text.contains("[未读"), "{}", p.text);
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     drop(p);

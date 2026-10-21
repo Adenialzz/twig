@@ -1,3 +1,4 @@
+use twig_cli::notification::{PickerAction, UnreadPicker};
 mod data;
 pub(crate) mod form;
 mod notifications;
@@ -534,6 +535,7 @@ fn open_terminal(
                 twig_cli::workbench::Status {
                     text,
                     notification: app.notifications.current().cloned(),
+                    unread: app.notifications.tasks(),
                 }
             });
         match result {
@@ -597,6 +599,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
         worker.requests.send(app.request())?;
     }
     let mut selection: Option<selection::Selection> = None;
+    let mut unread_picker: Option<UnreadPicker> = None;
     let mut copy_notice: Option<twig_cli::clipboard::Notice> = None;
     loop {
         if let Some(form) = &mut app.form {
@@ -630,6 +633,10 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             worker.requests.send(app.request())?;
         }
         app.receive_notifications(&worker, None);
+        let unread_tasks = app.notifications.tasks();
+        if let Some(picker) = &mut unread_picker {
+            picker.sync(&unread_tasks);
+        }
         if copy_notice
             .as_ref()
             .is_some_and(twig_cli::clipboard::Notice::expired)
@@ -657,11 +664,38 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             if let Some(notice) = &copy_notice {
                 notice.draw(frame);
             }
+            if let Some(picker) = &unread_picker {
+                picker.draw(frame, &unread_tasks);
+            }
         })?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
         let event = event::read()?;
+        if let Some(picker) = &mut unread_picker {
+            if let Event::Key(key) = event {
+                match picker.key(key, &unread_tasks) {
+                    PickerAction::Stay => {}
+                    PickerAction::Close => unread_picker = None,
+                    PickerAction::Open(notice) => {
+                        unread_picker = None;
+                        match notification_target(&mut app, &registry, &notice) {
+                            Ok(target) => open_terminal(
+                                &mut app,
+                                &mut terminal,
+                                &worker,
+                                target,
+                                &registry,
+                                Some(notice),
+                            )?,
+                            Err(error) => app.message = Some(format!("跳转失败：{error:#}")),
+                        }
+                        worker.requests.send(app.request())?;
+                    }
+                }
+            }
+            continue;
+        }
         match event {
             Event::Resize(_, _) => {
                 selection = None;
@@ -812,7 +846,10 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
         }
         if app.pane_prefix {
             app.pane_prefix = false;
-            if key.code == KeyCode::Char('f') {
+            if key.code == KeyCode::Char('u') {
+                unread_picker = Some(UnreadPicker::default());
+                selection = None;
+            } else if key.code == KeyCode::Char('f') {
                 if let Some(notice) = app.notifications.current().cloned() {
                     match notification_target(&mut app, &registry, &notice) {
                         Ok(target) => open_terminal(

@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use twig_cli::notification::CompletionNotice;
+use twig_cli::notification::{CompletionNotice, UnreadTask};
 
 pub struct Completion {
     pub project: String,
@@ -11,11 +11,17 @@ pub struct Completion {
     pub task: String,
 }
 
+struct Unread {
+    task: UnreadTask,
+    latest: u64,
+}
+
 #[derive(Default)]
 pub struct Notifications {
     queue: VecDeque<CompletionNotice>,
     current: Option<(CompletionNotice, Instant)>,
-    unread: BTreeMap<(String, PathBuf), usize>,
+    unread: BTreeMap<(String, PathBuf), Unread>,
+    sequence: u64,
 }
 
 impl Notifications {
@@ -23,14 +29,24 @@ impl Notifications {
         if viewed.is_some_and(|(project, path)| project == event.project && path == event.path) {
             return;
         }
-        *self
-            .unread
-            .entry((event.project.clone(), event.path))
-            .or_default() += 1;
-        self.queue.push_back(CompletionNotice {
-            project: event.project,
+        self.sequence += 1;
+        let notice = CompletionNotice {
+            project: event.project.clone(),
             task: event.task,
-        });
+        };
+        let unread = self
+            .unread
+            .entry((event.project, event.path))
+            .or_insert_with(|| Unread {
+                task: UnreadTask {
+                    notice: notice.clone(),
+                    count: 0,
+                },
+                latest: self.sequence,
+            });
+        unread.task.count += 1;
+        unread.latest = self.sequence;
+        self.queue.push_back(notice);
     }
 
     pub fn tick(&mut self, now: Instant) {
@@ -61,11 +77,17 @@ impl Notifications {
         self.unread.remove(&(project.to_owned(), path.to_owned()));
     }
 
+    pub fn tasks(&self) -> Vec<UnreadTask> {
+        let mut unread = self.unread.values().collect::<Vec<_>>();
+        unread.sort_by_key(|item| std::cmp::Reverse(item.latest));
+        unread.into_iter().map(|item| item.task.clone()).collect()
+    }
+
     pub fn count(&self, project: &str, path: Option<&Path>) -> usize {
         self.unread
             .iter()
             .filter(|((p, task), _)| p == project && path.is_none_or(|path| path == task))
-            .map(|(_, count)| count)
+            .map(|(_, unread)| unread.task.count)
             .sum()
     }
 }
@@ -106,6 +128,32 @@ mod tests {
         notices.tick(now + Duration::from_secs(24));
         assert!(notices.current().is_none());
         assert_eq!(notices.count("a", Some(Path::new("/a/two"))), 1);
+    }
+
+    #[test]
+    fn unread_tasks_merge_sort_and_survive_card_expiry() {
+        let mut notices = Notifications::default();
+        for (project, task) in [("a", "one"), ("b", "two"), ("a", "one")] {
+            notices.receive(
+                Completion {
+                    project: project.into(),
+                    path: format!("/{project}/{task}").into(),
+                    task: task.into(),
+                },
+                None,
+            );
+        }
+        let tasks = notices.tasks();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].notice.task, "one");
+        assert_eq!(tasks[0].count, 2);
+        for i in 0..4 {
+            notices.tick(Instant::now() + Duration::from_secs(i * 8));
+        }
+        assert!(notices.current().is_none());
+        assert_eq!(notices.tasks(), tasks);
+        notices.read("a", Path::new("/a/one"));
+        assert_eq!(notices.tasks(), tasks[1..]);
     }
 
     #[test]
