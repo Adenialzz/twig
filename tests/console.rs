@@ -608,7 +608,14 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         p.text.clear();
         p.bytes.clear();
         p.send(b"\x17d");
-        p.wait(&format!("目录：{}", target.display()));
+        p.wait("工作目录");
+        p.wait(&target.display().to_string());
+        p.send(b"i");
+        p.wait("收起");
+        p.text.clear();
+        p.bytes.clear();
+        p.send(b"i");
+        p.wait("更多");
         p.text.clear();
         p.bytes.clear();
         p.send(b"\r");
