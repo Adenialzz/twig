@@ -416,8 +416,8 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.text.clear();
         p.send(b"\x17d");
         p.wait("任务 / ");
-        // 返回后保留任务区焦点和选择，可以再次进入同一 Shell。
-        p.send(b"\r");
+        // 返回后聚焦项目区，Tab 保留任务选择，可以再次进入同一 Shell。
+        p.send(b"\t\r");
         p.wait("Ctrl-W d");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
@@ -477,7 +477,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
-    p.send(b"\r");
+    p.send(b"\t\r");
     p.wait("Ctrl-W d");
     // 仅断开专用测试 server 的 Control Mode 客户端；Pane 仍在。
     let clients = mux(&["list-clients", "-F", "#{client_name}"]);
@@ -519,7 +519,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("任务 / ");
     p.text.clear();
     p.bytes.clear();
-    p.send(b"\x1b[Z/demo\r\rG\r");
+    p.send(b"/demo\r\rG\r");
     p.wait("Ctrl-W d");
     p.send(b"printf 'TASK_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
@@ -618,7 +618,7 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         p.wait("更多");
         p.text.clear();
         p.bytes.clear();
-        p.send(b"\r");
+        p.send(b"\t\r");
         p.wait("Ctrl-W d");
         p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("REENTER_DIR:{}", target.display()));
@@ -1046,7 +1046,7 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
     p.bytes.clear();
     p.text.clear();
     // 重新进入 main，再用工作台快捷键切到 auth；以实际窗口清除未读。
-    p.send(b"\r");
+    p.send(b"\t\r");
     p.send(b"printf 'REENTERED_%s\\n' MAIN\r");
     p.wait("REENTERED_MAIN");
     p.send(b"\x17n");

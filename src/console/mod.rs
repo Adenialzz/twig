@@ -504,6 +504,7 @@ fn open_terminal(
         });
     app.refresh += 1;
     app.reconcile();
+    app.focus = 0;
     app.message = result
         .err()
         .map(|error| format!("终端已返回导航：{error:#}"));
