@@ -40,6 +40,7 @@ pub(super) struct App {
     page: u64,
     refresh: u64,
     detail: bool,
+    metadata: bool,
     scroll: u16,
     message: Option<String>,
     initial_cwd: PathBuf,
@@ -84,6 +85,7 @@ impl App {
             page: 0,
             refresh: 0,
             detail: false,
+            metadata: false,
             scroll: 0,
             message: None,
             initial_cwd: cwd,
@@ -808,6 +810,10 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             }
             KeyCode::Char('q') => break,
             KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('i') => {
+                app.metadata = !app.metadata;
+                app.scroll = 0;
+            }
             KeyCode::PageDown => app.scroll = app.scroll.saturating_add(4),
             KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(4),
             KeyCode::Tab => app.focus = (app.focus + 1) % 3,

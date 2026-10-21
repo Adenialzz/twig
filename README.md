@@ -26,7 +26,7 @@ twig open myapp feat/login
 
 仓库须已有提交，默认基础分支为本地 main/master。任务名直接作为分支名。脚本使用 `new --no-open`，仍创建窗口并执行启动配置。
 
-裸 `twig` 或 `twig console` 打开交互控制台，任务区 Enter 在 Twig 内打开终端工作台；`Ctrl-W d` 返回导航，分屏和进程继续由 tmux server 托管。`stop PROJECT NAME` 停止窗口和进程，`rm PROJECT NAME` 安全删除任务，`rm PROJECT` 只取消登记。清理前阅读 [安全清理](docs/cleanup.md)。
+裸 `twig` 或 `twig console` 打开交互控制台：宽屏采用项目、任务、全局 Codex 监控和任务详情的 2×2 布局；左下监控独立刷新，不随选择或搜索改变。任务区 Enter 在 Twig 内打开终端工作台；`Ctrl-W d` 返回导航，分屏和进程继续由 tmux server 托管。`stop PROJECT NAME` 停止窗口和进程，`rm PROJECT NAME` 安全删除任务，`rm PROJECT` 只取消登记。清理前阅读 [安全清理](docs/cleanup.md)。
 
 ## 阅读文档
 
