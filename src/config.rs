@@ -22,6 +22,22 @@ pub struct Feature {
     pub branch: String,
     pub base: String,
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_start: Option<BranchStart>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct BranchStart {
+    pub reference: String,
+    pub commit: String,
+}
+impl BranchStart {
+    pub fn label(&self) -> &str {
+        self.reference
+            .strip_prefix("refs/heads/")
+            .or_else(|| self.reference.strip_prefix("refs/remotes/"))
+            .unwrap_or(&self.reference)
+    }
 }
 
 pub type State = BTreeMap<String, Feature>;

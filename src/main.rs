@@ -12,10 +12,10 @@ mod tmux;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use clap_complete::ArgValueCompleter;
-use config::{Config, Feature, Project, State};
+use config::{BranchStart, Config, Feature, Project, State};
 use git::git;
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
@@ -77,7 +77,7 @@ enum Action {
     },
     /// 创建并进入任务 Shell 窗口；重复执行接续已有环境
     #[command(
-        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-W d 返回 Console；--no-open 仅准备环境。\n只接续自己登记的资源，不接管外部同名分支；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
+        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-W d 返回 Console；--no-open 仅准备环境。\n同名本地分支或远端跟踪分支存在时询问是否使用，默认取消；本地优先，多个 remote 时选择来源，不自动 fetch。非交互环境拒绝。不会接管已有 Worktree；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
     )]
     New {
         /// 已登记的项目别名，不根据当前目录推断
@@ -92,6 +92,9 @@ enum Action {
         /// 不进入窗口；仍创建 Pane 并执行配置的启动命令（不是 dry-run）
         #[arg(long)]
         no_open: bool,
+        /// Console 确认时的仓库、分支与提交快照
+        #[arg(long, hide = true)]
+        expected_branch: Option<String>,
     },
     /// 列出项目；指定项目时列出其任务及实际状态
     #[command(
@@ -245,9 +248,18 @@ fn execute(cli: Cli) -> Result<()> {
             name,
             base,
             no_open,
+            expected_branch,
             project: alias,
         } => {
-            let window = new(&project, &config, &mut state, &alias, &name, base)?;
+            let window = new(
+                &project,
+                &config,
+                &mut state,
+                &alias,
+                &name,
+                base,
+                expected_branch,
+            )?;
             drop(lock); // 工作台交互期间不能持有项目锁。
             if no_open {
                 Ok(())
@@ -468,6 +480,85 @@ fn check_task_parent(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+// 只查询本地引用，不联网；本地同名分支优先。
+fn existing_branches(config: &Config, name: &str) -> Result<Vec<BranchStart>> {
+    if git::exists(&config.main, name)? {
+        for (path, branch) in git::worktrees(&config.main)? {
+            ensure!(
+                branch != name,
+                "分支 {name} 已被其他 Worktree 占用：{}",
+                path.display()
+            );
+        }
+        let reference = format!("refs/heads/{name}");
+        let commit = git(&config.main, &["rev-parse", &reference])?;
+        return Ok(vec![BranchStart { reference, commit }]);
+    }
+    let remotes = git(&config.main, &["remote"])?;
+    let references = git(
+        &config.main,
+        &[
+            "for-each-ref",
+            "--format=%(refname) %(objectname) %(symref)",
+            "refs/remotes/",
+        ],
+    )?;
+    let mut branches = Vec::new();
+    for line in references.lines() {
+        let mut fields = line.split(' ');
+        let reference = fields.next().context("缺少分支引用")?;
+        let commit = fields.next().context("缺少分支提交")?;
+        if fields.next() == Some("")
+            && remotes
+                .lines()
+                .any(|remote| reference == format!("refs/remotes/{remote}/{name}"))
+        {
+            branches.push(BranchStart {
+                reference: reference.into(),
+                commit: commit.into(),
+            });
+        }
+    }
+    Ok(branches)
+}
+
+fn choose_branch(branches: &[BranchStart], base: &Option<String>) -> Result<BranchStart> {
+    ensure!(
+        io::stdin().is_terminal(),
+        "同名分支已存在；请在交互终端或 Console 中确认使用"
+    );
+    let selected = if branches.len() == 1 {
+        0
+    } else {
+        println!("多个远端有同名分支，请选择来源（回车取消）：");
+        for (index, branch) in branches.iter().enumerate() {
+            println!("  {}. {}", index + 1, branch.label());
+        }
+        print!("分支编号：");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        ensure!(!answer.trim().is_empty(), "操作已取消");
+        let number: usize = answer.trim().parse().context("请输入有效的分支编号")?;
+        ensure!(
+            (1..=branches.len()).contains(&number),
+            "请输入有效的分支编号"
+        );
+        number - 1
+    };
+    let branch = &branches[selected];
+    let note = if base.is_some() {
+        "（忽略 --base，保留已有提交）"
+    } else {
+        ""
+    };
+    confirm(
+        &format!("分支 {} 已存在，是否使用它创建任务？{note}", branch.label()),
+        false,
+    )?;
+    Ok(branch.clone())
+}
+
 fn new(
     project: &Project,
     config: &Config,
@@ -475,6 +566,7 @@ fn new(
     alias: &str,
     name: &str,
     base: Option<String>,
+    expected_branch: Option<String>,
 ) -> Result<String> {
     config::task_name(name)?;
     ensure!(name != "main", "main 保留给项目主窗口");
@@ -484,14 +576,31 @@ fn new(
             "任务已存在，不能更改基础分支"
         );
     } else {
-        let base = base.unwrap_or_else(|| config.base.clone());
-        ensure!(git::exists(&config.main, &base)?, "基础分支不存在：{base}");
         let branch = name.to_owned();
         git(&config.main, &["check-ref-format", "--branch", &branch])?;
-        ensure!(
-            !git::exists(&config.main, &branch)?,
-            "分支已存在：{branch}；不会接管外部已有分支"
-        );
+        let branches = existing_branches(config, name)?;
+        let selected = if let Some(expected) = expected_branch {
+            let (common, source): (PathBuf, BranchStart) = serde_json::from_str(&expected)?;
+            ensure!(
+                common == project.common && branches.contains(&source),
+                "分支已变化，请重新确认"
+            );
+            Some(source)
+        } else if branches.is_empty() {
+            None
+        } else {
+            Some(choose_branch(&branches, &base)?)
+        };
+        let base = base.unwrap_or_else(|| config.base.clone());
+        if let Some(source) = &selected {
+            ensure!(
+                existing_branches(config, name)?.contains(source),
+                "分支已变化，请重新确认"
+            );
+        } else {
+            ensure!(git::exists(&config.main, &base)?, "基础分支不存在：{base}");
+        }
+        let remote_start = selected.filter(|source| source.reference.starts_with("refs/remotes/"));
         let path = config.root.join(name);
         check_task_parent(&config.root, &path)?;
         ensure!(
@@ -506,7 +615,15 @@ fn new(
             path.display()
         );
         // 先保存意图，确保外部命令部分成功后仍能通过同名 new 接续。
-        state.insert(name.to_owned(), Feature { branch, base, path });
+        state.insert(
+            name.to_owned(),
+            Feature {
+                branch,
+                base,
+                path,
+                remote_start,
+            },
+        );
         project.save("state.json", state)?;
     }
     let feature = feature(state, name)?;
@@ -517,6 +634,24 @@ fn new(
             git(
                 &config.main,
                 &["worktree", "add", "--", path, &feature.branch],
+            )?;
+        } else if let Some(source) = &feature.remote_start {
+            ensure!(
+                existing_branches(config, name)?.contains(source),
+                "远端跟踪分支已变化；保留任务记录，请检查来源后重试"
+            );
+            git(
+                &config.main,
+                &[
+                    "worktree",
+                    "add",
+                    "--track",
+                    "-b",
+                    &feature.branch,
+                    "--",
+                    path,
+                    &source.reference,
+                ],
             )?;
         } else {
             git(

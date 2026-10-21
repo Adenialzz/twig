@@ -762,6 +762,34 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             if form.busy() {
                 continue;
             }
+            if let Some(existing) = &mut form.existing {
+                match key.code {
+                    KeyCode::Esc => form.existing = None,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.form = None
+                    }
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                        existing.confirmed = !existing.confirmed
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        existing.selected = existing.selected.saturating_sub(1);
+                        existing.confirmed = false;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        existing.selected =
+                            (existing.selected + 1).min(existing.branches.len() - 1);
+                        existing.confirmed = false;
+                    }
+                    KeyCode::Enter if !existing.confirmed => form.existing = None,
+                    KeyCode::Enter => {
+                        if let Err(error) = form.confirm(&registry) {
+                            form.error = Some(format!("{error:#}"));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if let Some(deletion) = &mut form.deletion {
                 match key.code {
                     KeyCode::Esc => app.form = None,

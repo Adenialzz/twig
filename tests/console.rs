@@ -122,6 +122,48 @@ impl Fixture {
         self.twig(&["add", "demo", "--path", self.repo.to_str().unwrap()]);
         self.twig(&["new", "demo", "auth", "--no-open"]);
     }
+    fn remote_branch(&self, name: &str) -> Vec<u8> {
+        self.git(&["checkout", "-b", name]);
+        self.git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "remote work",
+        ]);
+        let commit = Command::new("git")
+            .current_dir(&self.repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout;
+        self.git(&["checkout", "main"]);
+        let remote = self.temp.path().join("remote.git");
+        self.git(&[
+            "clone",
+            "--bare",
+            self.repo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ]);
+        self.git(&["branch", "-D", name]);
+        for remote_name in ["origin", "upstream"] {
+            self.git(&["remote", "add", remote_name, remote.to_str().unwrap()]);
+            self.git(&["fetch", remote_name]);
+            // 创建任务期间任何隐式联网都会失败。
+            self.git(&[
+                "remote",
+                "set-url",
+                remote_name,
+                "/nonexistent/twig-test-remote",
+            ]);
+        }
+        commit
+    }
     fn terminal(&self, slow: bool) -> Pty {
         let mut command = Command::new("sh");
         self.env(&mut command);
@@ -1267,6 +1309,253 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
+fn existing_branch_cli_requires_confirmation_and_preserves_commit() {
+    let f = Fixture::new();
+    f.init();
+    f.git(&["checkout", "-b", "existing"]);
+    f.git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "existing work",
+    ]);
+    let original = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap()
+        .stdout;
+    f.git(&["checkout", "main"]);
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let before = fs::read(&state_path).unwrap();
+    for answer in ["\n", "y\n"] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+        f.env(&mut command);
+        command.arg("--config").arg(&f.registry).args([
+            "new",
+            "demo",
+            "existing",
+            "--base",
+            "missing",
+            "--no-open",
+        ]);
+        let mut p = Pty::spawn(command);
+        p.wait("[y/N]");
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        p.send(answer.as_bytes());
+        let status = p.child.wait().unwrap();
+        assert_eq!(status.success(), answer == "y\n");
+    }
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
+    let path = PathBuf::from(state["existing"]["path"].as_str().unwrap());
+    assert!(path.is_dir());
+    let output = Command::new("git")
+        .current_dir(path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(output.stdout, original);
+}
+
+#[test]
+fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
+    let f = Fixture::new();
+    f.init();
+    f.git(&["branch", "existing"]);
+    let mut p = f.terminal(false);
+    p.wait("主工作目录");
+    p.send(b"\t/new\r");
+    p.wait("新建任务");
+    p.send(b"existing\r");
+    p.wait("使用已有分支");
+    p.send(b"\r");
+    p.bytes.clear();
+    p.text.clear();
+    p.send(b"\r");
+    p.wait("使用已有分支");
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let before = fs::read(&state_path).unwrap();
+    assert!(!String::from_utf8_lossy(&before).contains("existing"));
+    let occupied = f.temp.path().join("occupied");
+    f.git(&["worktree", "add", occupied.to_str().unwrap(), "existing"]);
+    p.send(b"\t\r");
+    p.wait("已被其他 Worktree 占用");
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    f.git(&["worktree", "remove", occupied.to_str().unwrap()]);
+    p.bytes.clear();
+    p.text.clear();
+    p.send(b"\r");
+    p.wait("使用已有分支");
+    p.send(b"\t\r");
+    p.wait("操作成功");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
+    assert_eq!(state["existing"]["branch"], "existing");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+}
+
+#[test]
+fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
+    let f = Fixture::new();
+    f.init();
+    let commit = f.remote_branch("feat/remote");
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let before = fs::read(&state_path).unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+        f.env(&mut command);
+        command.arg("--config").arg(&f.registry).args([
+            "new",
+            "demo",
+            "feat/remote",
+            "--base",
+            "missing",
+            "--no-open",
+        ]);
+        command
+    };
+    let output = command().output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("交互终端"));
+    let mut p = Pty::spawn(command());
+    p.wait("分支编号：");
+    p.send(b"\n");
+    assert!(!p.child.wait().unwrap().success());
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    let mut p = Pty::spawn(command());
+    p.wait("分支编号：");
+    p.send(b"2\n");
+    p.wait("[y/N]");
+    f.git(&["update-ref", "refs/remotes/upstream/feat/remote", "main"]);
+    p.send(b"y\n");
+    p.wait("分支已变化");
+    assert!(!p.child.wait().unwrap().success());
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    f.git(&[
+        "update-ref",
+        "refs/remotes/upstream/feat/remote",
+        std::str::from_utf8(&commit).unwrap().trim(),
+    ]);
+    let mut p = Pty::spawn(command());
+    p.wait("分支编号：");
+    p.send(b"2\n");
+    p.wait("[y/N]");
+    p.send(b"y\n");
+    assert!(p.child.wait().unwrap().success());
+    let head = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "feat/remote"])
+        .output()
+        .unwrap();
+    assert_eq!(head.stdout, commit);
+    let tracking = Command::new("git")
+        .current_dir(&f.repo)
+        .args([
+            "rev-parse",
+            "--symbolic-full-name",
+            "feat/remote@{upstream}",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(tracking.stdout).unwrap().trim(),
+        "refs/remotes/upstream/feat/remote"
+    );
+    f.twig(&["new", "demo", "feat/remote", "--no-open"]);
+}
+
+#[test]
+fn remote_branch_single_source_and_local_precedence() {
+    for local in [false, true] {
+        let f = Fixture::new();
+        f.init();
+        let remote_commit = f.remote_branch("feat/remote");
+        f.git(&["remote", "remove", "origin"]);
+        let expected = if local {
+            f.git(&["branch", "feat/remote", "main"]);
+            Command::new("git")
+                .current_dir(&f.repo)
+                .args(["rev-parse", "main"])
+                .output()
+                .unwrap()
+                .stdout
+        } else {
+            remote_commit
+        };
+        let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+        f.env(&mut command);
+        command
+            .arg("--config")
+            .arg(&f.registry)
+            .args(["new", "demo", "feat/remote", "--no-open"]);
+        let mut p = Pty::spawn(command);
+        p.wait("[y/N]");
+        assert!(!p.text.contains("分支编号"));
+        assert_eq!(p.text.contains("upstream/feat/remote"), !local);
+        p.send(b"y\n");
+        assert!(p.child.wait().unwrap().success());
+        let output = Command::new("git")
+            .current_dir(&f.repo)
+            .args(["rev-parse", "feat/remote"])
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, expected);
+    }
+}
+
+#[test]
+fn remote_branch_console_selects_source_and_resumes_partial_creation() {
+    let f = Fixture::new();
+    f.init();
+    let commit = f.remote_branch("feat/remote");
+    // Git 已创建分支/Worktree 后 hook 失败；重试不得从 main 重建。
+    let hook = f.repo.join(".git/hooks/post-checkout");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut p = f.terminal(false);
+    p.wait("主工作目录");
+    p.send(b"\t/new\r");
+    p.wait("新建任务");
+    p.send(b"feat/remote\r");
+    p.wait("origin/feat/remote");
+    p.send(b"\t");
+    // 切换来源重置为取消，Enter 返回表单。
+    p.send(b"j\r");
+    p.bytes.clear();
+    p.text.clear();
+    p.send(b"\r");
+    p.wait("origin/feat/remote");
+    p.send(b"j");
+    p.wait("upstream/feat/remote");
+    p.send(b"\t\r");
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    // 等待表单展示创建失败，再接续同一任务。
+    p.wait("执行失败");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(
+        state["feat/remote"]["remote_start"]["reference"],
+        "refs/remotes/upstream/feat/remote"
+    );
+    fs::remove_file(hook).unwrap();
+    p.send(b"\r");
+    p.wait("操作成功");
+    let head = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "feat/remote"])
+        .output()
+        .unwrap();
+    assert_eq!(head.stdout, commit);
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
 }
 
 #[test]
