@@ -96,7 +96,7 @@ impl Form {
                 branch,
                 path,
                 expected,
-                delete_branch: false,
+                delete_branch: true,
                 delete_ignored: true,
                 ignored,
                 confirm: false,
@@ -172,6 +172,8 @@ impl Form {
             ]);
             if !deletion.delete_branch {
                 command.arg("--keep-branch");
+            } else {
+                command.arg("--console-delete-branch");
             }
             if deletion.delete_ignored {
                 command

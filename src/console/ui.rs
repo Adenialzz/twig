@@ -833,6 +833,8 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         ));
         if !deletion.delete_branch {
             details.push("保留分支时跳过合并/推送检查。".into());
+        } else {
+            details.push("不检查合并和推送状态，未合并或未推送的本地提交也会随分支删除。".into());
         }
         if !deletion.ignored.is_empty() {
             details.push(format!(

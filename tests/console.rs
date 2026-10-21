@@ -1695,10 +1695,10 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     assert!(path.is_dir());
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
     fs::remove_file(path.join("unsaved")).unwrap();
-    // 失败后回到取消，保持默认保留分支，再明确选择确认。
+    // 失败后回到取消，取消勾选删除分支，再明确选择确认。
     p.bytes.clear();
     p.text.clear();
-    p.send(b"\t\r");
+    p.send(b" \t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -1718,14 +1718,30 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let mut state: serde_json::Value =
         serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+    // 未合并且领先本地 upstream 的提交，Console 显式删除应允许清理。
+    f.git(&["branch", "--set-upstream-to=main", "auth"]);
+    f.git(&[
+        "-C",
+        path.to_str().unwrap(),
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "unmerged and unpushed",
+    ]);
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\rGd");
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     p.send(b"d");
     p.wait("确认删除");
-    // 显式勾选删除本地分支。
-    p.send(b" ");
+    // 默认勾选删除本地分支，确认后执行。
     state["auth"]["branch"] = "changed".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
     p.send(b"\t\r");
@@ -1733,6 +1749,14 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     state["auth"]["branch"] = "auth".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+    p.bytes.clear();
+    p.text.clear();
+    fs::write(path.join("unsaved"), "keep me").unwrap();
+    p.send(b"\t\r");
+    p.wait("未提交、未跟踪");
+    assert!(path.is_dir());
+    f.git(&["show-ref", "--verify", "refs/heads/auth"]);
+    fs::remove_file(path.join("unsaved")).unwrap();
     p.bytes.clear();
     p.text.clear();
     p.send(b"\t\r");

@@ -158,6 +158,9 @@ struct RemoveOptions {
     /// 保留本地分支，跳过合并/upstream 检查，仍保护文件和进程
     #[arg(long)]
     keep_branch: bool,
+    /// Console 已确认删除本地分支，跳过合并和 upstream 检查
+    #[arg(long, hide = true, requires = "expected_task", conflicts_with_all = ["keep_branch", "target"])]
+    console_delete_branch: bool,
     /// 同时删除 Worktree 中被 Git 忽略的文件（仍保护未提交和未跟踪文件）
     #[arg(long)]
     delete_ignored: bool,
@@ -211,6 +214,7 @@ fn execute(cli: Cli) -> Result<()> {
         } => {
             ensure!(
                 !options.keep_branch
+                    && !options.console_delete_branch
                     && !options.delete_ignored
                     && options.target.is_none()
                     && options.expected_ignored.is_none()
@@ -786,7 +790,7 @@ fn remove(
             }
         }
         let branch_exists = git::exists(&config.main, &feature.branch)?;
-        if branch_exists && !keep_branch {
+        if branch_exists && !keep_branch && !options.console_delete_branch {
             ensure!(
                 git::exists(&config.main, &target)?,
                 "合并目标不存在：{target}"
@@ -845,6 +849,8 @@ fn remove(
             },
             if keep_branch {
                 "，保留分支"
+            } else if options.console_delete_branch {
+                "及本地分支（不检查合并和推送状态）"
             } else {
                 "及已合并分支"
             }
@@ -869,8 +875,13 @@ fn remove(
         .context("窗口可能已关闭；Worktree 和记录已保留，可修复后重试")?;
     }
     if branch_exists && !keep_branch {
-        git(&config.main, &["branch", "-d", "--", &feature.branch])
-            .context("Worktree 已移除，但 Git 拒绝安全删除分支；分支和 twig 记录保留，可用 rm --keep-branch 完成清理")?;
+        let flag = if options.console_delete_branch {
+            "-D"
+        } else {
+            "-d"
+        };
+        git(&config.main, &["branch", flag, "--", &feature.branch])
+            .context("Worktree 已移除，但 Git 拒绝删除分支；分支和 twig 记录保留，可用 rm --keep-branch 完成清理")?;
     }
     state.remove(name);
     project.save("state.json", state)?;
