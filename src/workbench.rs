@@ -582,7 +582,7 @@ fn draw(
     }
     let active = panes.iter().find(|p| p.active);
     let label = if prefix {
-        "Ctrl-W: d 返回导航 | s 左右分屏 | v 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 切 Pane | Alt-h/j/k/l 调比例 | Esc 取消".to_string()
+        "Ctrl-W: d 返回导航 | f 跳转完成任务 | s 左右分屏 | v 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 切 Pane | Alt-h/j/k/l 调比例 | Esc 取消".to_string()
     } else {
         format!(
             "Ctrl-W d 导航 · Ctrl-W ? 帮助 | {} | {status} | 拖选即复制 · Esc 清除 | Shift-PgUp/PgDn 历史",
@@ -702,6 +702,7 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
             notification: None,
         },
     )
+    .map(|_| ())
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -716,7 +717,7 @@ pub fn run(
     session: String,
     window: &str,
     mut status: impl FnMut(&str, &str) -> Status,
-) -> Result<()> {
+) -> Result<Option<crate::notification::CompletionNotice>> {
     // 防止把正在运行本前端的 Pane 捕获回来，形成递归显示和输入。
     if let Ok(pane) = std::env::var("TMUX_PANE") {
         let output = Command::new("tmux")
@@ -739,9 +740,9 @@ pub fn run(
         &mut status,
     );
     let restore = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
-    result?;
+    let outcome = result?;
     restore?;
-    Ok(())
+    Ok(outcome)
 }
 
 fn run_inner(
@@ -749,7 +750,7 @@ fn run_inner(
     args: Args,
     window: Option<&str>,
     status: &mut impl FnMut(&str, &str) -> Status,
-) -> Result<()> {
+) -> Result<Option<crate::notification::CompletionNotice>> {
     let mut client = Client::connect(&args)?;
     if let Some(window) = window {
         ensure!(
@@ -791,7 +792,7 @@ fn run_inner(
                     pending.insert(id.to_owned());
                 }
             } else if event.starts_with(b"%exit") {
-                return Ok(());
+                return Ok(None);
             } else if [
                 b"%layout-change".as_slice(),
                 b"%window-pane-changed",
@@ -964,7 +965,10 @@ fn run_inner(
                 if prefix {
                     prefix = false;
                     let command = match key.code {
-                        KeyCode::Char('d') => return Ok(()),
+                        KeyCode::Char('d') => return Ok(None),
+                        KeyCode::Char('f') if label.notification.is_some() => {
+                            return Ok(label.notification);
+                        }
                         KeyCode::Char('?') => {
                             prefix = true;
                             None

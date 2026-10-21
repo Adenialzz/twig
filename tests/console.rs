@@ -910,7 +910,16 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
 }
 
 #[test]
-fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
+fn codex_completion_shortcut_from_workbench() {
+    completion_shortcut(false);
+}
+
+#[test]
+fn codex_completion_shortcut_from_navigation() {
+    completion_shortcut(true);
+}
+
+fn completion_shortcut(from_navigation: bool) {
     use serde_json::{Value, json};
     use std::{
         os::unix::net::UnixListener,
@@ -921,6 +930,18 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
     };
     let f = Fixture::new();
     f.init();
+    let other = f.temp.path().join("other");
+    assert!(
+        Command::new("git")
+            .args(["clone", "--local"])
+            .arg(&f.repo)
+            .arg(&other)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    f.twig(&["add", "other", "--path", other.to_str().unwrap()]);
     let sock = f.temp.path().join("notify.sock");
     let listener = UnixListener::bind(&sock).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -1029,27 +1050,27 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
     let mut p = f.terminal(false);
     p.wait("auth");
     wait_phase(0);
-    p.send(b"\rgg\r");
+    p.send(b"/other\r\r\r");
     p.wait("Ctrl-W d");
     assert!(!p.text.contains("本轮已完成"));
     phase.store(1, Ordering::Relaxed);
     wait_phase(1);
     phase.store(2, Ordering::Relaxed);
     p.wait("Codex 本轮已完成");
-    p.wait("返回 Console 查看任务");
+    p.wait("Ctrl-W f 跳转");
     p.resize(80, 30);
     p.send(b"printf 'NOTIFY_INPUT_%s\\n' OK\r");
     p.wait("NOTIFY_INPUT_OK");
     p.resize(140, 36);
-    p.send(b"\x17d");
-    p.wait("未读 1");
+    if from_navigation {
+        p.send(b"\x17d");
+        p.wait("任务 / ");
+    }
     p.bytes.clear();
     p.text.clear();
-    // 重新进入 main，再用工作台快捷键切到 auth；以实际窗口清除未读。
-    p.send(b"\t\r");
-    p.send(b"printf 'REENTERED_%s\\n' MAIN\r");
-    p.wait("REENTERED_MAIN");
-    p.send(b"\x17n");
+    p.send(b"\x17f");
+    // 无提示时快捷键不退出终端，也不向 Shell 输入 f。
+    p.send(b"\x17f");
     p.send(b"printf 'WINDOW_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
         "WINDOW_DIR:{}",
@@ -1058,10 +1079,16 @@ fn codex_completion_reaches_workbench_and_unread_follows_actual_window() {
             .join("auth")
             .display()
     ));
+    p.bytes.clear();
+    p.text.clear();
+    p.resize(138, 36);
+    p.send(b"printf 'DISMISSED_%s\\n' OK\r");
+    p.wait("DISMISSED_OK");
+    assert!(!p.text.contains("Codex 本轮已完成"), "{}", p.text);
     phase.store(3, Ordering::Relaxed);
     wait_phase(3);
     // 当前实际打开的是 auth：第二轮应静默，不排入下一张卡片。
-    // 等第一张卡片到期后强制重绘，检查没有第二张卡片残留。
+    // 强制重绘，确认成功跳转后旧提示已关闭，静默轮次也没有提示。
     thread::sleep(Duration::from_secs(9));
     p.bytes.clear();
     p.text.clear();

@@ -5,7 +5,7 @@ pub(crate) mod query;
 mod selection;
 mod ui;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
@@ -448,60 +448,106 @@ pub struct TerminalTarget {
     pub window: String,
 }
 
+fn notification_target(
+    app: &mut App,
+    registry: &std::path::Path,
+    notice: &twig_cli::notification::CompletionNotice,
+) -> Result<TerminalTarget> {
+    let path = app
+        .snapshot
+        .repos
+        .iter()
+        .find(|repo| repo.name == notice.project)
+        .and_then(|repo| repo.tasks.iter().find(|task| task.name == notice.task))
+        .map(|task| task.path.clone())
+        .context("通知对应的项目或任务已不可用")?;
+    let (session, window) = data::prepare_terminal(registry, &notice.project, &notice.task)?;
+    app.project = Some(notice.project.clone());
+    app.task = Some(path);
+    app.filters = Default::default();
+    app.detail = false;
+    app.history = false;
+    app.scroll = 0;
+    app.located = true;
+    Ok(TerminalTarget {
+        project: notice.project.clone(),
+        session,
+        window,
+    })
+}
+
 fn open_terminal(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     worker: &Worker,
-    target: TerminalTarget,
+    mut target: TerminalTarget,
+    registry: &std::path::Path,
+    mut jump: Option<twig_cli::notification::CompletionNotice>,
 ) -> Result<()> {
-    let initial_task = app.task.clone();
-    let result =
-        twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
-            for snapshot in worker.updates.try_iter() {
-                app.snapshot = snapshot;
-            }
-            let viewed = app
-                .snapshot
-                .repos
-                .iter()
-                .find(|r| r.name == target.project)
-                .and_then(|r| r.tasks.iter().find(|t| t.name == task))
-                .map(|t| t.path.clone())
-                .or_else(|| {
-                    (window == target.window)
-                        .then(|| initial_task.clone())
-                        .flatten()
-                });
-            app.receive_notifications(
-                worker,
-                viewed
-                    .as_deref()
-                    .map(|path| (target.project.as_str(), path)),
-            );
-            if let Some(path) = viewed {
-                app.notifications.read(&target.project, &path);
-            }
-            let summary = data::summary(app.snapshot.threads.iter());
-            let text = format!(
-                "{} · 全局 Codex {}",
-                target.project,
-                if app.snapshot.codex_error.is_some() {
-                    "连接异常"
-                } else if app
-                    .snapshot
-                    .codex_checked
-                    .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
-                {
-                    "状态过期"
-                } else {
-                    &summary
+    let result = loop {
+        let initial_task = app.task.clone();
+        let result =
+            twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
+                if let Some(notice) = jump.take() {
+                    app.notifications.dismiss(&notice);
                 }
-            );
-            twig_cli::workbench::Status {
-                text,
-                notification: app.notifications.current().cloned(),
-            }
-        });
+                for snapshot in worker.updates.try_iter() {
+                    app.snapshot = snapshot;
+                }
+                let viewed = app
+                    .snapshot
+                    .repos
+                    .iter()
+                    .find(|r| r.name == target.project)
+                    .and_then(|r| r.tasks.iter().find(|t| t.name == task))
+                    .map(|t| t.path.clone())
+                    .or_else(|| {
+                        (window == target.window)
+                            .then(|| initial_task.clone())
+                            .flatten()
+                    });
+                app.receive_notifications(
+                    worker,
+                    viewed
+                        .as_deref()
+                        .map(|path| (target.project.as_str(), path)),
+                );
+                if let Some(path) = viewed {
+                    app.notifications.read(&target.project, &path);
+                }
+                let summary = data::summary(app.snapshot.threads.iter());
+                let text = format!(
+                    "{} · 全局 Codex {}",
+                    target.project,
+                    if app.snapshot.codex_error.is_some() {
+                        "连接异常"
+                    } else if app
+                        .snapshot
+                        .codex_checked
+                        .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
+                    {
+                        "状态过期"
+                    } else {
+                        &summary
+                    }
+                );
+                twig_cli::workbench::Status {
+                    text,
+                    notification: app.notifications.current().cloned(),
+                }
+            });
+        match result {
+            Ok(Some(notice)) => match notification_target(app, registry, &notice) {
+                Ok(next) => {
+                    target = next;
+                    jump = Some(notice);
+                }
+                Err(error) => break Err(error),
+            },
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        }
+    };
     app.refresh += 1;
     app.reconcile();
     app.focus = 0;
@@ -547,7 +593,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
     }
     worker.requests.send(app.request())?;
     if let Some(target) = initial {
-        open_terminal(&mut app, &mut terminal, &worker, target)?;
+        open_terminal(&mut app, &mut terminal, &worker, target, &registry, None)?;
         worker.requests.send(app.request())?;
     }
     let mut selection: Option<selection::Selection> = None;
@@ -766,7 +812,21 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
         }
         if app.pane_prefix {
             app.pane_prefix = false;
-            if let KeyCode::Char(direction) = key.code {
+            if key.code == KeyCode::Char('f') {
+                if let Some(notice) = app.notifications.current().cloned() {
+                    match notification_target(&mut app, &registry, &notice) {
+                        Ok(target) => open_terminal(
+                            &mut app,
+                            &mut terminal,
+                            &worker,
+                            target,
+                            &registry,
+                            Some(notice),
+                        )?,
+                        Err(error) => app.message = Some(format!("跳转失败：{error:#}")),
+                    }
+                }
+            } else if let KeyCode::Char(direction) = key.code {
                 app.focus = match (app.focus, direction.to_ascii_lowercase()) {
                     (_, 'h') => 0,
                     (0, 'l') => 1,
@@ -888,6 +948,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                                 session,
                                 window,
                             },
+                            &registry,
+                            None,
                         )?,
                         Err(error) => app.message = Some(format!("进入失败：{error:#}")),
                     }

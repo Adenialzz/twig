@@ -33,7 +33,7 @@ pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
         Line::from(format!("项目：{}", safe(&notice.project))),
         Line::from(format!("任务：{}", safe(&notice.task))),
         Line::from(""),
-        Line::from("返回 Console 查看任务"),
+        Line::from("Ctrl-W f 跳转"),
     ])
     .wrap(Wrap { trim: false })
     .style(Style::default().fg(Color::White).bg(Color::Indexed(24)))
@@ -88,6 +88,7 @@ mod tests {
             assert!(row(1).contains("Codex 本轮已完成"));
             assert!(row(2).contains("项目：demo"));
             assert!(row(3).contains("任务：notify"));
+            assert!(row(5).contains("Ctrl-W f 跳转"));
             assert!(row(23).contains("底部状态"));
             assert_eq!(buffer[(width - 2, 1)].symbol(), "┓");
             assert_eq!(terminal.get_cursor_position().unwrap(), (2, 12).into());

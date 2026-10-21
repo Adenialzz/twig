@@ -50,6 +50,13 @@ impl Notifications {
         self.current.as_ref().map(|(message, _)| message)
     }
 
+    pub fn dismiss(&mut self, notice: &CompletionNotice) {
+        if self.current() == Some(notice) {
+            self.current = None;
+            self.tick(Instant::now());
+        }
+    }
+
     pub fn read(&mut self, project: &str, path: &Path) {
         self.unread.remove(&(project.to_owned(), path.to_owned()));
     }
@@ -99,6 +106,32 @@ mod tests {
         notices.tick(now + Duration::from_secs(24));
         assert!(notices.current().is_none());
         assert_eq!(notices.count("a", Some(Path::new("/a/two"))), 1);
+    }
+
+    #[test]
+    fn dismiss_advances_queue_without_clearing_other_unread() {
+        let mut notices = Notifications::default();
+        for task in ["one", "two"] {
+            notices.receive(
+                Completion {
+                    project: "demo".into(),
+                    path: format!("/{task}").into(),
+                    task: task.into(),
+                },
+                None,
+            );
+        }
+        notices.tick(Instant::now());
+        let first = notices.current().unwrap().clone();
+        notices.dismiss(&first);
+        notices.read("demo", Path::new("/one"));
+        assert_eq!(notices.current().unwrap().task, "two");
+        assert_eq!(notices.count("demo", None), 1);
+        notices.dismiss(&first);
+        assert_eq!(notices.current().unwrap().task, "two");
+        let second = notices.current().unwrap().clone();
+        notices.dismiss(&second);
+        assert!(notices.current().is_none());
     }
 }
 
