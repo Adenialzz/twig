@@ -2,13 +2,14 @@ mod data;
 pub(crate) mod form;
 mod notifications;
 pub(crate) mod query;
+mod selection;
 mod ui;
 
 use anyhow::{Result, ensure};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
+        KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -409,7 +410,7 @@ impl Screen {
     fn start() -> Result<Self> {
         enable_raw_mode()?;
         let mut screen = Self { active: true };
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen) {
+        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture) {
             screen.restore()?;
             return Err(e.into());
         }
@@ -504,6 +505,7 @@ fn open_terminal(
     app.message = result
         .err()
         .map(|error| format!("终端已返回导航：{error:#}"));
+    execute!(io::stdout(), EnableMouseCapture)?;
     terminal.clear()?;
     Ok(())
 }
@@ -545,6 +547,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
         open_terminal(&mut app, &mut terminal, &worker, target)?;
         worker.requests.send(app.request())?;
     }
+    let mut selection: Option<selection::Selection> = None;
+    let mut copy_notice: Option<twig_cli::clipboard::Notice> = None;
     loop {
         if let Some(form) = &mut app.form {
             match form.poll() {
@@ -577,15 +581,90 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             worker.requests.send(app.request())?;
         }
         app.receive_notifications(&worker, None);
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        if copy_notice
+            .as_ref()
+            .is_some_and(twig_cli::clipboard::Notice::expired)
+        {
+            copy_notice = None;
+        }
+        let mut rendered = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::default());
+        let mut regions = Vec::new();
+        terminal.draw(|frame| {
+            if selection
+                .as_ref()
+                .is_some_and(|selection| !selection.fits(frame.area()))
+            {
+                selection = None;
+            }
+            ui::draw(frame, &app);
+            rendered = frame.buffer_mut().clone();
+            regions = ui::selection_regions(frame.area(), &app);
+            if let Some(selection) = &selection {
+                selection.draw(frame.buffer_mut());
+            }
+            if let Some(notice) = app.notifications.current() {
+                twig_cli::notification::draw(frame, notice);
+            }
+            if let Some(notice) = &copy_notice {
+                notice.draw(frame);
+            }
+        })?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
         let event = event::read()?;
+        match event {
+            Event::Resize(_, _) => {
+                selection = None;
+                continue;
+            }
+            Event::Mouse(mouse) => {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        selection = regions
+                            .iter()
+                            .find(|area| area.contains((mouse.column, mouse.row).into()))
+                            .map(|area| {
+                                selection::Selection::new(&rendered, *area, mouse.column, mouse.row)
+                            });
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(selection) = &mut selection
+                            && selection.dragging
+                        {
+                            selection.update(mouse.column, mouse.row);
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(selected) = &mut selection
+                            && selected.dragging
+                        {
+                            selected.update(mouse.column, mouse.row);
+                            selected.dragging = false;
+                            let text = selected.text();
+                            if text.is_empty() {
+                                selection = None;
+                            } else {
+                                let message = twig_cli::clipboard::copy(&text)
+                                    .unwrap_or_else(|error| format!("复制失败：{error}"));
+                                copy_notice = Some(twig_cli::clipboard::Notice::new(message));
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => selection = None,
+                    _ => {}
+                }
+                continue;
+            }
+            _ => {}
+        }
         let Event::Key(key) = event else {
             continue;
         };
         if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        if selection.take().is_some() && key.code == KeyCode::Esc {
             continue;
         }
         if let Some(form) = &mut app.form {

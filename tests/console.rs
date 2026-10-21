@@ -263,6 +263,48 @@ impl Drop for Pty {
 }
 
 #[test]
+fn navigation_drag_copies_text_and_preserves_readonly_state() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let f = Fixture::new();
+    f.init();
+    let registry = fs::read(&f.registry).unwrap();
+    let mut command = Command::new("sh");
+    f.env(&mut command);
+    command.env("SSH_CONNECTION", "twig-pty-test").args([
+        "-c",
+        "\"$TWIG_TEST_BIN\" --config \"$TWIG_TEST_CONFIG\"; printf '\\nTERMINAL_RESTORED:%s\\n' \"$?\"",
+    ]);
+    let mut p = Pty::spawn(command);
+    p.wait("demo");
+    p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
+    p.wait("已请求复制 4 chars");
+    let prefix = b"\x1b]52;c;";
+    let start = p
+        .bytes
+        .windows(prefix.len())
+        .position(|bytes| bytes == prefix)
+        .unwrap()
+        + prefix.len();
+    let end = start + p.bytes[start..].iter().position(|byte| *byte == 7).unwrap();
+    assert_eq!(STANDARD.decode(&p.bytes[start..end]).unwrap(), b"demo");
+    // 缩放清除旧坐标的选区；窄屏仍可拖选，Esc 只清除选区。
+    p.resize(80, 24);
+    p.text.clear();
+    p.bytes.clear();
+    p.wait("demo");
+    p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
+    p.wait("已请求复制 4 chars");
+    p.send(b"\x1bq");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(
+        p.bytes
+            .windows(b"\x1b[?1006l".len())
+            .any(|bytes| bytes == b"\x1b[?1006l")
+    );
+    assert_eq!(fs::read(&f.registry).unwrap(), registry);
+}
+
+#[test]
 fn noninteractive_console_is_explicit_and_completion_remains_readonly() {
     let f = Fixture::new();
     let mut old = Command::new(env!("CARGO_BIN_EXE_twig"));

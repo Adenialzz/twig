@@ -1,4 +1,6 @@
 //! Console 的 tmux Control Mode 终端视图；tmux 保存唯一的终端运行状态。
+use crate::clipboard;
+mod selection;
 use alacritty_terminal::{
     Term,
     event::VoidListener,
@@ -26,6 +28,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::Paragraph,
 };
+use selection::Selection;
 use std::{
     collections::{HashSet, VecDeque},
     io::{self, IsTerminal, Read, Write},
@@ -469,7 +472,13 @@ fn color(c: AnsiColor) -> Color {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool, status: &str) {
+fn draw(
+    frame: &mut ratatui::Frame,
+    panes: &[Pane],
+    prefix: bool,
+    status: &str,
+    selection: Option<&Selection>,
+) {
     let area = frame.area();
     let buffer = frame.buffer_mut();
     for pane in panes {
@@ -527,7 +536,9 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool, status: &str) 
                 if px >= area.width || py >= area.height.saturating_sub(1) {
                     continue;
                 }
-                let cell = screen.cell(y, x);
+                let selected = selection.filter(|selection| selection.pane == pane.id);
+                let cell =
+                    selected.map_or_else(|| screen.cell(y, x), |selection| selection.cell(y, x));
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -548,6 +559,13 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool, status: &str) 
                         style = style.add_modifier(modifier);
                     }
                 }
+                if selected.is_some_and(|selection| selection.contains(y, x)) {
+                    style = if cell.flags.contains(Flags::INVERSE) {
+                        style.remove_modifier(Modifier::REVERSED)
+                    } else {
+                        style.add_modifier(Modifier::REVERSED)
+                    };
+                }
                 let mut symbol = cell.c.to_string();
                 if let Some(extra) = cell.zerowidth() {
                     symbol.extend(extra);
@@ -567,7 +585,7 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool, status: &str) 
         "Ctrl-W: d 返回导航 | s 左右分屏 | v 上下分屏 | o 切 Pane | z 放大 | n/p 窗口 | h/j/k/l 切 Pane | Alt-h/j/k/l 调比例 | Esc 取消".to_string()
     } else {
         format!(
-            "Ctrl-W d 导航 · Ctrl-W ? 帮助 | {} | {status} | Shift-PgUp/PgDn 历史",
+            "Ctrl-W d 导航 · Ctrl-W ? 帮助 | {} | {status} | 拖选即复制 · Esc 清除 | Shift-PgUp/PgDn 历史",
             active.map_or("", |p| p.id.as_str())
         )
     };
@@ -576,6 +594,7 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], prefix: bool, status: &str) 
         Rect::new(0, area.height.saturating_sub(1), area.width, 1),
     );
     if let Some(pane) = active
+        && !selection.is_some_and(|selection| selection.pane == pane.id)
         && let Some((x, y)) = pane.cursor
         && pane.rect.x + x < area.width
         && pane.rect.y + y < area.height.saturating_sub(1)
@@ -751,12 +770,18 @@ fn run_inner(
         client.command("display-message -p '#{window_id}\t#{@twig-feature}\t#{window_name}'")?;
     let mut prefix = false;
     let mut drag: Option<Drag> = None;
+    let mut selection: Option<Selection> = None;
     let mut label = Status::default();
-    let mut notice = "";
+    let mut notice = String::new();
+    let mut copy_notice: Option<clipboard::Notice> = None;
     let mut dirty = true;
     let mut pending = HashSet::new();
     let mut refreshed = Instant::now();
     loop {
+        if copy_notice.as_ref().is_some_and(clipboard::Notice::expired) {
+            copy_notice = None;
+            dirty = true;
+        }
         client.pump()?;
         client.events.append(&mut client.lines);
         let mut changed = false;
@@ -809,6 +834,14 @@ fn run_inner(
             refreshed = Instant::now();
             dirty = true;
         }
+        if selection.as_ref().is_some_and(|selected| {
+            !panes
+                .iter()
+                .any(|pane| pane.id == selected.pane && pane.rect == selected.rect && pane.active)
+        }) {
+            selection = None;
+            dirty = true;
+        }
         if dirty {
             let name = name.chars().filter(|c| !c.is_control()).collect::<String>();
             terminal.draw(|frame| {
@@ -817,9 +850,13 @@ fn run_inner(
                     &panes,
                     prefix,
                     &format!("{notice}{name} · {}", label.text),
+                    selection.as_ref(),
                 );
                 if let Some(notification) = &label.notification {
                     crate::notification::draw(frame, notification);
+                }
+                if let Some(notice) = &copy_notice {
+                    notice.draw(frame);
                 }
             })?;
             dirty = false;
@@ -830,10 +867,12 @@ fn run_inner(
         dirty = true;
         let input = event::read()?;
         if matches!(input, Event::Key(_)) {
-            notice = "";
+            notice.clear();
         }
         match input {
             Event::Resize(width, height) => {
+                selection = None;
+                drag = None;
                 client.command(&format!(
                     "refresh-client -C {width},{}",
                     height.saturating_sub(1)
@@ -843,25 +882,55 @@ fn run_inner(
             Event::Mouse(mouse) => {
                 let x = mouse.column;
                 let y = mouse.row;
-                if y >= terminal.size()?.height.saturating_sub(1) {
-                    continue;
-                }
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
+                        selection = None;
+                        notice.clear();
                         drag = Drag::at(&panes, x, y);
                         if let Some(pane) = pane_at(&panes, x, y) {
-                            client.command(&format!("select-pane -t {}", pane.id))?;
-                            panes = reload(&mut client)?;
+                            if !pane.active {
+                                client.command(&format!("select-pane -t {}", pane.id))?;
+                            }
+                            if drag.is_none() && pane.rect.contains((x, y).into()) {
+                                selection = Some(Selection::new(pane, x, y));
+                            }
+                            let id = pane.id.clone();
+                            for pane in &mut panes {
+                                pane.active = pane.id == id;
+                            }
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some(drag) = &drag {
                             client.command(&drag.command(x, y))?;
                             panes = reload(&mut client)?;
+                        } else if let Some(selection) = &mut selection
+                            && selection.dragging
+                        {
+                            selection.update(x, y);
                         }
                     }
-                    MouseEventKind::Up(_) => drag = None,
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        drag = None;
+                        if let Some(selected) = &mut selection
+                            && selected.dragging
+                        {
+                            selected.update(x, y);
+                            selected.dragging = false;
+                            let text = selected.text();
+                            if text.is_empty() {
+                                selection = None;
+                            } else {
+                                let message = match clipboard::copy(&text) {
+                                    Ok(message) => message,
+                                    Err(error) => format!("复制失败：{error}"),
+                                };
+                                copy_notice = Some(clipboard::Notice::new(message));
+                            }
+                        }
+                    }
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        selection = None;
                         if let Some(pane) = panes
                             .iter_mut()
                             .find(|pane| pane.rect.contains((x, y).into()))
@@ -881,6 +950,7 @@ fn run_inner(
                 }
             }
             Event::Paste(text) => {
+                selection = None;
                 if let Some(pane) = panes.iter_mut().find(|p| p.active) {
                     pane.scroll_offset = 0;
                     pending.insert(pane.id.clone());
@@ -888,6 +958,9 @@ fn run_inner(
                 }
             }
             Event::Key(key) if key.kind != event::KeyEventKind::Release => {
+                if selection.take().is_some() && key.code == KeyCode::Esc {
+                    continue;
+                }
                 if prefix {
                     prefix = false;
                     let command = match key.code {
@@ -918,7 +991,7 @@ fn run_inner(
                     if let Some(command) = command {
                         client.command(command)?;
                         if key.code == KeyCode::Char('r') {
-                            notice = "tmux.conf 已重载 · ";
+                            notice = "tmux.conf 已重载 · ".into();
                         }
                         panes = reload(&mut client)?;
                     }
@@ -1438,7 +1511,7 @@ mod tests {
         };
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 8)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &[pane], false, "twig"))
+            .draw(|frame| draw(frame, &[pane], false, "twig", None))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(2, 1)].symbol(), "中");
