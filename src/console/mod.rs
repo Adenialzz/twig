@@ -996,7 +996,7 @@ fn run_inner(
             worker.requests.send(app.request())?;
             continue;
         }
-        if key.code == KeyCode::F(2) {
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::F(2)) {
             selection = None;
             if crate::agent::chat::run(&mut terminal, registry.clone(), &mut chat_draft)? {
                 break;
@@ -1078,8 +1078,6 @@ fn run_inner(
             KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(4),
             KeyCode::Char('1') if key.modifiers.is_empty() => app.focus = 0,
             KeyCode::Char('2') if key.modifiers.is_empty() => app.focus = 1,
-            KeyCode::Tab => app.focus = (app.focus + 1) % 3,
-            KeyCode::BackTab => app.focus = (app.focus + 2) % 3,
             KeyCode::Down | KeyCode::Char('j') => app.step(1),
             KeyCode::Up | KeyCode::Char('k') => app.step(-1),
             KeyCode::Char('g') if !key.modifiers.contains(KeyModifiers::CONTROL) => {

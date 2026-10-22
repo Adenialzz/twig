@@ -278,7 +278,7 @@ fn run_ui(
         if dirty || last.elapsed() > Duration::from_secs(1) {
             terminal.draw(|frame| {
                 let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(3), Constraint::Length(5), Constraint::Length(2)]).split(frame.area());
-                crate::tabs::draw(frame, rows[0], crate::tabs::Tab::Chat, "F2 切换标签 · Ctrl-Q 退出 · F5 重连");
+                crate::tabs::draw(frame, rows[0], crate::tabs::Tab::Chat, "Tab 切换标签 · Ctrl-Q 退出 · F5 重连");
                 frame.render_widget(Paragraph::new(view.status.as_str()).style(Style::default().fg(Color::Cyan)), ratatui::layout::Rect::new(rows[0].x, rows[0].y + 1, rows[0].width, rows[0].height.saturating_sub(1)));
                 let mut content = view.text.clone();
                 if let Some(error) = &view.error { content.push_str(&format!("\n错误：{error}\n")); }
@@ -313,7 +313,7 @@ fn run_ui(
                 cursor += text.len();
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
-                KeyCode::F(2) => {
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::F(2) => {
                     *draft = Draft {
                         text: input,
                         cursor,

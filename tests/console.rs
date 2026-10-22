@@ -591,11 +591,11 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
     let state = fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
     let mut p = f.terminal(true);
     p.wait("demo");
-    p.send(b"\t/auth\r");
+    p.send(b"2/auth\r");
     p.resize(65, 22);
     thread::sleep(Duration::from_millis(100));
-    p.send(b"\t?");
-    p.wait_screen("Shift+Tab");
+    p.send(b"\x17j?");
+    p.wait_screen("Shift-Tab");
     let start = Instant::now();
     p.send(b"\x03");
     p.wait("TERMINAL_RESTORED:0");
@@ -624,7 +624,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait("搜索：");
         p.send(b"\r");
         // 返回项目后重新 Enter，应清除任务筛选并选中主工作目录。
-        p.send(b"\x1b[Z\r");
+        p.send(b"1\r");
         assert_eq!(fs::read(&f.registry).unwrap(), before_entry);
         p.send(keys);
         p.wait(" · 全局 Codex ");
@@ -660,8 +660,8 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.text.clear();
         p.send(b"\x17d");
         p.wait("任务 / ");
-        // 返回后聚焦项目区，Tab 保留任务选择，可以再次进入同一 Shell。
-        p.send(b"\t\r");
+        // 返回后聚焦项目区，按 2 保留任务选择，可以再次进入同一 Shell。
+        p.send(b"2\r");
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
@@ -694,7 +694,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     };
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\tG\r");
+    p.send(b"2G\r");
     p.wait(" · 全局 Codex ");
     p.send(b"printf 'FIRST_%s\\n' PANE\r");
     p.wait("FIRST_PANE");
@@ -721,7 +721,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
-    p.send(b"\t\r");
+    p.send(b"2\r");
     p.wait(" · 全局 Codex ");
     // 仅断开专用测试 server 的 Control Mode 客户端；Pane 仍在。
     let clients = mux(&["list-clients", "-F", "#{client_name}"]);
@@ -805,7 +805,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     ]);
     let mut p = Pty::spawn(command);
     p.wait("auth");
-    p.send(b"\tG\r");
+    p.send(b"2G\r");
     p.wait("终端已返回导航：不能在当前");
     p.text.clear();
     p.bytes.clear();
@@ -873,7 +873,7 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         p.wait("更多");
         p.text.clear();
         p.bytes.clear();
-        p.send(b"\t\r");
+        p.send(b"2\r");
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("REENTER_DIR:{}", target.display()));
@@ -901,7 +901,7 @@ fn custom_prefix_directions_alt_resize_and_mouse_work_in_terminal() {
     };
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\tG\r");
+    p.send(b"2G\r");
     p.wait(" · 全局 Codex ");
     p.send(b"\x17s");
     p.send(b"printf 'SPLIT_%s\\n' READY\r");
@@ -1988,7 +1988,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     f.git(&["branch", "existing"]);
     let mut p = f.terminal(false);
     p.wait("主工作目录");
-    p.send(b"\t/new\r");
+    p.send(b"2/new\r");
     p.wait("新建任务");
     p.send(b"existing\r");
     p.wait("使用已有分支");
@@ -2142,7 +2142,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     let mut p = f.terminal(false);
     p.wait("主工作目录");
-    p.send(b"\t/new\r");
+    p.send(b"2/new\r");
     p.wait("新建任务");
     // 手动输入后切到起点字段提交，不接受候选，仍允许选择来源。
     p.send(b"feat/remote\x1b[Z\r");
