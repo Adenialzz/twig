@@ -552,7 +552,7 @@ fn open_terminal(
                     "{}{} · 全局 Codex {}",
                     target.project,
                     if app.chat_status.0 {
-                        " · Chat 有新消息"
+                        " · Agent 有新消息"
                     } else {
                         ""
                     },
@@ -785,7 +785,7 @@ fn run_inner(
                 if let Some(notice) = app.notifications.current() {
                     twig_cli::notification::draw(frame, notice);
                 } else if app.chat_status.1 {
-                    twig_cli::notification::draw_chat(frame, "Tab 查看 Chat");
+                    twig_cli::notification::draw_chat(frame, "Tab 查看 Agent");
                 }
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
@@ -833,7 +833,7 @@ fn run_inner(
                     && terminal.size()?.width >= 38
                     && terminal.size()?.height >= 12
                     && crate::tabs::clicked(mouse, terminal.get_frame().area())
-                        == Some(crate::tabs::Tab::Chat) =>
+                        == Some(crate::tabs::Tab::Agent) =>
             {
                 Event::Key(event::KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
             }

@@ -56,7 +56,7 @@ fn answer(request: &Value, accept: bool) -> Result<Value> {
             Ok(json!({"action":"decline","content":null}))
         }
         _ => bail!(
-            "此输入请求需在原生 Codex 中处理：codex resume <主控 thread ID>；Chat 可继续查看状态"
+            "此输入请求需在原生 Codex 中处理：codex resume <主控 thread ID>；Agent 可继续查看状态"
         ),
     }
 }

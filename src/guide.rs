@@ -24,7 +24,7 @@ pub enum Topic {
     Completion,
     /// Agent 和脚本的非交互调用
     Automation,
-    /// 主控 Chat、受管 Codex 任务与飞书通知
+    /// 主控 Agent、受管 Codex 任务与飞书通知
     Agent,
     /// 错误诊断和资源恢复
     Troubleshooting,

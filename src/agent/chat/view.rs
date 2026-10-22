@@ -295,17 +295,17 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
     let width = screen.width.saturating_sub(4);
     let body = Rect::new(
         screen.x + (screen.width - width) / 2,
-        screen.y + 2,
+        screen.y + crate::tabs::HEADER_HEIGHT,
         width,
-        screen.height - 2,
+        screen.height - crate::tabs::HEADER_HEIGHT,
     );
     let (input, (cx, cy)) = input_lines(&draft.text, draft.cursor, width.saturating_sub(4));
     let input_height = (input.len() as u16)
         .clamp(1, 6)
-        .min(screen.height.saturating_sub(9))
+        .min(screen.height.saturating_sub(11))
         + 2;
     let rows = Layout::vertical([
-        Constraint::Min(3),
+        Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(input_height),
         Constraint::Length(2),
@@ -314,7 +314,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
     crate::tabs::draw(
         frame,
         screen,
-        crate::tabs::Tab::Chat,
+        crate::tabs::Tab::Agent,
         "Tab 切换 · F5 重连 · Ctrl-Q 退出",
         false,
     );
@@ -340,7 +340,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
                 Style::default().fg(Color::DarkGray),
             ),
         ])),
-        Rect::new(body.x, screen.y + 1, width, 1),
+        Rect::new(body.x, screen.y + crate::tabs::HEADER_HEIGHT - 1, width, 1),
     );
     let transcript = Paragraph::new(history(view, draft)).wrap(Wrap { trim: false });
     let height = transcript

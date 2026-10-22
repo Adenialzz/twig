@@ -53,7 +53,7 @@ pub fn discover() -> Result<PathBuf> {
     let info: Value = serde_json::from_str(&output)?;
     ensure!(
         info["status"] == "running",
-        "Codex daemon 未运行；请自行运行 codex app-server daemon start，再重试 Chat"
+        "Codex daemon 未运行；请自行运行 codex app-server daemon start，再重试 Agent"
     );
     Ok(PathBuf::from(
         info["socketPath"]

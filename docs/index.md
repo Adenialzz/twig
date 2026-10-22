@@ -40,4 +40,4 @@ twig guide --all          # 输出完整手册
 
 源码贡献者另见仓库根目录的 DESIGN.md、AGENTS.md 与 CONTRIBUTING.md；这些开发记录不是用户操作手册。
 
-- [主控 Agent 与 Chat](agent.md)：`twig guide agent`。
+- [主控 Agent](agent.md)：`twig guide agent`。

@@ -959,7 +959,7 @@ fn run_inner(
                 if let Some(notification) = &label.notification {
                     crate::notification::draw(frame, notification);
                 } else if label.chat_notification {
-                    crate::notification::draw_chat(frame, "Ctrl-W d 返回，再按 Tab 查看 Chat");
+                    crate::notification::draw_chat(frame, "Ctrl-W d 返回，再按 Tab 查看 Agent");
                 }
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);

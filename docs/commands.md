@@ -129,6 +129,6 @@ twig console
 
 结果和帮助写 stdout，错误/诊断写 stderr。成功通常为 0，执行失败和取消确认为 1，参数解析失败为 2；帮助与版本返回 0。成功表示命令执行完成，不表示启动程序就绪、测试通过或开发任务完成。自动化用法见 [Agent 与脚本](automation.md)（`twig guide automation`）。
 
-## 主控 Chat 与受管任务
+## 主控 Agent 与受管任务
 
-`twig chat` 打开主控对话，点击顶部 Console / Chat 标签或按 Tab 切换页面。`new PROJECT NAME --agent --no-open` 新建受管任务，使用专用 Codex 窗口，替代普通启动配置；`agent send/read/status/drain/cancel/notify` 提供派发、查询、恢复和通知。`stop` 会中断受管轮次并取消待发消息，重新 open 才允许继续派发。完整用法见 [主控 Agent](agent.md)（`twig guide agent`）。
+`twig chat` 打开主控对话，点击顶部 Console / Agent 标签或按 Tab 切换页面。`new PROJECT NAME --agent --no-open` 新建受管任务，使用专用 Codex 窗口，替代普通启动配置；`agent send/read/status/drain/cancel/notify` 提供派发、查询、恢复和通知。`stop` 会中断受管轮次并取消待发消息，重新 open 才允许继续派发。完整用法见 [主控 Agent](agent.md)（`twig guide agent`）。

@@ -509,7 +509,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     ]);
     let mut p = Pty::spawn(command);
     p.wait("demo");
-    p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
+    p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
     p.wait_screen("已请求复制 4 chars");
     let prefix = b"\x1b]52;c;";
     let start = p
@@ -525,7 +525,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     p.text.clear();
     p.bytes.clear();
     p.wait("demo");
-    p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
+    p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
     p.wait_screen("已请求复制 4 chars");
     p.send(b"\x1bq");
     p.wait("TERMINAL_RESTORED:0");
@@ -595,7 +595,7 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
     p.resize(65, 22);
     thread::sleep(Duration::from_millis(100));
     p.send(b"\x17j?");
-    p.wait_screen("切换 Console 与 Chat");
+    p.wait_screen("切换 Console 与 Agent");
     let start = Instant::now();
     p.send(b"\x03");
     p.wait("TERMINAL_RESTORED:0");
