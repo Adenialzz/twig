@@ -667,3 +667,9 @@ Control Mode 命令没有原生鼠标绑定上下文，不能直接使用 send-k
 工作台快照同时读取 tmux 的 cursor_shape 和 cursor_blinking，将活动 Pane 的块状、下划线、竖线及闪烁状态同步到前端。样式变化沿用输出事件刷新，切换 Pane 和重连时从 tmux 重新读取；返回导航、退出或错误返回时恢复终端默认样式。不识别 zsh/Vim 的编辑模式，也不修改用户 Shell 配置。
 
 独立 PTY 验收新增临时 Zsh vi 配置，覆盖无文字输出时 Esc/i 的光标切换、跨 Pane 样式、重连恢复及退出重置；原有 Vim 编辑、复制和响应验证继续通过。
+
+### Console 创建后直接进入任务（2026-10-22）
+
+Console 新建任务成功后，等待采集快照包含新任务并完成选择，再复用已有归属校验与内置工作台进入流程。新分支和已有本地/远端分支确认后的创建行为一致；Ctrl-W d 返回导航项目栏，保留新任务选择。创建子进程仍使用 --no-open，由当前 Console 承接终端交互。创建失败留在表单展示诊断；进入失败保留任务并返回导航提示原因。项目登记和删除后的导航行为不变。
+
+验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 全部通过。真实 Console PTY 覆盖创建失败后修正、已有分支确认后自动进入、带空格路径、返回导航保留任务选择，以及嵌套进入被拒绝时保留已创建任务；独立 example 构建与 Vim 编辑/重连验收通过。测试使用临时仓库与独立 tmux socket，未安装或提交。

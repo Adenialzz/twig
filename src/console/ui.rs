@@ -1128,7 +1128,7 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
                 "读取分支失败：{}",
                 safe(form.branch_error.as_deref().unwrap())
             ),
-            None => "创建后留在控制台，Enter 进入 Shell。".into(),
+            None => "创建成功后直接进入工作台，Ctrl-W d 返回导航。".into(),
         };
         frame.render_widget(
             Paragraph::new(message)

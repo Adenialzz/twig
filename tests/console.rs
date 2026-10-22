@@ -244,6 +244,28 @@ impl Pty {
             original,
         }
     }
+    fn created_task(&mut self, fixture: &Fixture, task: &str) {
+        self.wait(" · 全局 Codex ");
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(support::project_dir(&fixture.repo, &fixture.registry).join("state.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let path = state[task]["path"].as_str().unwrap();
+        self.send(
+            format!(
+                "test \"$PWD\" = '{}' && printf 'CREATED_%s\\n' OK\r",
+                path.replace('\'', "'\\''")
+            )
+            .as_bytes(),
+        );
+        self.wait("CREATED_OK");
+        self.text.clear();
+        self.bytes.clear();
+        self.send(b"\x17d");
+        self.wait("任务 / ");
+        self.wait(&format!("› {task}"));
+    }
     fn send(&mut self, text: &[u8]) {
         self.master.write_all(text).unwrap();
     }
@@ -616,6 +638,17 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("auth");
     p.send(b"\tG\r");
     p.wait("终端已返回导航：不能在当前");
+    p.text.clear();
+    p.bytes.clear();
+    p.send(b"2n");
+    p.wait("新建任务");
+    p.send(b"feat/nested\r");
+    p.wait("终端已返回导航：不能在当前");
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(PathBuf::from(state["feat/nested"]["path"].as_str().unwrap()).is_dir());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
 }
@@ -1253,7 +1286,7 @@ fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
 }
 
 #[test]
-fn forms_register_create_retry_and_cancel_without_entering_shell() {
+fn forms_register_create_retry_and_enter_task() {
     let mut f = Fixture::new();
     let spaced = f.temp.path().join("repo with spaces");
     fs::rename(&f.repo, &spaced).unwrap();
@@ -1308,8 +1341,7 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.bytes.clear();
     p.text.clear();
     p.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fmain\r");
-    // 背景保留旧状态，差量重绘不一定再次输出“操作成功”前缀。
-    p.wait("已选中 demo / feat/fresh");
+    p.created_task(&f, "feat/fresh");
     let state: serde_json::Value = serde_json::from_slice(
         &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
     )
@@ -1417,7 +1449,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     p.send(b"\r");
     p.wait("使用已有分支");
     p.send(b"\t\r");
-    p.wait("已选中 demo / feature/beta");
+    p.created_task(&f, "feature/beta");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(state["feature/beta"]["branch"], "feature/beta");
     assert!(state.get("feature/alpha").is_none());
@@ -1452,7 +1484,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         p.send(b"\r");
         p.wait("使用已有分支");
         p.send(b"\t\r");
-        p.wait("已选中 demo / feat/collision");
+        p.created_task(&f, "feat/collision");
         let state: serde_json::Value = serde_json::from_slice(
             &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
         )
@@ -1507,7 +1539,7 @@ fn remote_candidates_fill_task_names_and_preserve_local_precedence() {
             p.wait("upstream/feat/remote");
         }
         p.send(b"\t\r");
-        p.wait("已选中 demo / feat/remote");
+        p.created_task(&f, "feat/remote");
         let state: serde_json::Value = serde_json::from_slice(
             &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
         )
@@ -1613,7 +1645,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         p.wait("分支 upstream/feat/km_story 已存在");
         // 已锁定来源，方向键和 j/k 不切换来源，也不重置确认按钮。
         p.send(b"\tj\x1b[A\x1b[Bk\r");
-        p.wait("已选中 demo / feat/km_story");
+        p.created_task(&f, "feat/km_story");
         let state: serde_json::Value =
             serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
         assert!(state.get("km").is_none());
@@ -1711,7 +1743,7 @@ fn remote_candidate_handles_remote_names_with_slashes() {
     p.send(b"\t\r");
     p.wait("使用已有分支");
     p.send(b"\t\r");
-    p.wait("已选中 demo / fix/login");
+    p.created_task(&f, "fix/login");
     let output = Command::new("git")
         .current_dir(&f.repo)
         .args(["config", "branch.fix/login.remote"])
@@ -1812,7 +1844,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.send(b"\r");
     p.wait("使用已有分支");
     p.send(b"\t\r");
-    p.wait("操作成功");
+    p.created_task(&f, "existing");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
     assert_eq!(state["existing"]["branch"], "existing");
     p.send(b"q");

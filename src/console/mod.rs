@@ -615,10 +615,14 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
     let mut selection: Option<selection::Selection> = None;
     let mut unread_picker: Option<UnreadPicker> = None;
     let mut copy_notice: Option<twig_cli::clipboard::Notice> = None;
+    let mut created_task = None;
     loop {
         if let Some(form) = &mut app.form {
             match form.poll() {
                 Ok(Some(selection)) => {
+                    if form.project.is_some() && form.deletion.is_none() {
+                        created_task = Some(selection.clone());
+                    }
                     app.pending_removed = form.deletion.as_ref().map(|_| form.fields[0].clone());
                     app.pending_selection = Some(selection);
                     app.form = None;
@@ -644,6 +648,26 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
         }
         if updated {
             app.reconcile();
+            worker.requests.send(app.request())?;
+        }
+        if app.pending_selection.is_none()
+            && let Some((project, task)) = created_task.take()
+        {
+            match data::prepare_terminal(&registry, &project, &task) {
+                Ok((session, window)) => open_terminal(
+                    &mut app,
+                    &mut terminal,
+                    &worker,
+                    TerminalTarget {
+                        project,
+                        session,
+                        window,
+                    },
+                    &registry,
+                    None,
+                )?,
+                Err(error) => app.message = Some(format!("任务已创建，进入失败：{error:#}")),
+            }
             worker.requests.send(app.request())?;
         }
         app.receive_notifications(&worker, None);
