@@ -210,3 +210,68 @@ mod visibility_tests {
         }
     }
 }
+
+/// 与采集线程共享，按事件发生时所在页面决定是否提醒。
+#[derive(Default)]
+pub struct ChatNotifications {
+    viewing: bool,
+    unread: bool,
+    pending: bool,
+    since: Option<Instant>,
+}
+impl ChatNotifications {
+    pub fn viewing(&mut self, viewing: bool) {
+        self.viewing = viewing;
+        if viewing {
+            self.unread = false;
+            self.pending = false;
+            self.since = None;
+        }
+    }
+    pub fn receive(&mut self) {
+        if !self.viewing {
+            self.unread = true;
+            self.pending = true;
+            self.since = None;
+        }
+    }
+    pub fn status(&mut self, now: Instant, can_show: bool) -> (bool, bool) {
+        if self.pending && can_show {
+            let since = self.since.get_or_insert(now);
+            if now.duration_since(*since) >= Duration::from_secs(8) {
+                self.pending = false;
+                self.since = None;
+            }
+        }
+        (self.unread, self.pending && can_show)
+    }
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn chat_is_silent_while_viewing_and_unread_survives_card_expiry() {
+        let mut chat = ChatNotifications::default();
+        let now = Instant::now();
+        chat.viewing(true);
+        chat.receive();
+        assert_eq!(chat.status(now, true), (false, false));
+        chat.viewing(false);
+        chat.receive();
+        assert_eq!(chat.status(now, false), (true, false));
+        // 任务卡片先显示，主控卡片从实际显示时开始计时。
+        let shown = now + Duration::from_secs(20);
+        assert_eq!(chat.status(shown, true), (true, true));
+        assert_eq!(
+            chat.status(shown + Duration::from_secs(8), true),
+            (true, false)
+        );
+        chat.receive();
+        chat.viewing(true);
+        assert_eq!(chat.status(shown, true), (false, false));
+        chat.viewing(false);
+        assert_eq!(chat.status(shown, true), (false, false));
+    }
+}

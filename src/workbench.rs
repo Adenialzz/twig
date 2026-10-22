@@ -774,6 +774,7 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
         &mut |_, _| Status {
             text: "twig 实验工作台".into(),
             notification: None,
+            chat_notification: false,
             unread: Vec::new(),
         },
     )
@@ -784,6 +785,7 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
 pub struct Status {
     pub text: String,
     pub notification: Option<crate::notification::CompletionNotice>,
+    pub chat_notification: bool,
     pub unread: Vec<UnreadTask>,
 }
 
@@ -956,6 +958,8 @@ fn run_inner(
                 );
                 if let Some(notification) = &label.notification {
                     crate::notification::draw(frame, notification);
+                } else if label.chat_notification {
+                    crate::notification::draw_chat(frame, "Ctrl-W d 返回，再按 Tab 查看 Chat");
                 }
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);

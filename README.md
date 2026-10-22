@@ -64,4 +64,4 @@ Console 在内容变化时重绘，状态查询按任务分批更新。进入终
 
 ## 主控 Chat
 
-`twig chat` 打开主控，点击顶部 Console / Chat 标签或按 Tab 切换页面。需要已运行的 Codex daemon；不可用时只提示用户启动。受管任务使用 `twig new PROJECT TASK --agent`，通过 CLI 派活与完成回调跟进；退出 UI 不停止 Codex。Chat 支持消息分层、代码块着色、拖选复制、Alt-C 复制回复和自动增高的输入框。飞书通知读取 `TWIG_FEISHU_WEBHOOK_URL`。详见 [主控指南](docs/agent.md)（`twig guide agent`）。
+`twig chat` 打开主控，点击顶部 Console / Chat 标签或按 Tab 切换页面。需要已运行的 Codex daemon；不可用时只提示用户启动。受管任务使用 `twig new PROJECT TASK --agent`，通过 CLI 派活与完成回调跟进；退出 UI 不停止 Codex。Chat 支持消息分层、代码块着色、拖选复制、Alt-C 复制回复和自动增高的输入框。离开 Chat 后，主控回复完成会浮动提醒，`Chat*` 标记未读，进入 Chat 后清除。飞书通知读取 `TWIG_FEISHU_WEBHOOK_URL`。详见 [主控指南](docs/agent.md)（`twig guide agent`）。

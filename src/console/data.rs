@@ -1,4 +1,7 @@
-use super::{notifications::Completion, query};
+use super::{
+    notifications::{ChatNotifications, Completion},
+    query,
+};
 use crate::{
     codex::{Client, Thread, Turn},
     config::{Config, Feature, Project},
@@ -82,6 +85,7 @@ pub struct Worker {
     pub requests: Sender<Request>,
     pub updates: Updates,
     pub completions: Receiver<Completion>,
+    pub chat: Arc<Mutex<ChatNotifications>>,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -93,14 +97,17 @@ impl Worker {
         let (completed, completions) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
+        let chat = Arc::new(Mutex::new(ChatNotifications::default()));
+        let chat_out = chat.clone();
         let handle = thread::spawn(move || {
             query::install(stop.clone());
-            collect(registry, rx, out, completed, stop);
+            collect(registry, rx, out, completed, stop, chat_out);
         });
         Self {
             requests: tx,
             updates,
             completions,
+            chat,
             cancel,
             handle: Some(handle),
         }
@@ -448,6 +455,7 @@ fn collect(
     updates: Updates,
     completions: Sender<Completion>,
     cancel: Arc<AtomicBool>,
+    chat: Arc<Mutex<ChatNotifications>>,
 ) {
     let mut snapshot = Snapshot {
         codex_error: Some("尚未连接".into()),
@@ -530,10 +538,15 @@ fn collect(
                     }
                     let client = client.as_mut().unwrap();
                     let threads = client.loaded()?;
+                    let state = crate::agent::Store::new(&registry)?.load()?;
+                    let controller = state.bindings.get("controller");
                     let mut owners = Owners::new(&snapshot.repos);
                     let mut paths: BTreeMap<_, _> = threads
                         .iter()
-                        .filter(|t| owners.get(&t.cwd).is_some())
+                        .filter(|t| {
+                            owners.get(&t.cwd).is_some()
+                                || controller.is_some_and(|c| c.thread == t.id)
+                        })
                         .map(|t| (t.id.clone(), t.cwd.clone()))
                         .collect();
                     // 轮次结束后会话可能立即卸载，仍需读取已观察到的进行中轮次。
@@ -543,6 +556,22 @@ fn collect(
                         }
                     }
                     for (id, path) in paths {
+                        if controller.is_some_and(|c| c.thread == id) {
+                            // 空会话还没有 rollout；建立空基线，避免查询不存在的轮次存储。
+                            if threads.iter().any(|t| t.id == id && t.preview.is_empty()) {
+                                watched.entry(id).or_insert((path, None));
+                                continue;
+                            }
+                            let (latest, turns) = client
+                                .completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
+                            for turn in turns {
+                                if announced.insert((id.clone(), turn.id)) {
+                                    chat.lock().unwrap().receive();
+                                }
+                            }
+                            watched.insert(id, (path, latest));
+                            continue;
+                        }
                         let Some((project, task_path)) = owners.get(&path) else {
                             continue;
                         };

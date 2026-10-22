@@ -316,6 +316,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
         screen,
         crate::tabs::Tab::Chat,
         "Tab 切换 · F5 重连 · Ctrl-Q 退出",
+        false,
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![

@@ -15,6 +15,37 @@ pub struct CompletionNotice {
 
 /// 仅绘制覆盖层，不改变输入焦点或底层终端尺寸。
 pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
+    let safe = |value: &str| {
+        value
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+    };
+    draw_card(
+        frame,
+        " ✓ Codex 本轮已完成 ",
+        vec![
+            Line::from(format!("项目：{}", safe(&notice.project))),
+            Line::from(format!("任务：{}", safe(&notice.task))),
+            Line::from(""),
+            Line::from("Ctrl-W f 跳转"),
+        ],
+    );
+}
+
+pub fn draw_chat(frame: &mut Frame, hint: &str) {
+    draw_card(
+        frame,
+        " 主控有新消息 ",
+        vec![
+            Line::from("主控已完成回复"),
+            Line::from(""),
+            Line::from(hint),
+        ],
+    );
+}
+
+fn draw_card(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>) {
     let screen = frame.area();
     let width = screen.width.saturating_sub(2).min(48);
     let height = screen.height.saturating_sub(2).min(8);
@@ -24,31 +55,20 @@ pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
         width,
         height,
     );
-    let safe = |value: &str| {
-        value
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect::<String>()
-    };
-    let card = Paragraph::new(vec![
-        Line::from(format!("项目：{}", safe(&notice.project))),
-        Line::from(format!("任务：{}", safe(&notice.task))),
-        Line::from(""),
-        Line::from("Ctrl-W f 跳转"),
-    ])
-    .wrap(Wrap { trim: false })
-    .style(Style::default().fg(Color::White).bg(Color::Indexed(24)))
-    .block(
-        Block::default()
-            .title(" ✓ Codex 本轮已完成 ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-    );
+    let card = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White).bg(Color::Indexed(24)))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        );
     frame.render_widget(Clear, area);
     frame.render_widget(card, area);
 }

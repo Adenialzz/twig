@@ -99,6 +99,20 @@ class Frontend:
             assert self.process.poll() is None, self.screen.display
         raise AssertionError((text, self.screen.display))
 
+    def absent_for(self, text, seconds=3):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if select.select([self.master], [], [], 0.05)[0]:
+                data = os.read(self.master, 65536)
+                self.output.extend(data)
+                self.stream.feed(data)
+            try:
+                display = "\n".join(self.screen.display)
+            except IndexError:
+                continue
+            assert text not in display, display
+            assert self.process.poll() is None
+
     def close(self):
         if self.process.poll() is None:
             self.process.kill()
@@ -235,8 +249,30 @@ supports_websockets = false
         print("PASS: 空主控卸载后重建绑定，保留 AGENTS.md 和全局计划", flush=True)
         frontend.send(b"first-chat-message\r")
         frontend.wait("probe complete 1")
-        frontend.send(b"second-chat-message\r")
+        frontend.absent_for("主控有新消息")
+        frontend.send(b"hold-controller\r")
+        assert model.entered["controller"].wait(10)
+        frontend.send(b"\t")
+        frontend.wait("个项目")
+        model.release["controller"].set()
+        frontend.wait("主控有新消息")
+        frontend.wait("Chat*")
+        time.sleep(8.5)
+        frontend.wait("Tab 切换标签")
+        frontend.absent_for("主控有新消息", 1)
+        frontend.wait("Chat*")
+        frontend.send(b"\t")
         frontend.wait("probe complete 2")
+        frontend.absent_for("Chat*", 1)
+        frontend.send(b"\t")
+        frontend.wait("个项目")
+        frontend.absent_for("主控有新消息")
+        frontend.absent_for("Chat*", 1)
+        frontend.send(b"\t")
+        frontend.wait("probe complete 2")
+        model.entered["controller"].clear()
+        model.release["controller"].clear()
+        print("PASS: 主控后台回复浮动提醒、Chat 未读、卡片到期保留未读、查看后清除且不重复", flush=True)
         # 有历史的会话被卸载时，正在打开的 Chat 应重新加载原 ID。
         original = state()["bindings"]["controller"]["thread"]
         server.terminate()
@@ -333,9 +369,25 @@ supports_websockets = false
         frontend.wait("空闲")
         frontend.wait("gpt-5.4 · 推理 high")
         frontend.send(b"\x15")  # 清空草稿
-        frontend.send(b"chat-test\r")
-        frontend.wait("chat-test")
-        wait_for(lambda: any(m["text"] == "chat-test" and m["status"] == "sent" for m in state()["messages"]), "Chat 未发送")
+        frontend.absent_for("主控有新消息")
+        model.entered["controller"].clear()
+        model.release["controller"].clear()
+        frontend.send(b"chat-test hold-controller\r")
+        assert model.entered["controller"].wait(10)
+        frontend.send(b"\t")
+        frontend.wait("个项目")
+        frontend.send(b"2\r")
+        frontend.send(b"printf 'CHAT_NOTICE_WORKBENCH\\n'\r")
+        frontend.wait("CHAT_NOTICE_WORKBENCH")
+        model.release["controller"].set()
+        frontend.wait("主控有新消息")
+        frontend.wait("Chat 有新消息")
+        frontend.send(b"\x17d")
+        frontend.wait("Chat*")
+        frontend.send(b"\t")
+        frontend.wait("chat-test hold-controller")
+        frontend.absent_for("Chat*", 1)
+        print("PASS: 工作台主控提醒与未读、返回 Chat 清除", flush=True)
         frontend.send(b"\x11")
         frontend.process.wait(timeout=5)
         assert frontend.process.returncode == 0

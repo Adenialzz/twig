@@ -80,6 +80,8 @@
 
 ## 主控 Agent 验证
 
+- 主控提醒复用 Console 只读轮次采集，按当前配置的 controller thread ID 识别；空会话建立空基线，历史完成不提醒。Chat 查看状态与采集线程同步，查看期间静默，进入清除；主控卡片合并并在任务卡片之后显示，未读仅存当前进程。测试覆盖导航和工作台提醒、到期保留未读及查看后清除。
+
 - 主控实现位于 src/agent/，Chat 展示在 src/agent/chat/view.rs，拖选复用 Console Selection，复制复用共享剪贴板线程；验证必须捕获 OSC 52 或模拟后端，不写真实剪贴板。写操作客户端与 src/codex.rs 只读监控隔离。受管任务只通过 new --agent 新建，不迁移旧任务；会话绑定以当前任务 thread ID 为准，旧回调不能作用于同名新任务。
 - 消息先持久化，再发送；不确定结果以 clientUserMessageId 核对，不自动重发。回调先验证真实完成状态并去重；主控自己的回调仅出队，避免自激循环。CLI 锁不能约束原生 Codex 的并发输入。
 - 变更主控后构建正式 binary，执行 `uv run examples/check_agent.py`，使用独立 CODEX_HOME、app-server、tmux socket、本地固定模型与模拟飞书。禁止连接真实用户会话或向真实 webhook 发消息来验收。协议实验为 `uv run examples/check_controller.py`。

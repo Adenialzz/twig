@@ -147,7 +147,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         )),
         Rect::new(rows[0].x, rows[0].y + 1, rows[0].width, 1),
     );
-    crate::tabs::draw(frame, rows[0], crate::tabs::Tab::Console, "Tab 切换标签");
+    crate::tabs::draw(
+        frame,
+        rows[0],
+        crate::tabs::Tab::Console,
+        "Tab 切换标签",
+        app.chat_status.0,
+    );
     let areas = panels(area, app.searching);
     if area.width >= 100 {
         projects(frame, areas[0], app);

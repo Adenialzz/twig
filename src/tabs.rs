@@ -33,7 +33,7 @@ fn areas(area: Rect) -> [(Tab, &'static str, Rect); 2] {
     ]
 }
 
-pub fn draw(frame: &mut Frame, area: Rect, active: Tab, hint: &str) {
+pub fn draw(frame: &mut Frame, area: Rect, active: Tab, hint: &str, chat_unread: bool) {
     for (tab, title, rect) in areas(area) {
         let style = if tab == active {
             Style::default()
@@ -42,6 +42,11 @@ pub fn draw(frame: &mut Frame, area: Rect, active: Tab, hint: &str) {
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray).bg(Color::DarkGray)
+        };
+        let title = if tab == Tab::Chat && chat_unread {
+            " Chat*"
+        } else {
+            title
         };
         frame.render_widget(Paragraph::new(title).style(style), rect);
     }

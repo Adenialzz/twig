@@ -26,6 +26,7 @@ use std::{
 pub(super) struct App {
     snapshot: Snapshot,
     notifications: notifications::Notifications,
+    chat_status: (bool, bool),
     project: Option<String>,
     task: Option<PathBuf>,
     thread: Option<String>,
@@ -67,6 +68,7 @@ impl App {
     fn new(cwd: PathBuf) -> Self {
         Self {
             notifications: Default::default(),
+            chat_status: (false, false),
             snapshot: Snapshot {
                 codex_error: Some("正在连接 Codex…".into()),
                 ..Default::default()
@@ -111,6 +113,13 @@ impl App {
             self.notifications.receive(completion, viewed);
         }
         self.notifications.tick(Instant::now());
+        let chat_status = worker
+            .chat
+            .lock()
+            .unwrap()
+            .status(Instant::now(), self.notifications.current().is_none());
+        changed |= self.chat_status != chat_status;
+        self.chat_status = chat_status;
         changed || before.as_ref() != self.notifications.current()
     }
 
@@ -540,8 +549,13 @@ fn open_terminal(
                 }
                 let summary = data::summary(app.snapshot.threads.iter());
                 let text = format!(
-                    "{} · 全局 Codex {}",
+                    "{}{} · 全局 Codex {}",
                     target.project,
+                    if app.chat_status.0 {
+                        " · Chat 有新消息"
+                    } else {
+                        ""
+                    },
                     if app.snapshot.codex_error.is_some() {
                         "连接异常"
                     } else if app
@@ -559,6 +573,7 @@ fn open_terminal(
                         Some(error) => format!("{text} · {error}"),
                         None => text,
                     },
+                    chat_notification: app.chat_status.1,
                     notification: app.notifications.current().cloned(),
                     unread: app.notifications.tasks(),
                 }
@@ -620,6 +635,18 @@ fn run_mode(
     std::panic::set_hook(previous);
     result
 }
+fn open_chat(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    registry: &std::path::Path,
+    draft: &mut crate::agent::chat::Draft,
+    worker: &Worker,
+) -> Result<bool> {
+    worker.chat.lock().unwrap().viewing(true);
+    let result = crate::agent::chat::run(terminal, registry.to_owned(), draft);
+    worker.chat.lock().unwrap().viewing(false);
+    result
+}
+
 fn run_inner(
     registry: PathBuf,
     cwd: PathBuf,
@@ -631,7 +658,7 @@ fn run_inner(
     let worker = Worker::start(registry.clone());
     let mut app = App::new(cwd);
     let mut chat_draft = crate::agent::chat::Draft::default();
-    if chat && crate::agent::chat::run(&mut terminal, registry.clone(), &mut chat_draft)? {
+    if chat && open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
         return Ok(());
     }
     if let Some(target) = &initial {
@@ -757,6 +784,8 @@ fn run_inner(
                 }
                 if let Some(notice) = app.notifications.current() {
                     twig_cli::notification::draw(frame, notice);
+                } else if app.chat_status.1 {
+                    twig_cli::notification::draw_chat(frame, "Tab 查看 Chat");
                 }
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
@@ -998,7 +1027,7 @@ fn run_inner(
         }
         if matches!(key.code, KeyCode::Tab | KeyCode::F(2)) {
             selection = None;
-            if crate::agent::chat::run(&mut terminal, registry.clone(), &mut chat_draft)? {
+            if open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
                 break;
             }
             app.pane_prefix = false;
