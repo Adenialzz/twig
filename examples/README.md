@@ -1,4 +1,18 @@
-# Control Mode 独立验收入口
+# 独立验收入口
+
+## 主控 Codex 协议验证
+
+```sh
+uv run examples/check_controller.py
+```
+
+需要 Codex CLI 和 uv；脚本只使用 Python 标准库。它在临时 CODEX_HOME 和专用 Unix socket 上启动真实 app-server，以本地固定 Responses 响应代替模型；不读取真实认证、不连接真实 daemon、不消耗模型额度、不发送飞书消息。模拟模型名称仅用于协议配置，不选择或调用线上模型。
+
+在 Codex 0.163.0 验证：忙时 turn/start 加入当前轮次；所有 UI 客户端断开后 notify 继续执行；两个完成回调通过临时队列使主控在当前轮次完成后再处理反馈；主控调用独立 CLI 并读取模拟通知环境变量；重新连接可读取历史，重复完成事件不重复派发。
+
+这是 RFC 第一阶段的协议原型，回调和队列由验收脚本模拟，尚未实现正式 Twig 命令。它使用前台启动、独立于客户端存活的 app-server，未覆盖受管理 daemon 重启、30 分钟卸载、回调崩溃或投递结果未知、人工输入竞争、tmux 启动配置及审批场景。不会据此宣称生产消息队列已具备可靠性。
+
+## Control Mode 工作台
 
 正式实现位于 `src/workbench.rs`，由 Console 和 `control_mode.rs` 共用。Console 任务区 Enter、`new/open` 都打开同一个工作台，Ctrl-W d 返回导航并选中对应任务。用户操作见 [Console 手册](../docs/console.md)。
 
