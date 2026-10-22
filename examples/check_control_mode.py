@@ -167,8 +167,43 @@ def main():
             second.wait("INPUT_RESPONSIVE")
             latency = time.monotonic() - started
             assert latency < 2, latency
+
+            # 隔离的模拟程序接收滚轮；右侧非活动 Pane 验证坐标和目标归属。
+            receiver = Path(root) / "mouse-input"
+            pane = mux("split-window", "-h", "-d", "-P", "-F", "#{pane_id}").strip().decode()
+            for mode, enable in [("sgr", "1000h\\033[?1006h"),
+                                 ("legacy", "1002h"),
+                                 ("utf8", "1003h\\033[?1005h"),
+                                 ("off", "1006h")]:
+                receiver.write_bytes(b"")
+                command = (
+                    "stty raw -echo; printf '\\033[?1000l\\033[?1002l\\033[?1003l"
+                    "\\033[?1005l\\033[?1006l\\033[?1049h\\033[?"
+                    + enable + "MOUSE_READY_" + mode + "'; cat > " + shlex.quote(str(receiver))
+                )
+                mux("respawn-pane", "-k", "-t", pane, command)
+                second.wait("MOUSE_READY_" + mode)
+                left, top = map(int, mux("display-message", "-p", "-t", pane,
+                                        "#{pane_left} #{pane_top}").split())
+                # SGR 输入坐标从 1 开始；程序应收到 Pane 内的 (2, 3)。
+                second.send(f"\x1b[<64;{left+2};{top+3}M\x1b[<65;{left+2};{top+3}M".encode())
+                expected = (b"\x1b[<64;2;3M\x1b[<65;2;3M" if mode == "sgr"
+                            else b"\x1b[M`\x22\x23\x1b[Ma\x22\x23")
+                if mode == "off":
+                    second.settle()
+                    assert receiver.read_bytes() == b"", "未启用鼠标时不能发送转义序列"
+                else:
+                    second.until(lambda: receiver.read_bytes() == expected, "滚轮协议 " + mode)
+                    # 左键点击和拖选不发送给程序。
+                    second.send(f"\x1b[<0;{left+2};{top+3}M\x1b[<32;{left+5};{top+3}M"
+                                f"\x1b[<0;{left+5};{top+3}m".encode())
+                    second.settle()
+                    assert receiver.read_bytes() == expected
+                    second.send(b"\x1b")
+                mux("select-pane", "-t", "%0")
+            mux("kill-pane", "-t", pane)
             second.detach()
-            print(f"通过：Vim 编辑与重连、保存、Shell、历史拖选复制与画面冻结、终端还原；有限输出期间输入延迟 {latency:.3f}s")
+            print(f"通过：Vim 编辑与重连、保存、Shell、历史拖选复制与画面冻结、鼠标模式及分屏滚轮转发、终端还原；有限输出期间输入延迟 {latency:.3f}s")
         finally:
             for client in clients:
                 client.close()
