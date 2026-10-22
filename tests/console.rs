@@ -1618,7 +1618,7 @@ fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
 }
 
 #[test]
-fn ctrl_w_directions_switch_lists_without_triggering_history_or_forms() {
+fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     let f = Fixture::new();
     f.init();
     let mut p = f.terminal(false);
@@ -1629,12 +1629,32 @@ fn ctrl_w_directions_switch_lists_without_triggering_history_or_forms() {
         (b"\x17j".as_slice(), "Codex 已加载"),
         (b"\x17k".as_slice(), "任务 /"),
         (b"\x17h".as_slice(), "› demo"),
+        (b"2".as_slice(), "任务 /"),
+        (b"1".as_slice(), "› demo"),
     ] {
         p.bytes.clear();
         p.text.clear();
         p.send(keys);
         p.wait(expected);
     }
+    // 数字快捷键保持任务筛选；搜索中的数字仍是查询内容。
+    p.send(b"2/auth12\r");
+    // 切走再切回以读取完整标题，避免把终端差量更新当成完整文本。
+    for (keys, expected) in [(b"1", "› demo"), (b"2", "任务 / auth12")] {
+        p.bytes.clear();
+        p.text.clear();
+        p.send(keys);
+        p.wait(expected);
+    }
+    // 表单中的数字仍可输入，取消不创建任务。
+    p.send(b"n");
+    p.wait("新建任务");
+    p.send(b"task12");
+    p.wait("2▏");
+    p.resize(66, 22);
+    p.wait("task12");
+    p.send(b"\x03");
+    p.send(b"1");
     // 前缀取消后 n 仍打开项目表单；表单内 Ctrl-W 不改变焦点。
     p.send(b"\x17");
     p.bytes.clear();

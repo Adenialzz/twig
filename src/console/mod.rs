@@ -954,6 +954,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             }
             KeyCode::PageDown => app.scroll = app.scroll.saturating_add(4),
             KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(4),
+            KeyCode::Char('1') if key.modifiers.is_empty() => app.focus = 0,
+            KeyCode::Char('2') if key.modifiers.is_empty() => app.focus = 1,
             KeyCode::Tab => app.focus = (app.focus + 1) % 3,
             KeyCode::BackTab => app.focus = (app.focus + 2) % 3,
             KeyCode::Down | KeyCode::Char('j') => app.step(1),
