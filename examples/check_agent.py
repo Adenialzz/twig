@@ -171,6 +171,24 @@ supports_websockets = false
     frontend = None
     try:
         wait_for(socket.exists, "服务未启动")
+        # 首次 Chat 必须从没有任何历史轮次的主控开始，而不是预先发过消息。
+        frontend = Frontend(binary, config, cwd, env)
+        frontend.wait("空闲")
+        empty_thread = state()["bindings"]["controller"]["thread"]
+        frontend.send(b"\t")
+        frontend.wait("个项目")
+        frontend.send(b"\t")
+        frontend.wait("空闲")
+        assert state()["bindings"]["controller"]["thread"] == empty_thread
+        frontend.send(b"first-chat-message\r")
+        frontend.wait("probe complete 1")
+        frontend.send(b"second-chat-message\r")
+        frontend.wait("probe complete 2")
+        frontend.send(b"\x11")
+        frontend.process.wait(timeout=5)
+        frontend.close()
+        frontend = None
+        print("PASS: 全新主控首次打开 Chat，连续两轮输入及回复实际显示", flush=True)
         main = json.loads(twig("agent", "init"))
         assert json.loads(twig("agent", "init"))["thread"] == main["thread"]
         twig("add", "demo", "--path", str(cwd))
@@ -195,7 +213,7 @@ supports_websockets = false
         model.release["worker"].set()
         wait_for(lambda: any(m["status"] == "queued" and m["thread"] == main["thread"] for m in state()["messages"]), "完成反馈未排队")
         model.release["controller"].set()
-        wait_for(lambda: len(state()["seen"]) >= 3, "主控未完成反馈轮次")
+        wait_for(lambda: len(state()["seen"]) >= 5, "主控未完成反馈轮次")
         assert all(m["status"] == "sent" for m in state()["messages"])
         assert model.notices == [{"msg_type": "text", "content": {"text": "离线主控已收到任务反馈"}}]
         print("PASS: 未打开 UI 时主控调用真实 Twig 通知 CLI，继承环境并送达模拟飞书", flush=True)

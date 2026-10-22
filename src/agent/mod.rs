@@ -473,11 +473,20 @@ impl Store {
         drop(_lock);
         self.flush()
     }
-    pub fn resume(&self, client: &mut rpc::Client, binding: &Binding) -> Result<()> {
+    pub fn resume(&self, client: &mut rpc::Client, binding: &Binding) -> Result<bool> {
         self.validate(binding)?;
-        check_thread(binding, &client.thread(&binding.thread)?)?;
+        let result = client.thread(&binding.thread)?;
+        check_thread(binding, &result)?;
+        // 新建且仍加载的空会话尚无 rollout，不能恢复；首条消息仍可直接投递。
+        if result["thread"]["preview"]
+            .as_str()
+            .is_some_and(str::is_empty)
+            && result["thread"]["status"]["type"] != "notLoaded"
+        {
+            return Ok(false);
+        }
         client.call("thread/resume", json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}}))?;
-        Ok(())
+        Ok(true)
     }
     pub fn stop_task(&self, thread: &str) -> Result<()> {
         let _lock = self.lock()?;

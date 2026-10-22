@@ -115,7 +115,7 @@ fn answer(request: &Value, accept: bool) -> Result<Value> {
 }
 
 fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sender<View>) {
-    let mut connection: Option<(Store, Binding, rpc::Client)> = None;
+    let mut connection: Option<(Store, Binding, rpc::Client, bool)> = None;
     let mut last_error = None;
     let mut refresh = true;
     loop {
@@ -142,9 +142,9 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 let binding = store.initialize()?;
                 let state = store.load()?;
                 let mut client = store.client(&state)?;
-                store.resume(&mut client, &binding)?;
+                let subscribed = store.resume(&mut client, &binding)?;
                 store.drain()?;
-                Ok((store, binding, client))
+                Ok((store, binding, client, subscribed))
             })();
             match result {
                 Ok(c) => {
@@ -155,7 +155,7 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
             }
         }
         let mut view = View::default();
-        if let Some((store, binding, client)) = &mut connection {
+        if let Some((store, binding, client, subscribed)) = &mut connection {
             view.connected = true;
             let result = (|| -> Result<()> {
                 match command {
@@ -172,6 +172,9 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                         }
                     }
                     _ => {}
+                }
+                if !*subscribed {
+                    *subscribed = store.resume(client, binding)?;
                 }
                 let result = client.thread(&binding.thread)?;
                 view.text = transcript(&result);
