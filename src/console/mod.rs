@@ -160,7 +160,9 @@ impl App {
             1 => {
                 if let Some(repo) = self.repo() {
                     if let Some((_, config)) = &repo.context {
-                        self.form = Some(form::Form::task(repo.name.clone(), config.base.clone()));
+                        let mut form = form::Form::task(repo.name.clone(), config.base.clone());
+                        form.load_branches(&config.main);
+                        self.form = Some(form);
                     } else {
                         self.message = Some("项目不可用，请先处理项目异常".into());
                     }
@@ -485,10 +487,18 @@ fn open_terminal(
     registry: &std::path::Path,
     mut jump: Option<twig_cli::notification::CompletionNotice>,
 ) -> Result<()> {
+    let mut usage_error = None;
     let result = loop {
+        let mut recorded = false;
         let initial_task = app.task.clone();
         let result =
             twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
+                if !recorded {
+                    recorded = true;
+                    usage_error = crate::registry::record_use(registry, &target.project)
+                        .err()
+                        .map(|error| format!("{error:#}"));
+                }
                 if let Some(notice) = jump.take() {
                     app.notifications.dismiss(&notice);
                 }
@@ -533,7 +543,10 @@ fn open_terminal(
                     }
                 );
                 twig_cli::workbench::Status {
-                    text,
+                    text: match &usage_error {
+                        Some(error) => format!("{text} · {error}"),
+                        None => text,
+                    },
                     notification: app.notifications.current().cloned(),
                     unread: app.notifications.tasks(),
                 }
@@ -555,7 +568,8 @@ fn open_terminal(
     app.focus = 0;
     app.message = result
         .err()
-        .map(|error| format!("终端已返回导航：{error:#}"));
+        .map(|error| format!("终端已返回导航：{error:#}"))
+        .or(usage_error);
     execute!(io::stdout(), EnableMouseCapture)?;
     terminal.clear()?;
     Ok(())
@@ -771,19 +785,23 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                     KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
                         existing.confirmed = !existing.confirmed
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
+                    KeyCode::Up | KeyCode::Char('k') if existing.branches.len() > 1 => {
                         existing.selected = existing.selected.saturating_sub(1);
                         existing.confirmed = false;
+                        form.scroll = 0;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down | KeyCode::Char('j') if existing.branches.len() > 1 => {
                         existing.selected =
                             (existing.selected + 1).min(existing.branches.len() - 1);
                         existing.confirmed = false;
+                        form.scroll = 0;
                     }
                     KeyCode::Enter if !existing.confirmed => form.existing = None,
                     KeyCode::Enter => {
                         if let Err(error) = form.confirm(&registry) {
                             form.error = Some(format!("{error:#}"));
+                            form.existing = None;
+                            form.scroll = 0;
                         }
                     }
                     _ => {}
@@ -822,7 +840,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             match key.code {
                 KeyCode::Esc => app.form = None,
                 KeyCode::Tab => {
-                    if !form.complete_path() {
+                    if !form.complete_path() && !form.complete_branch() {
                         form.field = (form.field + 1) % 2;
                     }
                 }
@@ -835,6 +853,18 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                     form.directory_selection = (form.directory_selection + form.directories.len()
                         - 1)
                         % form.directories.len();
+                }
+                KeyCode::Down if form.completing_branch() => {
+                    let count = form.matching_branches().count();
+                    if count > 0 {
+                        form.branch_selection = (form.branch_selection + 1) % count;
+                    }
+                }
+                KeyCode::Up if form.completing_branch() => {
+                    let count = form.matching_branches().count();
+                    if count > 0 {
+                        form.branch_selection = (form.branch_selection + count - 1) % count;
+                    }
                 }
                 KeyCode::Backspace => {
                     form.fields[form.field].pop();
@@ -942,6 +972,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             }
             KeyCode::PageDown => app.scroll = app.scroll.saturating_add(4),
             KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(4),
+            KeyCode::Char('1') if key.modifiers.is_empty() => app.focus = 0,
+            KeyCode::Char('2') if key.modifiers.is_empty() => app.focus = 1,
             KeyCode::Tab => app.focus = (app.focus + 1) % 3,
             KeyCode::BackTab => app.focus = (app.focus + 2) % 3,
             KeyCode::Down | KeyCode::Char('j') => app.step(1),

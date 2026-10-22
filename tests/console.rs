@@ -426,6 +426,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
     for keys in [b"Ggg\r".as_slice(), b"G\r".as_slice()] {
         let mut p = f.terminal(false);
         p.wait("auth");
+        let before_entry = fs::read(&f.registry).unwrap();
         p.send(b"\r");
         // 首次 Enter 仅进入任务区；搜索仍由 Console 处理。
         p.send(b"/auth");
@@ -433,10 +434,20 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.send(b"\r");
         // 返回项目后重新 Enter，应清除任务筛选并选中主工作目录。
         p.send(b"\x1b[Z\r");
+        assert_eq!(fs::read(&f.registry).unwrap(), before_entry);
         p.send(keys);
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'ENTERED_%s\\n' SHELL\r");
         p.wait("ENTERED_SHELL");
+        assert_ne!(fs::read(&f.registry).unwrap(), before_entry);
+        let registry: toml::Value =
+            toml::from_str(&fs::read_to_string(&f.registry).unwrap()).unwrap();
+        assert!(
+            registry["projects"]["demo"]["last_used"]
+                .as_integer()
+                .unwrap()
+                > 0
+        );
         p.send(b"printf 'SELECTED_DIR:%s\n' \"$PWD\"\r");
         let expected = if keys == b"Ggg\r" {
             f.repo.canonicalize().unwrap()
@@ -615,7 +626,7 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
     f.init();
     let target = f.repo.with_file_name("repo.worktrees").join("feat/unified");
     let mut previous_pids = None;
-    for action in ["new", "new", "open"] {
+    for action in ["new", "open", "open"] {
         let mut command = Command::new("sh");
         f.env(&mut command);
         // 启动目录故意与目标任务无关，选中项必须来自显式命令参数。
@@ -1254,7 +1265,8 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.bytes.clear();
     p.text.clear();
     p.send(b"\x1b");
-    p.wait("尚未登记项目");
+    // 弹窗外空列表未变化，检查被弹窗遮挡的详情区恢复。
+    p.wait("任务详情");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(!f.registry.exists());
@@ -1284,8 +1296,10 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     // 创建项目后焦点已在任务区；通过候选补全打开任务表单。
     p.send(b"/ne\t\r");
     p.wait("新建任务");
+    let before_creation = fs::read(&f.registry).unwrap();
     p.send(b"feat/fresh\t\x7f\x7f\x7f\x7fmissing\r");
     p.wait("基础分支不存在");
+    assert_eq!(fs::read(&f.registry).unwrap(), before_creation);
     assert!(
         !support::project_dir(&f.repo, &f.registry)
             .join("state.json")
@@ -1294,12 +1308,20 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.bytes.clear();
     p.text.clear();
     p.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fmain\r");
-    p.wait("操作成功");
+    // 背景保留旧状态，差量重绘不一定再次输出“操作成功”前缀。
+    p.wait("已选中 demo / feat/fresh");
     let state: serde_json::Value = serde_json::from_slice(
         &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(state["feat/fresh"]["base"], "main");
+    let registry: toml::Value = toml::from_str(&fs::read_to_string(&f.registry).unwrap()).unwrap();
+    assert!(
+        registry["projects"]["demo"]["last_used"]
+            .as_integer()
+            .unwrap()
+            > 0
+    );
     assert!(PathBuf::from(state["feat/fresh"]["path"].as_str().unwrap()).is_dir());
     assert!(
         !support::project_dir(&f.repo, &f.registry)
@@ -1309,6 +1331,398 @@ fn forms_register_create_retry_and_cancel_without_entering_shell() {
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
+fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
+    for during_confirmation in [false, true] {
+        let f = Fixture::new();
+        f.init();
+        if during_confirmation {
+            f.git(&["branch", "pending"]);
+        }
+        let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"2n");
+        p.wait("新建任务");
+        if during_confirmation {
+            p.send(b"pending\r");
+            p.wait("使用已有分支");
+            let mut state: serde_json::Value =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            state["pending"] = serde_json::json!({"branch": "pending", "base": "main", "path": f.repo.with_file_name("repo.worktrees").join("pending")});
+            fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        let before = fs::read(&state_path).unwrap();
+        let registry = fs::read(&f.registry).unwrap();
+        p.send(if during_confirmation {
+            b"\t\r"
+        } else {
+            b"auth\r"
+        });
+        p.wait("已存在，请从任务列表进入");
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert_eq!(fs::read(&f.registry).unwrap(), registry);
+        assert!(
+            !f.repo
+                .with_file_name("repo.worktrees")
+                .join("pending")
+                .exists()
+        );
+        p.send(b"\x03q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
+fn task_form_selects_existing_branch_without_creating_another_branch() {
+    let f = Fixture::new();
+    f.init();
+    f.git(&["branch", "feature/alpha"]);
+    f.git(&["branch", "feature/beta"]);
+    f.git(&["update-ref", "refs/remotes/origin/feature/remote", "HEAD"]);
+    let refs = || {
+        Command::new("git")
+            .current_dir(&f.repo)
+            .args([
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads/",
+            ])
+            .output()
+            .unwrap()
+            .stdout
+    };
+    let before = refs();
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let state_before = fs::read(&state_path).unwrap();
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"2n");
+    p.wait("新建任务");
+    p.send(b"feature/");
+    p.wait("feature/alpha");
+    p.wait("feature/beta");
+    assert!(!p.text.contains("feature/remote"));
+    p.send(b"\x1b[B\t\r");
+    p.wait("使用已有分支");
+    // 默认取消，候选选择本身不创建资源。
+    p.send(b"\r");
+    p.bytes.clear();
+    p.text.clear();
+    p.wait("新建任务");
+    assert_eq!(fs::read(&state_path).unwrap(), state_before);
+    assert_eq!(refs(), before);
+    p.send(b"\r");
+    p.wait("使用已有分支");
+    p.send(b"\t\r");
+    p.wait("已选中 demo / feature/beta");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(state["feature/beta"]["branch"], "feature/beta");
+    assert!(state.get("feature/alpha").is_none());
+    assert!(PathBuf::from(state["feature/beta"]["path"].as_str().unwrap()).is_dir());
+    assert_eq!(refs(), before);
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+}
+
+#[test]
+fn identical_candidate_labels_preserve_the_selected_git_reference() {
+    for accept in [b"\r".as_slice(), b"\t\r".as_slice()] {
+        let f = Fixture::new();
+        f.init();
+        let commit = f.remote_branch("feat/collision");
+        f.git(&["branch", "upstream/feat/collision", "main"]);
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"2n");
+        p.wait("新建任务");
+        p.send(b"upstream/feat/collision");
+        p.wait("upstream/feat/collision");
+        // 本地与远端候选显示同名，第二项才是远端跟踪分支。
+        p.send(b"\x1b[B");
+        p.send(accept);
+        p.wait("使用已有分支");
+        // 默认取消后再次提交，仍须保持同一远端候选。
+        p.send(b"\r");
+        p.wait("新建任务");
+        p.bytes.clear();
+        p.text.clear();
+        p.send(b"\r");
+        p.wait("使用已有分支");
+        p.send(b"\t\r");
+        p.wait("已选中 demo / feat/collision");
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(state.get("upstream/feat/collision").is_none());
+        assert_eq!(
+            state["feat/collision"]["remote_start"]["reference"],
+            "refs/remotes/upstream/feat/collision"
+        );
+        let output = Command::new("git")
+            .current_dir(&f.repo)
+            .args(["rev-parse", "feat/collision"])
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, commit);
+        let output = Command::new("git")
+            .current_dir(&f.repo)
+            .args(["rev-list", "--count", "main..upstream/feat/collision"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "0");
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
+fn remote_candidates_fill_task_names_and_preserve_local_precedence() {
+    for local in [false, true] {
+        let f = Fixture::new();
+        f.init();
+        let remote_commit = f.remote_branch("feat/remote");
+        f.git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        if local {
+            f.git(&["branch", "feat/remote", "main"]);
+        }
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"2n");
+        p.wait("新建任务");
+        p.send(b"upstream/feat");
+        p.wait("upstream/feat/remote");
+        assert!(!p.text.contains("origin/HEAD"));
+        p.send(b"\t\r");
+        p.wait("使用已有分支");
+        if !local {
+            // Tab 填入后仍保留所选的 upstream，不回到 origin。
+            p.wait("upstream/feat/remote");
+        }
+        p.send(b"\t\r");
+        p.wait("已选中 demo / feat/remote");
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["feat/remote"]["branch"], "feat/remote");
+        assert!(state.get("upstream/feat/remote").is_none());
+        let git_output = |args: &[&str]| {
+            Command::new("git")
+                .current_dir(&f.repo)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        if local {
+            assert!(state["feat/remote"]["remote_start"].is_null());
+            assert_eq!(
+                git_output(&["rev-parse", "feat/remote"]).stdout,
+                git_output(&["rev-parse", "main"]).stdout
+            );
+        } else {
+            assert_eq!(
+                state["feat/remote"]["remote_start"]["reference"],
+                "refs/remotes/upstream/feat/remote"
+            );
+            assert_eq!(
+                git_output(&["rev-parse", "feat/remote"]).stdout,
+                remote_commit
+            );
+            assert_eq!(
+                String::from_utf8(
+                    git_output(&["rev-parse", "--abbrev-ref", "feat/remote@{upstream}"]).stdout
+                )
+                .unwrap()
+                .trim(),
+                "upstream/feat/remote"
+            );
+        }
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
+fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
+    for stale in [false, true] {
+        let f = Fixture::new();
+        f.init();
+        let commit = f.remote_branch("feat/km_story");
+        // 两个远端指向不同提交，确保最终选中的确实是 upstream。
+        f.git(&["update-ref", "refs/remotes/origin/feat/km_story", "main"]);
+        let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+        if stale {
+            let mut state: serde_json::Value =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            state["feat/km_story"] = serde_json::json!({
+                "branch": "feat/km_story", "base": "main",
+                "path": f.repo.with_file_name("repo.worktrees").join("feat/km_story"),
+            });
+            fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+            f.env(&mut command);
+            let output = command
+                .arg("--config")
+                .arg(&f.registry)
+                .args(["new", "demo", "feat/km_story", "--no-open"])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("已存在"));
+        }
+        let before = fs::read(&state_path).unwrap();
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"2n");
+        p.wait("新建任务");
+        p.send(b"km");
+        p.wait("upstream/feat/km_story");
+        p.bytes.clear();
+        p.text.clear();
+        // 不按 Tab，直接使用高亮候选。
+        p.send(b"\x1b[B\r");
+        if stale {
+            p.wait("已存在，请从任务列表进入");
+            assert_eq!(fs::read(&state_path).unwrap(), before);
+            assert!(
+                !f.repo
+                    .with_file_name("repo.worktrees")
+                    .join("feat/km_story")
+                    .exists()
+            );
+            p.send(b"\x03q");
+            p.wait("TERMINAL_RESTORED:0");
+            continue;
+        }
+        p.wait("分支 upstream/feat/km_story 已存在");
+        assert!(!p.text.contains("选择来源"));
+        p.send(b"\r");
+        p.bytes.clear();
+        p.text.clear();
+        p.wait("新建任务");
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        p.send(b"\r");
+        p.wait("分支 upstream/feat/km_story 已存在");
+        // 已锁定来源，方向键和 j/k 不切换来源，也不重置确认按钮。
+        p.send(b"\tj\x1b[A\x1b[Bk\r");
+        p.wait("已选中 demo / feat/km_story");
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert!(state.get("km").is_none());
+        assert_eq!(
+            state["feat/km_story"]["remote_start"]["reference"],
+            "refs/remotes/upstream/feat/km_story"
+        );
+        let output = Command::new("git")
+            .current_dir(&f.repo)
+            .args(["rev-parse", "feat/km_story"])
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, commit);
+        assert!(
+            !Command::new("git")
+                .current_dir(&f.repo)
+                .args(["show-ref", "--verify", "refs/heads/km"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
+fn selected_source_cannot_disappear_or_replace_a_recorded_source_silently() {
+    for recorded in [false, true] {
+        let f = Fixture::new();
+        f.init();
+        let commit = f.remote_branch("feat/km_story");
+        let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+        if recorded {
+            let mut state: serde_json::Value =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            state["feat/km_story"] = serde_json::json!({
+                "branch": "feat/km_story", "base": "main",
+                "path": f.repo.with_file_name("repo.worktrees").join("feat/km_story"),
+                "remote_start": { "reference": "refs/remotes/origin/feat/km_story",
+                    "commit": String::from_utf8(commit).unwrap().trim() },
+            });
+            fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        let before = fs::read(&state_path).unwrap();
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"2n");
+        p.wait("新建任务");
+        p.send(b"upstream/feat");
+        p.wait("upstream/feat/km_story");
+        if !recorded {
+            f.git(&["update-ref", "-d", "refs/remotes/upstream/feat/km_story"]);
+        }
+        p.send(b"\r");
+        p.wait(if recorded {
+            "已存在，请从任务列表进入"
+        } else {
+            "所选分支已不存在"
+        });
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert!(
+            !Command::new("git")
+                .current_dir(&f.repo)
+                .args(["show-ref", "--verify", "refs/heads/feat/km_story"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        p.send(b"\x03");
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
+fn remote_candidate_handles_remote_names_with_slashes() {
+    let f = Fixture::new();
+    f.init();
+    f.git(&[
+        "remote",
+        "add",
+        "team/mirror",
+        "/nonexistent/twig-test-remote",
+    ]);
+    f.git(&["update-ref", "refs/remotes/team/mirror/fix/login", "HEAD"]);
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"2n");
+    p.wait("新建任务");
+    p.send(b"team/mirror/");
+    p.wait("team/mirror/fix/login");
+    p.send(b"\t\r");
+    p.wait("使用已有分支");
+    p.send(b"\t\r");
+    p.wait("已选中 demo / fix/login");
+    let output = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["config", "branch.fix/login.remote"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "team/mirror"
+    );
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
 }
 
 #[test]
@@ -1388,7 +1802,9 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     let occupied = f.temp.path().join("occupied");
     f.git(&["worktree", "add", occupied.to_str().unwrap(), "existing"]);
     p.send(b"\t\r");
-    p.wait("已被其他 Worktree 占用");
+    // 居中弹窗内错误可能换行，分别检查原因和占用路径。
+    p.wait("已被其他 Worktree");
+    p.wait("occupied");
     assert_eq!(fs::read(&state_path).unwrap(), before);
     f.git(&["worktree", "remove", occupied.to_str().unwrap()]);
     p.bytes.clear();
@@ -1470,7 +1886,9 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
         String::from_utf8(tracking.stdout).unwrap().trim(),
         "refs/remotes/upstream/feat/remote"
     );
-    f.twig(&["new", "demo", "feat/remote", "--no-open"]);
+    let output = command().output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("已存在"));
 }
 
 #[test]
@@ -1513,7 +1931,7 @@ fn remote_branch_single_source_and_local_precedence() {
 }
 
 #[test]
-fn remote_branch_console_selects_source_and_resumes_partial_creation() {
+fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     let f = Fixture::new();
     f.init();
     let commit = f.remote_branch("feat/remote");
@@ -1525,7 +1943,8 @@ fn remote_branch_console_selects_source_and_resumes_partial_creation() {
     p.wait("主工作目录");
     p.send(b"\t/new\r");
     p.wait("新建任务");
-    p.send(b"feat/remote\r");
+    // 手动输入后切到起点字段提交，不接受候选，仍允许选择来源。
+    p.send(b"feat/remote\x1b[Z\r");
     p.wait("origin/feat/remote");
     p.send(b"\t");
     // 切换来源重置为取消，Enter 返回表单。
@@ -1538,7 +1957,7 @@ fn remote_branch_console_selects_source_and_resumes_partial_creation() {
     p.wait("upstream/feat/remote");
     p.send(b"\t\r");
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
-    // 等待表单展示创建失败，再接续同一任务。
+    // 创建失败保留记录及资源，再次新建必须拒绝。
     p.wait("执行失败");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(
@@ -1547,14 +1966,14 @@ fn remote_branch_console_selects_source_and_resumes_partial_creation() {
     );
     fs::remove_file(hook).unwrap();
     p.send(b"\r");
-    p.wait("操作成功");
+    p.wait("已存在，请从任务列表进入");
     let head = Command::new("git")
         .current_dir(&f.repo)
         .args(["rev-parse", "feat/remote"])
         .output()
         .unwrap();
     assert_eq!(head.stdout, commit);
-    p.send(b"q");
+    p.send(b"\x03q");
     p.wait("TERMINAL_RESTORED:0");
 }
 
@@ -1607,7 +2026,7 @@ fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
 }
 
 #[test]
-fn ctrl_w_directions_switch_lists_without_triggering_history_or_forms() {
+fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     let f = Fixture::new();
     f.init();
     let mut p = f.terminal(false);
@@ -1618,12 +2037,32 @@ fn ctrl_w_directions_switch_lists_without_triggering_history_or_forms() {
         (b"\x17j".as_slice(), "Codex 已加载"),
         (b"\x17k".as_slice(), "任务 /"),
         (b"\x17h".as_slice(), "› demo"),
+        (b"2".as_slice(), "任务 /"),
+        (b"1".as_slice(), "› demo"),
     ] {
         p.bytes.clear();
         p.text.clear();
         p.send(keys);
         p.wait(expected);
     }
+    // 数字快捷键保持任务筛选；搜索中的数字仍是查询内容。
+    p.send(b"2/auth12\r");
+    // 切走再切回以读取完整标题，避免把终端差量更新当成完整文本。
+    for (keys, expected) in [(b"1", "› demo"), (b"2", "任务 / auth12")] {
+        p.bytes.clear();
+        p.text.clear();
+        p.send(keys);
+        p.wait(expected);
+    }
+    // 表单中的数字仍可输入，取消不创建任务。
+    p.send(b"n");
+    p.wait("新建任务");
+    p.send(b"task12");
+    p.wait("2▏");
+    p.resize(66, 22);
+    p.wait("task12");
+    p.send(b"\x03");
+    p.send(b"1");
     // 前缀取消后 n 仍打开项目表单；表单内 Ctrl-W 不改变焦点。
     p.send(b"\x17");
     p.bytes.clear();
@@ -1659,7 +2098,7 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
             .count()
     ]);
     p.send(format!("{}/\r", f.repo.display()).as_bytes());
-    p.wait("可修改别名");
+    p.wait("Enter 登记");
     assert!(!f.registry.exists());
     assert!(!support::project_dir(&f.repo, &f.registry).exists());
     // 使用默认 repo 别名直接提交；完整目录不误选子目录 src。

@@ -36,7 +36,7 @@ twig ls myapp
 twig open myapp fix/bug
 ```
 
-`--no-open` 仍创建窗口并执行配置的启动命令，不是 dry-run。重复 new 接续自己登记的同名任务；已有窗口不重复启动程序。open 在窗口缺失时重建，但不恢复原进程或对话。
+`--no-open` 仍创建窗口并执行配置的启动命令，不是 dry-run。重复 new 对已登记同名任务直接报错，请使用 open 或 Console 任务列表进入。open 在窗口缺失时重建，但不恢复原进程或对话。
 
 Console、new 和 open 使用相同的 Twig 终端工作台。按 `Ctrl-W d` 返回 Console 导航并保留进程，再按 q 退出；不需要使用 tmux 前缀。输入 exit 会退出当前 Shell，可能关闭 Pane。
 

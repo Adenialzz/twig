@@ -238,8 +238,8 @@ panes = []
 | --- | --- |
 | `new` 创建任务窗口 | 执行 |
 | `new --no-open` 创建任务窗口 | 执行，只是不进入窗口 |
-| `open`、重复 `new` 或 Console Enter，窗口已存在 | 不执行，不重新排列 Pane |
-| `open`、重复 `new` 或 Console Enter，任务窗口缺失 | 执行，重新创建窗口 |
+| `open` 或 Console Enter，窗口已存在 | 不执行，不重新排列 Pane |
+| `open` 或 Console Enter，任务窗口缺失 | 执行，重新创建窗口 |
 | Console 新建任务表单 | 创建窗口时执行，成功后仍留在 Console |
 | `add` 创建项目 main 窗口 | 不应用任务布局，保持原有普通 Shell |
 | Console 浏览、`ls`、Shell 补全 | 不执行 |
@@ -265,7 +265,7 @@ twig open myapp auth
 
 以上遵循 Shell 和程序自己的信号、退出设置；例如程序可以自行处理 Ctrl-C，Shell 可以配置忽略 EOF。当前交互回归覆盖 sh、Bash、Zsh。
 
-配置校验失败时不创建任务窗口；若 `new` 已创建 Worktree，则保留 Worktree，修正配置后可重试。
+配置校验失败时不创建任务窗口；若 `new` 已创建 Worktree，则保留 Worktree 和任务记录，修正配置后使用 `open` 准备窗口；重复 `new` 会报任务已存在。
 
 分屏或启动过程部分失败时，twig 保留窗口并标记初始化未完成。再次 `new` 或 `open` 会提示检查，不重复执行已经可能启动的命令。可以直接使用 tmux 检查资源；需要重新初始化时，修正问题后显式 `stop` 再 `open`。
 

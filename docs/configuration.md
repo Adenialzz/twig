@@ -59,3 +59,5 @@ panes = [
 取消登记保留项目状态。twig 不自动迁移仓库路径，不清理仓库删除后的残留状态；也不读取或迁移旧 `.git/twig/` 数据。不要直接删除状态目录来重置仍在使用的任务，这不会清理外部资源，也不会使 twig 自动接管它们。
 
 异常锁和资源不一致见 [故障排查](troubleshooting.md)（`twig guide troubleshooting`）。
+
+项目条目的可选 `last_used` 由 Twig 自动记录，为 Unix 毫秒时间戳，用于 Console 最近使用排序。成功创建任务（含 `new --no-open`）或进入工作台时更新，遵循 `--config`；保存时保留项目路径和启动配置，并重新序列化 TOML。
