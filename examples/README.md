@@ -39,7 +39,7 @@ uv run examples/check_control_mode.py
 
 库测试使用独立 socket、临时 FIFO 和文件验证屏幕样式、47/1047/1049 备用屏幕、历史及清理、半截转义序列、插入/换行、持续输出一致性、特殊键编码和中文多行粘贴。Console PTY 测试覆盖正式导航往返、跨项目、分屏缩放、焦点、粘贴、连接断开、进程保留与同 Session 嵌套拒绝。
 
-Python 脚本通过 uv 管理 pyte，需要 Vim 和 tmux。它解析真实前端的 PTY 输出，验证 Vim 编辑中断开重连、继续保存、返回 Shell、termios 还原，以及有限输出期间 Ctrl-C 和继续输入的响应。拖选测试使用模拟 SSH 环境捕获并解码 OSC 52，验证历史选择、画面冻结和松开自动复制，不访问真实剪贴板或外层 tmux。所有文件与 server 均为临时资源；不访问真实 Agent 会话，不发送提示词或审批。
+Python 脚本通过 uv 管理 pyte，需要 Vim、Zsh 和 tmux。它解析真实前端的 PTY 输出，验证 Vim 编辑中断开重连、继续保存、返回 Shell、termios 还原，以及有限输出期间 Ctrl-C 和继续输入的响应。另使用临时 Zsh 配置验证 vi 模式光标切换、跨 Pane 样式同步、重连及退出重置。拖选测试使用模拟 SSH 环境捕获并解码 OSC 52，验证历史选择、画面冻结和松开自动复制，不访问真实剪贴板或外层 tmux。所有文件与 server 均为临时资源；不访问真实 Agent 会话，不发送提示词或审批。
 
 ## 验证边界
 

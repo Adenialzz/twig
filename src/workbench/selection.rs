@@ -97,6 +97,7 @@ mod tests {
             active: true,
             parser: TerminalState::new(2, 8, 0),
             cursor: None,
+            cursor_style: crossterm::cursor::SetCursorStyle::DefaultUserShape,
             scroll_offset: 0,
             title: String::new(),
         };

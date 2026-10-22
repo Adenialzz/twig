@@ -78,6 +78,14 @@ class Frontend:
         self.process.wait(timeout=4)
         assert self.process.returncode == 0
         assert termios.tcgetattr(self.slave) == self.before
+        self.settle()
+        assert re.findall(rb"\x1b\[([0-6]) q", self.output)[-1] == b"0"
+
+    def cursor(self, style):
+        self.until(
+            lambda: re.findall(rb"\x1b\[([0-6]) q", self.output)[-1:] == [str(style).encode()],
+            f"光标样式 {style}",
+        )
 
     def close(self):
         if self.process.poll() is None:
@@ -204,6 +212,41 @@ def main():
             mux("kill-pane", "-t", pane)
             second.detach()
             print(f"通过：Vim 编辑与重连、保存、Shell、历史拖选复制与画面冻结、鼠标模式及分屏滚轮转发、终端还原；有限输出期间输入延迟 {latency:.3f}s")
+            # 独立 Zsh 配置，不加载用户配置；ZLE 切换只输出光标序列。
+            Path(root, ".zshrc").write_text(
+                "bindkey -v\nKEYTIMEOUT=1\nPROMPT='ZSH_READY> '\n"
+                "zle-keymap-select() {\n"
+                "  if [[ $KEYMAP == vicmd ]]; then printf '\\e[2 q'; "
+                "else printf '\\e[6 q'; fi\n}\n"
+                "zle-line-init() { zle-keymap-select; }\n"
+                "zle -N zle-keymap-select\nzle -N zle-line-init\n"
+            )
+            mux("respawn-pane", "-k", "-t", "%0",
+                f"env ZDOTDIR={shlex.quote(root)} zsh -d")
+            third = Frontend(binary, socket)
+            clients.append(third)
+            third.wait("ZSH_READY>")
+            third.cursor(6)
+            third.output.clear()
+            third.send(b"\x1b")
+            third.cursor(2)
+            third.detach()
+            fourth = Frontend(binary, socket)
+            clients.append(fourth)
+            fourth.wait("ZSH_READY>")
+            fourth.cursor(2)
+            # 另一个 Pane 使用下划线，切回时恢复 Zsh 的块状光标。
+            other = mux("split-window", "-h", "-P", "-F", "#{pane_id}",
+                        "printf '\\033[4 q'; exec sleep 30").decode().strip()
+            fourth.cursor(4)
+            mux("select-pane", "-t", "%0")
+            fourth.cursor(2)
+            mux("kill-pane", "-t", other)
+            fourth.output.clear()
+            fourth.send(b"i")
+            fourth.cursor(6)
+            fourth.detach()
+            print("通过：Zsh vi 模式光标切换、跨 Pane 样式同步、重连恢复与退出重置")
         finally:
             for client in clients:
                 client.close()

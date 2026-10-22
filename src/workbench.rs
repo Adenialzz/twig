@@ -315,6 +315,7 @@ struct Pane {
     active: bool,
     parser: TerminalState,
     cursor: Option<(u16, u16)>,
+    cursor_style: crossterm::cursor::SetCursorStyle,
     scroll_offset: usize,
     title: String,
 }
@@ -428,12 +429,26 @@ fn snapshot(client: &mut Client, id: &str, offset: usize) -> Result<Option<Pane>
     let start = format!("#{{e|-:0,{offset}}}");
     let end = format!("#{{e|-:#{{e|-:#{{pane_height}},1}},{offset}}}");
     let parts = client.batch(&[
-        format!("display-message -p -t {id} '{format} {offset}'"),
+        format!(
+            "display-message -p -t {id} '{format} {offset}\t#{{cursor_shape}} #{{cursor_blinking}}'"
+        ),
         format!("capture-pane -p -e -N -S '{start}' -E '{end}' -t {id}"),
         format!("display-message -p -t {id} '#{{pane_index}} #{{pane_current_command}}'"),
     ])?;
     client.events.retain(|event| output_pane(event) != Some(id));
     let state = String::from_utf8(parts[0].concat())?;
+    let (state, cursor_style) = state.split_once('\t').context("无法读取 Pane 光标样式")?;
+    use crossterm::cursor::SetCursorStyle;
+    let cursor_style = match cursor_style.trim() {
+        "default 0" | "default 1" => SetCursorStyle::DefaultUserShape,
+        "block 0" => SetCursorStyle::SteadyBlock,
+        "block 1" => SetCursorStyle::BlinkingBlock,
+        "underline 0" => SetCursorStyle::SteadyUnderScore,
+        "underline 1" => SetCursorStyle::BlinkingUnderScore,
+        "bar 0" => SetCursorStyle::SteadyBar,
+        "bar 1" => SetCursorStyle::BlinkingBar,
+        _ => anyhow::bail!("无法识别 Pane 光标样式：{cursor_style}"),
+    };
     let s = state
         .split_whitespace()
         .map(str::parse::<usize>)
@@ -452,6 +467,7 @@ fn snapshot(client: &mut Client, id: &str, offset: usize) -> Result<Option<Pane>
         parser,
         cursor: (s[8] == 1 && s[9] == 0)
             .then_some(((s[6] as u16).min(rect.width.saturating_sub(1)), s[7] as u16)),
+        cursor_style,
         scroll_offset: s[9],
         title: String::from_utf8_lossy(&parts[2].concat())
             .chars()
@@ -704,6 +720,16 @@ fn key_bytes(key: event::KeyEvent) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+struct CursorStyleGuard;
+impl Drop for CursorStyleGuard {
+    fn drop(&mut self) {
+        let _ = execute!(
+            io::stdout(),
+            crossterm::cursor::SetCursorStyle::DefaultUserShape
+        );
+    }
+}
+
 struct Screen;
 impl Screen {
     fn start() -> Result<Self> {
@@ -802,6 +828,7 @@ fn run_inner(
     window: Option<&str>,
     status: &mut impl FnMut(&str, &str) -> Status,
 ) -> Result<Option<crate::notification::CompletionNotice>> {
+    let _cursor_style = CursorStyleGuard;
     let mut client = Client::connect(&args)?;
     if let Some(window) = window {
         ensure!(
@@ -899,6 +926,9 @@ fn run_inner(
             dirty = true;
         }
         if dirty {
+            if let Some(pane) = panes.iter().find(|pane| pane.active) {
+                execute!(terminal.backend_mut(), pane.cursor_style)?;
+            }
             let name = name.chars().filter(|c| !c.is_control()).collect::<String>();
             terminal.draw(|frame| {
                 draw(
@@ -1610,6 +1640,7 @@ mod tests {
             active: true,
             parser,
             cursor: None,
+            cursor_style: crossterm::cursor::SetCursorStyle::DefaultUserShape,
             scroll_offset: 0,
             title: "shell".into(),
         };
