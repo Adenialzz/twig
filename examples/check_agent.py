@@ -7,6 +7,8 @@
 真实 Codex app-server、本地模拟模型/飞书、独立 tmux socket、临时 Git 仓库。
 不会连接真实用户 daemon、读取认证或向飞书发送消息。
 """
+import base64
+import re
 import fcntl
 import http.server
 import json
@@ -51,6 +53,7 @@ class Frontend:
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
         self.before = termios.tcgetattr(self.slave)
+        self.output = bytearray()
         self.screen = pyte.Screen(120, 32)
         self.stream = pyte.ByteStream(self.screen)
 
@@ -60,19 +63,38 @@ class Frontend:
 
         self.process = subprocess.Popen(
             [str(binary), "--config", str(config), "chat"], cwd=cwd,
-            env={**env, "TERM": "xterm-256color"}, stdin=self.slave,
+            env={**env, "TERM": "xterm-256color", "SSH_CONNECTION": "twig-test"}, stdin=self.slave,
             stdout=self.slave, stderr=self.slave, preexec_fn=setup,
         )
 
     def send(self, data):
         os.write(self.master, data)
 
+    def copied(self):
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if select.select([self.master], [], [], 0.05)[0]:
+                data = os.read(self.master, 65536)
+                self.output.extend(data)
+                self.stream.feed(data)
+            matches = re.findall(rb"\x1b\]52;c;([^\x07]+)\x07", self.output)
+            if matches:
+                return base64.b64decode(matches[-1]).decode()
+        raise AssertionError("没有收到 OSC 52 复制请求")
+
     def wait(self, text):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             if select.select([self.master], [], [], 0.05)[0]:
-                self.stream.feed(os.read(self.master, 65536))
-            if text in "\n".join(self.screen.display):
+                data = os.read(self.master, 65536)
+                self.output.extend(data)
+                self.stream.feed(data)
+            try:
+                display = self.screen.display
+            except IndexError:
+                # PTY 分片可能停在宽字符差分重绘中间，等待后续字节完成该帧。
+                continue
+            if text in "\n".join(display):
                 return
             assert self.process.poll() is None, self.screen.display
         raise AssertionError((text, self.screen.display))
@@ -226,6 +248,28 @@ supports_websockets = false
         frontend.send(b"after-unload\r")
         frontend.wait("probe complete 3")
         control.close()
+        # 只捕获 OSC 52，不写真实系统剪贴板。
+        reply = "probe complete 3"
+        row = next(y for y, line in enumerate(frontend.screen.display) if reply in line)
+        col = frontend.screen.display[row].index(reply)
+        frontend.output.clear()
+        frontend.send(f"\x1b[<0;{col+1};{row+1}M\x1b[<32;{col+len(reply)};{row+1}M\x1b[<0;{col+len(reply)};{row+1}m".encode())
+        assert frontend.copied() == reply
+        frontend.wait("已请求复制")
+        frontend.output.clear()
+        frontend.send(b"\x1bc")  # Alt-C，复制完整回复。
+        assert frontend.copied() == reply
+        frontend.wait("已请求复制")
+        frontend.send(b"\x1b[14~")  # F4
+        frontend.wait(original)
+        frontend.send(b"\x1b[14~")
+        long_draft = "第一行\n" + "中文输入" * 180 + "末尾可见"
+        frontend.send(b"\x1b[200~" + long_draft.encode() + b"\x1b[201~")
+        frontend.wait("末尾可见")
+        frontend.send(b"\x1b[H")
+        frontend.wait("第一行")
+        frontend.send(b"\x15")
+        print("PASS: Chat 拖选复制、完整回复复制、诊断展开和中文长输入光标跟随", flush=True)
         print("PASS: Chat 中有历史会话被卸载后恢复原 ID 并继续对话", flush=True)
         frontend.send(b"\x11")
         frontend.process.wait(timeout=5)

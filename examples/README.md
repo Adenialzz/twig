@@ -63,4 +63,4 @@ Python 脚本通过 uv 管理 pyte，需要 Vim、Zsh 和 tmux。它解析真实
 
 ## 主控验收
 
-`cargo build --locked && uv run examples/check_agent.py` 验证正式 Chat/CLI：全新主控首次打开及两轮回复上屏、受管任务、启动配置隔离、状态文件忽略、离线回调、忙时排队、未知投递对账、漏失回调补查、离线主控执行通知 CLI、F2 草稿、服务重启、飞书业务错误及停止/删除保护。依赖 Codex、tmux、Git、uv，使用独立 CODEX_HOME 与本地模型，不读取真实认证、不向真实会话输入、不发送真实飞书消息。协议单独实验为 `uv run examples/check_controller.py`。
+`cargo build --locked && uv run examples/check_agent.py` 验证正式 Chat/CLI：全新主控首次打开及两轮回复上屏、受管任务、启动配置隔离、状态文件忽略、离线回调、忙时排队、未知投递对账、漏失回调补查、离线主控执行通知 CLI、标签切换草稿、Chat 拖选/Alt-C 复制（捕获 OSC 52）、中文长输入和 F4 详情、服务重启、飞书业务错误及停止/删除保护。依赖 Codex、tmux、Git、uv，使用独立 CODEX_HOME 与本地模型，不读取真实认证、不向真实会话输入、不发送真实飞书消息。协议单独实验为 `uv run examples/check_controller.py`。

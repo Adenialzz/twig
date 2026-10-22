@@ -3,7 +3,7 @@ mod data;
 pub(crate) mod form;
 mod notifications;
 pub(crate) mod query;
-mod selection;
+pub(crate) mod selection;
 mod ui;
 
 use anyhow::{Context, Result, ensure};

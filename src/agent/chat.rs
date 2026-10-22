@@ -1,28 +1,19 @@
 //! 原生 Chat；后台线程只负责本客户端通信，退出不停止 Codex。
 use super::{Binding, Store, rpc};
+mod view;
+use crate::console::selection::Selection;
 use anyhow::Result;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
 };
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Layout},
-    style::{Color, Style},
-    widgets::{Block, Borders, Paragraph, Wrap},
-};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use serde_json::{Value, json};
-use std::{
-    io::Stdout,
-    path::PathBuf,
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{io::Stdout, path::PathBuf, sync::mpsc, thread, time::Duration};
+use view::{Entry, Kind};
 
 enum Command {
     Send(String),
@@ -32,7 +23,8 @@ enum Command {
 }
 #[derive(Default)]
 struct View {
-    text: String,
+    entries: Vec<Entry>,
+    thread: String,
     status: String,
     error: Option<String>,
     approval: Option<String>,
@@ -45,55 +37,8 @@ pub struct Draft {
     text: String,
     cursor: usize,
     scroll: u16,
-}
-
-fn transcript(value: &Value) -> String {
-    let mut text = String::new();
-    if let Some(turns) = value["thread"]["turns"].as_array() {
-        for turn in turns {
-            if let Some(items) = turn["items"].as_array() {
-                for item in items {
-                    match item["type"].as_str() {
-                        Some("userMessage") => {
-                            text.push_str("你 / 工作流消息\n");
-                            if let Some(content) = item["content"].as_array() {
-                                for part in content {
-                                    if let Some(s) = part["text"].as_str() {
-                                        text.push_str(s);
-                                        text.push('\n');
-                                    }
-                                }
-                            }
-                        }
-                        Some("agentMessage") => {
-                            text.push_str("主控\n");
-                            text.push_str(item["text"].as_str().unwrap_or_default());
-                            text.push('\n');
-                        }
-                        Some("commandExecution") => {
-                            text.push_str(&format!(
-                                "工具 [{}] {}\n",
-                                item["status"].as_str().unwrap_or(""),
-                                item["command"].as_str().unwrap_or("")
-                            ));
-                        }
-                        Some("fileChange") => text.push_str("工具：文件修改\n"),
-                        _ => {}
-                    }
-                }
-            }
-            if !turn["error"].is_null() {
-                text.push_str(&format!("轮次错误：{}\n", turn["error"]));
-            }
-            text.push('\n');
-        }
-    }
-    if text.is_empty() {
-        text = "向主控交代目标，例如：查看所有项目，给 demo 创建一个修复登录问题的任务。\n".into();
-    }
-    text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect()
+    history_height: u16,
+    details: bool,
 }
 
 fn answer(request: &Value, accept: bool) -> Result<Value> {
@@ -182,7 +127,8 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                     *subscribed = store.resume(client, binding)?;
                     result = client.thread(&binding.thread)?;
                 }
-                view.text = transcript(&result);
+                view.entries = view::transcript(&result);
+                view.thread = binding.thread.clone();
                 let state = store.load()?;
                 let pending = state
                     .messages
@@ -194,34 +140,36 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                     .iter()
                     .filter(|m| m.status == "sending")
                     .count();
-                view.status = format!(
-                    "{} · {} · 排队 {} · 待核对 {}",
-                    crate::codex::status_label(&result["thread"]["status"]),
-                    binding.thread,
-                    pending,
-                    unknown
-                );
+                view.status = crate::codex::status_label(&result["thread"]["status"]);
+                if pending > 0 {
+                    view.status.push_str(&format!(" · 排队 {pending}"));
+                }
+                if unknown > 0 {
+                    view.status.push_str(&format!(" · 待核对 {unknown}"));
+                }
                 for message in state
                     .messages
                     .iter()
                     .filter(|m| matches!(m.status.as_str(), "queued" | "sending" | "failed"))
                 {
-                    view.text.push_str(&format!(
-                        "\n投递 {} [{}] {}\n{}\n",
-                        message.id,
-                        message.status,
-                        message.text,
-                        message.error.as_deref().unwrap_or("")
-                    ));
+                    let label = match message.status.as_str() {
+                        "queued" => "等待投递",
+                        "sending" => "投递结果待核对",
+                        _ => "投递失败",
+                    };
+                    let mut entry =
+                        Entry::new(Kind::Workflow, format!("{label}\n{}", message.text));
+                    entry.detail = format!("消息 ID：{}", message.id);
+                    view.entries.push(entry);
+                    if let Some(error) = &message.error {
+                        view.entries.push(Entry::new(Kind::Error, error));
+                    }
                 }
                 if pending > 0 && result["thread"]["status"]["type"] == "idle" {
                     store.flush()?;
                 }
                 if let Some(request) = client.requests.first() {
-                    view.approval = Some(format!(
-                        "{}\n{}\nCtrl-Y 同意 · Ctrl-N 拒绝（复杂输入请用原生 Codex）",
-                        request["method"], request["params"]
-                    ));
+                    view.approval = Some(format!("{}\n{}", request["method"], request["params"]));
                 }
                 Ok(())
             })();
@@ -278,42 +226,61 @@ fn run_ui(
         status: "正在连接 Codex…".into(),
         ..View::default()
     };
-    let mut input = std::mem::take(&mut draft.text);
-    let mut cursor = draft.cursor;
-    let mut scroll = draft.scroll;
     let mut dirty = true;
-    let mut last = Instant::now();
+    let mut selection: Option<Selection> = None;
+    let mut select_at = None;
+    let mut areas = view::Areas::default();
+    let mut copy_notice = None;
     loop {
         while let Ok(mut update) = views.try_recv() {
             if let Some(rejected) = update.rejected.take() {
-                input = if input.is_empty() {
+                draft.text = if draft.text.is_empty() {
                     rejected
                 } else {
-                    format!("{rejected}\n{input}")
+                    format!("{rejected}\n{}", draft.text)
                 };
-                cursor = input.len();
+                draft.cursor = draft.text.len();
+            }
+            if update.error.is_some() && update.entries.is_empty() {
+                update.entries = std::mem::take(&mut view.entries);
             }
             view = update;
             dirty = true;
         }
-        if dirty || last.elapsed() > Duration::from_secs(1) {
+        if let Some(notice) = twig_cli::clipboard::poll() {
+            copy_notice = Some(notice);
+            dirty = true;
+        }
+        if copy_notice
+            .as_ref()
+            .is_some_and(twig_cli::clipboard::Notice::expired)
+        {
+            copy_notice = None;
+            dirty = true;
+        }
+        if dirty {
             terminal.draw(|frame| {
-                let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(3), Constraint::Length(5), Constraint::Length(2)]).split(frame.area());
-                crate::tabs::draw(frame, rows[0], crate::tabs::Tab::Chat, "Tab 切换标签 · Ctrl-Q 退出 · F5 重连");
-                frame.render_widget(Paragraph::new(view.status.as_str()).style(Style::default().fg(Color::Cyan)), ratatui::layout::Rect::new(rows[0].x, rows[0].y + 1, rows[0].width, rows[0].height.saturating_sub(1)));
-                let mut content = view.text.clone();
-                if let Some(error) = &view.error { content.push_str(&format!("\n错误：{error}\n")); }
-                if let Some(approval) = &view.approval { content.push_str(&format!("\n等待审批：{approval}\n")); }
-                let paragraph = Paragraph::new(content).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title(" 主控与任务进展 · PgUp/PgDn 滚动 "));
-                let height = paragraph.line_count(rows[1].width.saturating_sub(2)).min(u16::MAX as usize) as u16;
-                let bottom = height.saturating_sub(rows[1].height.saturating_sub(2));
-                frame.render_widget(paragraph.scroll((bottom.saturating_sub(scroll), 0)), rows[1]);
-                let (before, after) = input.split_at(cursor);
-                frame.render_widget(Paragraph::new(format!("{before}▏{after}")).wrap(Wrap { trim: false }).block(Block::default().borders(Borders::ALL).title(" 输入 · Enter 发送 · Alt-Enter 换行 ")), rows[2]);
-                frame.render_widget(Paragraph::new("退出不会停止 Codex；daemon 不可用时请自行启动。\nCtrl-Y / Ctrl-N 审批 · Ctrl-U 清空输入"), rows[3]);
+                if selection
+                    .as_ref()
+                    .is_some_and(|selected| !selected.fits(frame.area()))
+                {
+                    selection = None;
+                }
+                areas = view::draw(frame, &view, draft, selection.is_none());
+                if let Some((x, y)) = select_at.take() {
+                    selection = [areas.history, areas.input]
+                        .into_iter()
+                        .find(|area| area.contains((x, y).into()))
+                        .map(|area| Selection::new(frame.buffer_mut(), area, x, y));
+                }
+                if let Some(selected) = &selection {
+                    selected.draw(frame.buffer_mut());
+                }
+                if let Some(notice) = &copy_notice {
+                    notice.draw(frame);
+                }
             })?;
             dirty = false;
-            last = Instant::now();
         }
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -329,75 +296,148 @@ fn run_ui(
             event => event,
         };
         match event {
-            Event::Paste(text) => {
-                input.insert_str(cursor, &text);
-                cursor += text.len();
+            Event::Resize(_, _) => {
+                selection = None;
+                draft.history_height = 0;
             }
-            Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
-                KeyCode::Tab | KeyCode::F(2) => {
-                    *draft = Draft {
-                        text: input,
-                        cursor,
-                        scroll,
-                    };
-                    return Ok(false);
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    selection = None;
+                    select_at = Some((mouse.column, mouse.row));
                 }
-                KeyCode::F(5) => {
-                    tx.send(Command::Refresh)?;
-                }
-                KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(true);
-                }
-                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    tx.send(Command::Answer(true))?;
-                }
-                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    tx.send(Command::Answer(false))?;
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    input.clear();
-                    cursor = 0;
-                }
-                KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                    input.insert(cursor, '\n');
-                    cursor += 1;
-                }
-                KeyCode::Enter if !input.trim().is_empty() && view.connected => {
-                    tx.send(Command::Send(std::mem::take(&mut input)))?;
-                    cursor = 0;
-                    scroll = 0;
-                }
-                KeyCode::Enter if !input.trim().is_empty() => {
-                    view.error =
-                        Some("连接尚未就绪，输入已保留；连接成功后再按 Enter，或 F5 重试。".into());
-                }
-                KeyCode::Left => {
-                    cursor = input[..cursor].char_indices().last().map_or(0, |(i, _)| i)
-                }
-                KeyCode::Right => {
-                    if let Some(c) = input[cursor..].chars().next() {
-                        cursor += c.len_utf8();
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let Some(selected) = &mut selection
+                        && selected.dragging
+                    {
+                        selected.update(mouse.column, mouse.row);
                     }
                 }
-                KeyCode::Home => cursor = 0,
-                KeyCode::End => cursor = input.len(),
-                KeyCode::Backspace if cursor > 0 => {
-                    let previous = input[..cursor].char_indices().last().unwrap().0;
-                    input.drain(previous..cursor);
-                    cursor = previous;
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some(selected) = &mut selection
+                        && selected.dragging
+                    {
+                        selected.update(mouse.column, mouse.row);
+                        selected.dragging = false;
+                        let text = selected.text();
+                        if text.is_empty() {
+                            selection = None;
+                        } else {
+                            copy_notice = Some(twig_cli::clipboard::start(text));
+                        }
+                    }
                 }
-                KeyCode::Delete if cursor < input.len() => {
-                    let next = cursor + input[cursor..].chars().next().unwrap().len_utf8();
-                    input.drain(cursor..next);
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    if areas.history.contains((mouse.column, mouse.row).into()) =>
+                {
+                    selection = None;
+                    draft.scroll = if mouse.kind == MouseEventKind::ScrollUp {
+                        draft.scroll.saturating_add(3)
+                    } else {
+                        draft.scroll.saturating_sub(3)
+                    };
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    input.insert(cursor, c);
-                    cursor += c.len_utf8();
-                }
-                KeyCode::PageUp => scroll = scroll.saturating_add(10),
-                KeyCode::PageDown => scroll = scroll.saturating_sub(10),
                 _ => {}
             },
+            Event::Paste(text) => {
+                selection = None;
+                let text: String = text
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n")
+                    .replace('\t', "    ")
+                    .chars()
+                    .filter(|c| !c.is_control() || *c == '\n')
+                    .collect();
+                draft.text.insert_str(draft.cursor, &text);
+                draft.cursor += text.len();
+            }
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                if selection.take().is_some() && key.code == KeyCode::Esc {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Tab | KeyCode::F(2) => return Ok(false),
+                    KeyCode::F(5) => tx.send(Command::Refresh)?,
+                    KeyCode::F(4) => {
+                        draft.details = !draft.details;
+                        draft.history_height = 0;
+                    }
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(true);
+                    }
+                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        tx.send(Command::Answer(true))?
+                    }
+                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        tx.send(Command::Answer(false))?
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+                        if let Some(entry) = view
+                            .entries
+                            .iter()
+                            .rev()
+                            .find(|entry| entry.kind == Kind::Assistant)
+                        {
+                            copy_notice = Some(twig_cli::clipboard::start(entry.text.clone()));
+                        }
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        draft.text.clear();
+                        draft.cursor = 0;
+                    }
+                    KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                        draft.text.insert(draft.cursor, '\n');
+                        draft.cursor += 1;
+                    }
+                    KeyCode::Enter if !draft.text.trim().is_empty() && view.connected => {
+                        view.status = "正在保存并发送…".into();
+                        tx.send(Command::Send(std::mem::take(&mut draft.text)))?;
+                        draft.cursor = 0;
+                        draft.scroll = 0;
+                    }
+                    KeyCode::Enter if !draft.text.trim().is_empty() => {
+                        view.error = Some(
+                            "连接尚未就绪，输入已保留；连接成功后再按 Enter，或 F5 重试。".into(),
+                        );
+                    }
+                    KeyCode::Left => {
+                        draft.cursor = draft.text[..draft.cursor]
+                            .char_indices()
+                            .last()
+                            .map_or(0, |(i, _)| i)
+                    }
+                    KeyCode::Right => {
+                        if let Some(c) = draft.text[draft.cursor..].chars().next() {
+                            draft.cursor += c.len_utf8();
+                        }
+                    }
+                    KeyCode::Home => draft.cursor = 0,
+                    KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        draft.scroll = 0
+                    }
+                    KeyCode::End => draft.cursor = draft.text.len(),
+                    KeyCode::Backspace if draft.cursor > 0 => {
+                        let previous = draft.text[..draft.cursor].char_indices().last().unwrap().0;
+                        draft.text.drain(previous..draft.cursor);
+                        draft.cursor = previous;
+                    }
+                    KeyCode::Delete if draft.cursor < draft.text.len() => {
+                        let next = draft.cursor
+                            + draft.text[draft.cursor..]
+                                .chars()
+                                .next()
+                                .unwrap()
+                                .len_utf8();
+                        draft.text.drain(draft.cursor..next);
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        draft.text.insert(draft.cursor, c);
+                        draft.cursor += c.len_utf8();
+                    }
+                    KeyCode::PageUp => draft.scroll = draft.scroll.saturating_add(10),
+                    KeyCode::PageDown => draft.scroll = draft.scroll.saturating_sub(10),
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }

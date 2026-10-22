@@ -1,7 +1,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, text::Line};
 
 /// 保存起始区域的已显示字符；数据采集继续，直到用户清除选区。
-pub(super) struct Selection {
+pub(crate) struct Selection {
     buffer: Buffer,
     area: Rect,
     screen: Rect,
