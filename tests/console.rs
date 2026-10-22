@@ -426,6 +426,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
     for keys in [b"Ggg\r".as_slice(), b"G\r".as_slice()] {
         let mut p = f.terminal(false);
         p.wait("auth");
+        let before_entry = fs::read(&f.registry).unwrap();
         p.send(b"\r");
         // 首次 Enter 仅进入任务区；搜索仍由 Console 处理。
         p.send(b"/auth");
@@ -433,10 +434,20 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.send(b"\r");
         // 返回项目后重新 Enter，应清除任务筛选并选中主工作目录。
         p.send(b"\x1b[Z\r");
+        assert_eq!(fs::read(&f.registry).unwrap(), before_entry);
         p.send(keys);
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'ENTERED_%s\\n' SHELL\r");
         p.wait("ENTERED_SHELL");
+        assert_ne!(fs::read(&f.registry).unwrap(), before_entry);
+        let registry: toml::Value =
+            toml::from_str(&fs::read_to_string(&f.registry).unwrap()).unwrap();
+        assert!(
+            registry["projects"]["demo"]["last_used"]
+                .as_integer()
+                .unwrap()
+                > 0
+        );
         p.send(b"printf 'SELECTED_DIR:%s\n' \"$PWD\"\r");
         let expected = if keys == b"Ggg\r" {
             f.repo.canonicalize().unwrap()

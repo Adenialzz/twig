@@ -152,8 +152,7 @@ pub fn summary<'a>(threads: impl Iterator<Item = &'a Thread>) -> String {
 }
 
 pub fn repositories(registry_path: &Path) -> Result<Vec<Repo>> {
-    registry::load(registry_path)?
-        .projects
+    registry::recent_projects(registry_path)?
         .into_iter()
         .map(|(name, entry)| {
             query::check()?;

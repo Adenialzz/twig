@@ -20,6 +20,8 @@ pub struct Registry {
 #[serde(deny_unknown_fields)]
 pub struct Entry {
     pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used: Option<u64>,
 }
 
 pub fn expand(path: &Path) -> Result<PathBuf> {
@@ -68,6 +70,29 @@ pub fn entry(path: &Path, name: &str) -> Result<Entry> {
         .projects
         .remove(name)
         .with_context(|| format!("未登记项目 {name}；请运行 twig ls"))
+}
+
+/// 仅成功创建任务或进入工作台时记录使用时间，读取操作不写入。
+pub fn record_use(path: &Path, name: &str) -> Result<()> {
+    let _lock = config::Lock::acquire(path.with_extension("lock"))?;
+    let mut registry = load(path)?;
+    let entry = registry
+        .projects
+        .get_mut(name)
+        .context("使用记录对应的项目已取消登记")?;
+    entry.last_used = Some(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis()
+            .try_into()?,
+    );
+    save(path, &registry).context("任务操作已成功，但保存项目使用时间失败")
+}
+
+pub fn recent_projects(path: &Path) -> Result<Vec<(String, Entry)>> {
+    let mut projects: Vec<_> = load(path)?.projects.into_iter().collect();
+    projects.sort_by(|a, b| b.1.last_used.cmp(&a.1.last_used).then(a.0.cmp(&b.0)));
+    Ok(projects)
 }
 
 pub fn list(path: &Path) -> Result<()> {
@@ -155,9 +180,66 @@ fn initialize(
     let name = existing.clone().unwrap_or_else(|| requested.to_owned());
     initialize_project()?;
     if existing.is_none() {
-        registry.projects.insert(name.clone(), Entry { path: main });
+        registry.projects.insert(
+            name.clone(),
+            Entry {
+                path: main,
+                last_used: None,
+            },
+        );
         save(path, &registry).context("项目已初始化，但全局登记保存失败；请重试 twig add")?;
     }
     println!("项目别名：{name}（{}）", path.display());
     Ok(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_usage_persists_without_changing_paths_or_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("custom.toml");
+        assert!(recent_projects(&path).unwrap().is_empty());
+        assert!(!path.exists());
+        fs::write(
+            &path,
+            r#"
+[tmux]
+panes = [{ command = ["echo", "hello"], focus = true }]
+[projects.alpha]
+path = "/alpha"
+[projects.beta]
+path = "/beta"
+last_used = 1
+[projects.gamma]
+path = "/gamma"
+last_used = 1
+"#,
+        )
+        .unwrap();
+        let before = fs::read(&path).unwrap();
+        let names = || {
+            recent_projects(&path)
+                .unwrap()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(), ["beta", "gamma", "alpha"]);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        record_use(&path, "alpha").unwrap();
+        assert_eq!(names(), ["alpha", "beta", "gamma"]);
+        let registry = load(&path).unwrap();
+        assert_eq!(registry.projects["alpha"].path, Path::new("/alpha"));
+        assert!(registry.projects["alpha"].last_used.unwrap() > 1);
+        assert_eq!(
+            registry.tmux.unwrap().panes[0].command.as_deref().unwrap(),
+            ["echo", "hello"]
+        );
+        let saved = fs::read(&path).unwrap();
+        assert!(record_use(&path, "missing").is_err());
+        assert_eq!(fs::read(&path).unwrap(), saved);
+    }
 }

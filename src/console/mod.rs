@@ -485,10 +485,18 @@ fn open_terminal(
     registry: &std::path::Path,
     mut jump: Option<twig_cli::notification::CompletionNotice>,
 ) -> Result<()> {
+    let mut usage_error = None;
     let result = loop {
+        let mut recorded = false;
         let initial_task = app.task.clone();
         let result =
             twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
+                if !recorded {
+                    recorded = true;
+                    usage_error = crate::registry::record_use(registry, &target.project)
+                        .err()
+                        .map(|error| format!("{error:#}"));
+                }
                 if let Some(notice) = jump.take() {
                     app.notifications.dismiss(&notice);
                 }
@@ -533,7 +541,10 @@ fn open_terminal(
                     }
                 );
                 twig_cli::workbench::Status {
-                    text,
+                    text: match &usage_error {
+                        Some(error) => format!("{text} · {error}"),
+                        None => text,
+                    },
                     notification: app.notifications.current().cloned(),
                     unread: app.notifications.tasks(),
                 }
@@ -555,7 +566,8 @@ fn open_terminal(
     app.focus = 0;
     app.message = result
         .err()
-        .map(|error| format!("终端已返回导航：{error:#}"));
+        .map(|error| format!("终端已返回导航：{error:#}"))
+        .or(usage_error);
     execute!(io::stdout(), EnableMouseCapture)?;
     terminal.clear()?;
     Ok(())

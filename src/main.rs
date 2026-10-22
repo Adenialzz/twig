@@ -265,6 +265,7 @@ fn execute(cli: Cli) -> Result<()> {
                 expected_branch,
             )?;
             drop(lock); // 工作台交互期间不能持有项目锁。
+            registry::record_use(&registry_path, &alias)?;
             if no_open {
                 Ok(())
             } else {
