@@ -1428,6 +1428,58 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
 }
 
 #[test]
+fn identical_candidate_labels_preserve_the_selected_git_reference() {
+    for accept in [b"\r".as_slice(), b"\t\r".as_slice()] {
+        let f = Fixture::new();
+        f.init();
+        let commit = f.remote_branch("feat/collision");
+        f.git(&["branch", "upstream/feat/collision", "main"]);
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"2n");
+        p.wait("新建任务");
+        p.send(b"upstream/feat/collision");
+        p.wait("upstream/feat/collision");
+        // 本地与远端候选显示同名，第二项才是远端跟踪分支。
+        p.send(b"\x1b[B");
+        p.send(accept);
+        p.wait("使用已有分支");
+        // 默认取消后再次提交，仍须保持同一远端候选。
+        p.send(b"\r");
+        p.wait("新建任务");
+        p.bytes.clear();
+        p.text.clear();
+        p.send(b"\r");
+        p.wait("使用已有分支");
+        p.send(b"\t\r");
+        p.wait("已选中 demo / feat/collision");
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(state.get("upstream/feat/collision").is_none());
+        assert_eq!(
+            state["feat/collision"]["remote_start"]["reference"],
+            "refs/remotes/upstream/feat/collision"
+        );
+        let output = Command::new("git")
+            .current_dir(&f.repo)
+            .args(["rev-parse", "feat/collision"])
+            .output()
+            .unwrap();
+        assert_eq!(output.stdout, commit);
+        let output = Command::new("git")
+            .current_dir(&f.repo)
+            .args(["rev-list", "--count", "main..upstream/feat/collision"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "0");
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
 fn remote_candidates_fill_task_names_and_preserve_local_precedence() {
     for local in [false, true] {
         let f = Fixture::new();

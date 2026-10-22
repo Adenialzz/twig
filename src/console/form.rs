@@ -21,7 +21,7 @@ pub struct Form {
     pub branch_selection: usize,
     pub branch_error: Option<String>,
     branch_input: String,
-    selected_branch: Option<BranchCandidate>,
+    selected_branch: Option<String>,
     pub operation_started: bool,
     pub deletion: Option<Deletion>,
     pub existing: Option<ExistingBranch>,
@@ -32,16 +32,15 @@ pub struct Form {
 #[derive(Clone)]
 pub struct BranchCandidate {
     pub name: String,
-    pub label: String,
+    pub reference: String,
 }
 
 impl BranchCandidate {
-    fn reference(&self) -> String {
-        if self.label == self.name {
-            format!("refs/heads/{}", self.name)
-        } else {
-            format!("refs/remotes/{}", self.label)
-        }
+    pub fn label(&self) -> &str {
+        self.reference
+            .strip_prefix("refs/heads/")
+            .or_else(|| self.reference.strip_prefix("refs/remotes/"))
+            .unwrap()
     }
 }
 
@@ -109,29 +108,25 @@ impl Form {
             && self.field == 0
             && !self.busy()
     }
-    pub fn matching_branches(&self) -> Vec<&BranchCandidate> {
+    pub fn matching_branches(&self) -> impl Iterator<Item = &BranchCandidate> {
         self.branches
             .iter()
-            .filter(|branch| branch.label.contains(&self.fields[0]))
-            .collect()
+            .filter(|branch| branch.label().contains(&self.fields[0]))
     }
     pub fn complete_branch(&mut self) -> bool {
         if !self.completing_branch() {
             return false;
         }
-        let selected = self
-            .matching_branches()
-            .get(self.branch_selection)
-            .map(|branch| (*branch).clone());
+        let selected = self.matching_branches().nth(self.branch_selection).cloned();
         if let Some(branch) = selected {
             self.fields[0] = branch.name.clone();
             self.branch_input = self.fields[0].clone();
-            self.branch_selection = self
+            let selection = self
                 .matching_branches()
-                .iter()
-                .position(|candidate| candidate.label == branch.label)
+                .position(|candidate| candidate.reference == branch.reference)
                 .unwrap();
-            self.selected_branch = Some(branch);
+            self.branch_selection = selection;
+            self.selected_branch = Some(branch.reference);
             self.error = None;
             self.scroll = 0;
             true
@@ -279,31 +274,22 @@ impl Form {
                 command.args(["new", project, &self.fields[0]]);
                 let config = repository.config()?;
                 let mut branches = crate::existing_branches(&config, &self.fields[0])?;
-                let mut selected = if let Some(candidate) = &self.selected_branch {
-                    let reference = candidate.reference();
-                    if branches
-                        .first()
-                        .is_some_and(|branch| branch.reference.starts_with("refs/heads/"))
-                    {
-                        0 // 保持本地同名优先。
-                    } else {
-                        branches
-                            .iter()
-                            .position(|branch| branch.reference == reference)
-                            .context("所选分支已不存在，请重新打开表单选择")?
-                    }
-                } else {
-                    0
-                };
+                if let Some(reference) = &self.selected_branch {
+                    let source = branches
+                        .into_iter()
+                        .find(|branch| {
+                            branch.reference.starts_with("refs/heads/")
+                                || &branch.reference == reference
+                        })
+                        .context("所选分支已不存在，请重新打开表单选择")?;
+                    // 已有本地同名分支优先；候选选定后确认框只保留这一来源。
+                    branches = vec![source];
+                }
                 if !branches.is_empty() {
-                    if self.selected_branch.is_some() {
-                        branches = vec![branches.remove(selected)];
-                        selected = 0;
-                    }
                     self.existing = Some(ExistingBranch {
                         branches,
                         common: repository.common,
-                        selected,
+                        selected: 0,
                         confirmed: false,
                     });
                     self.error = None;
@@ -402,8 +388,8 @@ fn branch_candidates(path: &Path) -> Result<Vec<BranchCandidate>> {
         if fields.next().is_some() {
             continue; // 排除 origin/HEAD 等符号引用。
         }
-        let (name, label) = if let Some(name) = reference.strip_prefix("refs/heads/") {
-            (name, name)
+        let name = if let Some(name) = reference.strip_prefix("refs/heads/") {
+            name
         } else if let Some(label) = reference.strip_prefix("refs/remotes/") {
             let Some(name) = remotes
                 .lines()
@@ -411,14 +397,14 @@ fn branch_candidates(path: &Path) -> Result<Vec<BranchCandidate>> {
             else {
                 continue;
             };
-            (name, label)
+            name
         } else {
             continue;
         };
         if name != "main" {
             candidates.push(BranchCandidate {
                 name: name.into(),
-                label: label.into(),
+                reference: reference.into(),
             });
         }
     }
@@ -465,7 +451,7 @@ mod tests {
             .into_iter()
             .map(|name| BranchCandidate {
                 name: name.into(),
-                label: name.into(),
+                reference: format!("refs/heads/{name}"),
             })
             .collect();
         form.field = 1;
@@ -473,7 +459,7 @@ mod tests {
         form.field = 0;
         form.fields[0] = "feature/".into();
         form.poll().unwrap();
-        assert_eq!(form.matching_branches().len(), 2);
+        assert_eq!(form.matching_branches().count(), 2);
         form.branch_selection = 1;
         assert!(form.complete_branch());
         assert_eq!(form.fields, ["feature/beta", "develop"]);
@@ -481,14 +467,14 @@ mod tests {
         assert_eq!(form.branch_selection, 0);
         form.fields[0] = "new-task".into();
         form.poll().unwrap();
-        assert!(form.matching_branches().is_empty());
+        assert!(form.matching_branches().next().is_none());
         assert!(!form.complete_branch());
         form.fields[0].clear();
         form.poll().unwrap();
-        assert_eq!(form.matching_branches().len(), 2);
+        assert_eq!(form.matching_branches().count(), 2);
         form.branches.push(BranchCandidate {
             name: "fix/login".into(),
-            label: "team/mirror/fix/login".into(),
+            reference: "refs/remotes/team/mirror/fix/login".into(),
         });
         form.fields[0] = "team/mirror/".into();
         form.poll().unwrap();

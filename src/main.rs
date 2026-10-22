@@ -603,7 +603,10 @@ fn new(
     } else {
         ensure!(git::exists(&config.main, &base)?, "基础分支不存在：{base}");
     }
-    let remote_start = selected.filter(|source| source.reference.starts_with("refs/remotes/"));
+    let remote_start = selected
+        .as_ref()
+        .filter(|source| source.reference.starts_with("refs/remotes/"))
+        .cloned();
     let path = config.root.join(name);
     check_task_parent(&config.root, &path)?;
     ensure!(
@@ -629,19 +632,19 @@ fn new(
     );
     project.save("state.json", state)?;
     let feature = feature(state, name)?;
-    if !check_worktree(config, feature)? {
-        check_task_parent(&config.root, &feature.path)?;
-        let path = feature.path.to_str().context("暂不支持非 UTF-8 路径")?;
-        if git::exists(&config.main, &feature.branch)? {
+    check_task_parent(&config.root, &feature.path)?;
+    let path = feature.path.to_str().context("暂不支持非 UTF-8 路径")?;
+    if let Some(source) = &selected {
+        ensure!(
+            existing_branches(config, name)?.contains(source),
+            "分支已变化；保留任务记录，请检查 twig guide troubleshooting"
+        );
+        if source.reference.starts_with("refs/heads/") {
             git(
                 &config.main,
                 &["worktree", "add", "--", path, &feature.branch],
             )?;
-        } else if let Some(source) = &feature.remote_start {
-            ensure!(
-                existing_branches(config, name)?.contains(source),
-                "远端跟踪分支已变化；保留任务记录，请检查 twig guide troubleshooting"
-            );
+        } else {
             git(
                 &config.main,
                 &[
@@ -655,20 +658,20 @@ fn new(
                     &source.reference,
                 ],
             )?;
-        } else {
-            git(
-                &config.main,
-                &[
-                    "worktree",
-                    "add",
-                    "-b",
-                    &feature.branch,
-                    "--",
-                    path,
-                    &format!("refs/heads/{}", feature.base),
-                ],
-            )?;
         }
+    } else {
+        git(
+            &config.main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &feature.branch,
+                "--",
+                path,
+                &format!("refs/heads/{}", feature.base),
+            ],
+        )?;
     }
     let window = tmux::ensure_window(config, project, name, &feature.path).with_context(|| {
         format!(

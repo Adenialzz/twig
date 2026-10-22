@@ -937,7 +937,6 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         Paragraph::new("登记已有 Git 仓库").style(Style::default().add_modifier(Modifier::BOLD)),
         sections[0],
     );
-    let rows = [sections[1], sections[2], sections[4], sections[3]];
     let labels = ["仓库路径（~ / 相对路径）", "项目别名"];
     for (i, label) in labels.iter().enumerate() {
         let style = if form.field == i {
@@ -947,40 +946,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         } else {
             Style::default()
         };
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{} {label}",
-                if form.field == i { "›" } else { " " }
-            ))
-            .style(style),
-            Rect {
-                height: 1,
-                ..rows[i]
-            },
-        );
-        let value = Line::from(format!(
-            "{}{}",
-            safe(&form.fields[i]),
-            if form.field == i && !form.busy() {
-                "▏"
-            } else {
-                ""
-            }
-        ));
-        let offset = value
-            .width()
-            .saturating_sub(rows[i].width as usize)
-            .min(u16::MAX as usize) as u16;
-        frame.render_widget(
-            Paragraph::new(value)
-                .style(style.bg(Color::DarkGray))
-                .scroll((0, offset)),
-            Rect {
-                y: rows[i].y + 1,
-                height: 1,
-                ..rows[i]
-            },
-        );
+        draw_form_field(frame, sections[i + 1], form, i, label, style);
     }
     frame.render_widget(
         Paragraph::new(if form.busy() {
@@ -990,7 +956,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         } else {
             "Enter 登记 · Esc 取消\nShift+Tab 返回 · PgUp/Dn 滚动"
         }),
-        rows[2],
+        sections[4],
     );
     if form.completing_path() && form.error.is_none() && !form.directories.is_empty() {
         let items = form
@@ -1007,19 +973,19 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             })
             .map(|text| Line::from(safe(&text)))
             .collect();
-        if rows[3].height < 3 {
+        if sections[3].height < 3 {
             let mut state = ListState::default().with_selected(Some(form.directory_selection));
             frame.render_stateful_widget(
                 List::new(items)
                     .highlight_style(Style::default().bg(Color::DarkGray))
                     .highlight_symbol("› "),
-                rows[3],
+                sections[3],
                 &mut state,
             );
         } else {
             list(
                 frame,
-                rows[3],
+                sections[3],
                 " 本地目录 · Tab 补全 ".into(),
                 items,
                 Some(form.directory_selection),
@@ -1052,8 +1018,44 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             } else {
                 Color::Gray
             })),
-        rows[3],
+        sections[3],
     );
+}
+
+fn draw_form_field(
+    frame: &mut Frame,
+    area: Rect,
+    form: &super::form::Form,
+    index: usize,
+    label: &str,
+    style: Style,
+) {
+    let focused = form.field == index;
+    frame.render_widget(
+        Paragraph::new(format!("{} {label}", if focused { "›" } else { " " })).style(style),
+        Rect { height: 1, ..area },
+    );
+    if area.height > 1 {
+        let value = Line::from(format!(
+            "{}{}",
+            safe(&form.fields[index]),
+            if focused && !form.busy() { "▏" } else { "" }
+        ));
+        let offset = value
+            .width()
+            .saturating_sub(area.width as usize)
+            .min(u16::MAX as usize) as u16;
+        frame.render_widget(
+            Paragraph::new(value)
+                .style(style.bg(Color::DarkGray))
+                .scroll((0, offset)),
+            Rect {
+                y: area.y + 1,
+                height: 1,
+                ..area
+            },
+        );
+    }
 }
 
 fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, project: &str) {
@@ -1070,18 +1072,10 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
         Constraint::Length(2),
     ])
     .split(inner);
-    let rows = [
-        sections[0],
-        sections[1],
-        sections[2],
-        sections[4],
-        sections[3],
-        sections[5],
-    ];
     frame.render_widget(
         Paragraph::new(format!("项目：{}", safe(project)))
             .style(Style::default().add_modifier(Modifier::BOLD)),
-        rows[0],
+        sections[0],
     );
     let base_label = if form
         .branches
@@ -1092,64 +1086,33 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
     } else {
         "起点分支（本地）"
     };
-    for (i, label) in ["任务名", base_label].iter().enumerate() {
-        let row = rows[i + 2];
+    for (i, (label, area)) in [("任务名", sections[2]), (base_label, sections[4])]
+        .into_iter()
+        .enumerate()
+    {
         let style = Style::default().fg(if form.field == i {
             Color::Cyan
         } else {
             Color::Gray
         });
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{} {label}",
-                if form.field == i { "›" } else { " " }
-            ))
-            .style(style),
-            Rect { height: 1, ..row },
-        );
-        let value = Line::from(format!(
-            "{}{}",
-            safe(&form.fields[i]),
-            if form.field == i && !form.busy() {
-                "▏"
-            } else {
-                ""
-            }
-        ));
-        let offset = value
-            .width()
-            .saturating_sub(row.width as usize)
-            .min(u16::MAX as usize) as u16;
-        if row.height > 1 {
-            frame.render_widget(
-                Paragraph::new(value)
-                    .style(style.bg(Color::DarkGray))
-                    .scroll((0, offset)),
-                Rect {
-                    y: row.y + 1,
-                    height: 1,
-                    ..row
-                },
-            );
-        }
+        draw_form_field(frame, area, form, i, label, style);
     }
     if form.completing_branch() && form.error.is_none() && form.branch_error.is_none() {
         let items: Vec<_> = form
             .matching_branches()
-            .into_iter()
-            .map(|branch| ListItem::new(safe(&branch.label)))
+            .map(|branch| ListItem::new(safe(branch.label())))
             .collect();
         if items.is_empty() {
-            frame.render_widget(Paragraph::new("无匹配分支，将新建分支"), rows[4]);
+            frame.render_widget(Paragraph::new("无匹配分支，将新建分支"), sections[3]);
         } else {
             let mut widget = List::new(items)
                 .highlight_style(Style::default().bg(Color::DarkGray))
                 .highlight_symbol("› ");
-            if rows[4].height >= 3 {
+            if sections[3].height >= 3 {
                 widget = widget.block(block(" 已有分支 · 选作任务 ".into(), true));
             }
             let mut state = ListState::default().with_selected(Some(form.branch_selection));
-            frame.render_stateful_widget(widget, rows[4], &mut state);
+            frame.render_stateful_widget(widget, sections[3], &mut state);
         }
     } else {
         let message = match &form.error {
@@ -1176,7 +1139,7 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
                 } else {
                     Color::Gray
                 })),
-            rows[4],
+            sections[3],
         );
     }
     frame.render_widget(
@@ -1188,7 +1151,7 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
             "Tab 切字段 · Enter 创建\nEsc 取消 · PgUp/PgDn 滚动"
         })
         .wrap(Wrap { trim: false }),
-        rows[5],
+        sections[5],
     );
 }
 
@@ -1285,7 +1248,7 @@ mod tests {
             .map(|i| {
                 let name = format!("feature/{i:02}");
                 super::super::form::BranchCandidate {
-                    label: name.clone(),
+                    reference: format!("refs/heads/{name}"),
                     name,
                 }
             })

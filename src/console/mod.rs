@@ -855,13 +855,13 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                         % form.directories.len();
                 }
                 KeyCode::Down if form.completing_branch() => {
-                    let count = form.matching_branches().len();
+                    let count = form.matching_branches().count();
                     if count > 0 {
                         form.branch_selection = (form.branch_selection + 1) % count;
                     }
                 }
                 KeyCode::Up if form.completing_branch() => {
-                    let count = form.matching_branches().len();
+                    let count = form.matching_branches().count();
                     if count > 0 {
                         form.branch_selection = (form.branch_selection + count - 1) % count;
                     }
