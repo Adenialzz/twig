@@ -131,4 +131,4 @@ twig console
 
 ## 主控 Chat 与受管任务
 
-`twig chat` 打开主控对话，点击顶部 Console / Chat 标签或按 Tab / Shift-Tab 切换页面。`new PROJECT NAME --agent --no-open` 新建受管任务，使用专用 Codex 窗口，替代普通启动配置；`agent send/read/status/drain/cancel/notify` 提供派发、查询、恢复和通知。`stop` 会中断受管轮次并取消待发消息，重新 open 才允许继续派发。完整用法见 [主控 Agent](agent.md)（`twig guide agent`）。
+`twig chat` 打开主控对话，点击顶部 Console / Chat 标签或按 Tab 切换页面。`new PROJECT NAME --agent --no-open` 新建受管任务，使用专用 Codex 窗口，替代普通启动配置；`agent send/read/status/drain/cancel/notify` 提供派发、查询、恢复和通知。`stop` 会中断受管轮次并取消待发消息，重新 open 才允许继续派发。完整用法见 [主控 Agent](agent.md)（`twig guide agent`）。

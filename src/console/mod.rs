@@ -996,7 +996,7 @@ fn run_inner(
             worker.requests.send(app.request())?;
             continue;
         }
-        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::F(2)) {
+        if matches!(key.code, KeyCode::Tab | KeyCode::F(2)) {
             selection = None;
             if crate::agent::chat::run(&mut terminal, registry.clone(), &mut chat_draft)? {
                 break;

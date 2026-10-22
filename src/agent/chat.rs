@@ -313,7 +313,7 @@ fn run_ui(
                 cursor += text.len();
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
-                KeyCode::Tab | KeyCode::BackTab | KeyCode::F(2) => {
+                KeyCode::Tab | KeyCode::F(2) => {
                     *draft = Draft {
                         text: input,
                         cursor,

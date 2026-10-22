@@ -21,13 +21,13 @@ twig chat
 
 首次打开 Chat 创建主控工作目录和会话，已有会话则恢复原 thread。daemon 不可用时显示启动提示，F5 重试；不会回退到另一种模型服务。
 
-- 点击顶部 Console / Chat 标签，或按 Tab / Shift-Tab：Chat 与 Console 导航相互切换，保留 Console 选择。
+- 点击顶部 Console / Chat 标签，或按 Tab：Chat 与 Console 导航相互切换，保留 Console 选择。
 - Enter：发送消息；Alt-Enter：换行；支持粘贴、方向键、Home/End、退格和 Delete。
 - PgUp/PgDn：浏览聊天记录；Ctrl-U：清空输入。
 - Ctrl-Y / Ctrl-N：同意或拒绝显示的命令或文件审批。复杂表单类输入目前需在原生 Codex 中处理，Chat 会显示会话 ID。
 - Ctrl-Q：退出 Chat 和 Twig；不会停止 Codex daemon 或任务。
 
-Console 的标签点击与 Tab / Shift-Tab 只在普通导航状态触发，表单、帮助、搜索和工作台保留原有键盘语义。工作台先用 Ctrl-W d 返回导航，再切换 Chat。
+Console 的标签点击与 Tab 只在普通导航状态触发，表单、帮助、搜索和工作台保留原有键盘语义。工作台先用 Ctrl-W d 返回导航，再切换 Chat。
 
 Chat 展示对话、工具摘要、排队消息及投递错误。主控结束本轮后可以等待任务反馈；完成事件会再次唤醒它，无需保持 Chat 打开。主控忙碌时，Twig 消息先排队；第一版没有独立的暂停按钮或自主预算配置。
 
