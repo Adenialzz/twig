@@ -211,8 +211,34 @@ impl Store {
         let _lock = self.lock()?;
         let mut state = self.load()?;
         if let Some(binding) = state.bindings.get("controller") {
-            self.client(&state)?;
-            return Ok(binding.clone());
+            let mut client = self.client(&state)?;
+            match client.call(
+                "thread/read",
+                json!({"threadId":binding.thread,"includeTurns":false}),
+            ) {
+                Ok(result) => {
+                    check_thread(binding, &result)?;
+                    return Ok(binding.clone());
+                }
+                Err(error) if rpc::thread_not_loaded(&error, &binding.thread) => {
+                    match client.call("thread/resume", json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}})) {
+                        Ok(result) => {
+                            check_thread(binding, &result)?;
+                            return Ok(binding.clone());
+                        }
+                        Err(error) if rpc::no_rollout(&error, &binding.thread) => {
+                            ensure!(
+                                !state.messages.iter().any(|m| m.thread == binding.thread)
+                                    && !state.seen.iter().any(|key| key.starts_with(&format!("{}:", binding.thread))),
+                                "主控会话已丢失但存在消息或完成记录；保留绑定，请核对 Codex 历史，拒绝创建替代会话：{error}"
+                            );
+                            // 确认无 rollout 且从未投递过消息，才替换失效的空绑定。
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         let socket = rpc::discover()?;
         let mut client = rpc::Client::connect(&socket)?;

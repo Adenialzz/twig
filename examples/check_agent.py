@@ -180,10 +180,53 @@ supports_websockets = false
         frontend.send(b"\t")
         frontend.wait("空闲")
         assert state()["bindings"]["controller"]["thread"] == empty_thread
+        # 空 session 没有 rollout，服务重启后必须恢复入口而不是永远卡在旧 ID。
+        workspace = Path(state()["bindings"]["controller"]["cwd"])
+        instructions = (workspace / "AGENTS.md").read_bytes()
+        (workspace / "state.md").write_text("用户保留的全局计划")
+        frontend.send(b"\x11")
+        frontend.process.wait(timeout=5)
+        frontend.close()
+        frontend = None
+        server.terminate()
+        server.wait(timeout=10)
+        socket.unlink(missing_ok=True)
+        server = start_server()
+        wait_for(socket.exists, "空会话服务重启失败")
+        # 只要有未决消息，即使 rollout 丢失也不得悄悄换一个主控。
+        empty_state = state()
+        guarded = json.loads(json.dumps(empty_state))
+        guarded["messages"].append({"id": "pending-check", "thread": empty_thread, "text": "must-preserve", "status": "sending", "turn": None, "error": None})
+        state_file.write_text(json.dumps(guarded))
+        assert "拒绝创建替代会话" in twig("agent", "init", success=False)
+        assert state() == guarded
+        state_file.write_text(json.dumps(empty_state))
+        frontend = Frontend(binary, config, cwd, env)
+        wait_for(lambda: state()["bindings"]["controller"]["thread"] != empty_thread, "空主控绑定未恢复")
+        frontend.wait("空闲")
+        assert (workspace / "AGENTS.md").read_bytes() == instructions
+        assert (workspace / "state.md").read_text() == "用户保留的全局计划"
+        print("PASS: 空主控卸载后重建绑定，保留 AGENTS.md 和全局计划", flush=True)
         frontend.send(b"first-chat-message\r")
         frontend.wait("probe complete 1")
         frontend.send(b"second-chat-message\r")
         frontend.wait("probe complete 2")
+        # 有历史的会话被卸载时，正在打开的 Chat 应重新加载原 ID。
+        original = state()["bindings"]["controller"]["thread"]
+        server.terminate()
+        server.wait(timeout=10)
+        socket.unlink(missing_ok=True)
+        server = start_server()
+        wait_for(socket.exists, "有历史会话服务重启失败")
+        frontend.send(b"\x1b[15~")
+        control = Client(socket)
+        wait_for(lambda: control.call("thread/read", {"threadId": original, "includeTurns": False})["thread"]["status"]["type"] == "idle", "Chat 未恢复卸载会话")
+        assert state()["bindings"]["controller"]["thread"] == original
+        frontend.wait("空闲")
+        frontend.send(b"after-unload\r")
+        frontend.wait("probe complete 3")
+        control.close()
+        print("PASS: Chat 中有历史会话被卸载后恢复原 ID 并继续对话", flush=True)
         frontend.send(b"\x11")
         frontend.process.wait(timeout=5)
         frontend.close()
@@ -213,7 +256,7 @@ supports_websockets = false
         model.release["worker"].set()
         wait_for(lambda: any(m["status"] == "queued" and m["thread"] == main["thread"] for m in state()["messages"]), "完成反馈未排队")
         model.release["controller"].set()
-        wait_for(lambda: len(state()["seen"]) >= 5, "主控未完成反馈轮次")
+        wait_for(lambda: len(state()["seen"]) >= 6, "主控未完成反馈轮次")
         assert all(m["status"] == "sent" for m in state()["messages"])
         assert model.notices == [{"msg_type": "text", "content": {"text": "离线主控已收到任务反馈"}}]
         print("PASS: 未打开 UI 时主控调用真实 Twig 通知 CLI，继承环境并送达模拟飞书", flush=True)

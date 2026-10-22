@@ -155,6 +155,7 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
             }
         }
         let mut view = View::default();
+        let mut reconnect = false;
         if let Some((store, binding, client, subscribed)) = &mut connection {
             view.connected = true;
             let result = (|| -> Result<()> {
@@ -176,7 +177,11 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 if !*subscribed {
                     *subscribed = store.resume(client, binding)?;
                 }
-                let result = client.thread(&binding.thread)?;
+                let mut result = client.thread(&binding.thread)?;
+                if result["thread"]["status"]["type"] == "notLoaded" {
+                    *subscribed = store.resume(client, binding)?;
+                    result = client.thread(&binding.thread)?;
+                }
                 view.text = transcript(&result);
                 let state = store.load()?;
                 let pending = state
@@ -221,11 +226,24 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 Ok(())
             })();
             if let Err(error) = result {
+                reconnect = rpc::thread_not_loaded(&error, &binding.thread)
+                    || error.downcast_ref::<tungstenite::Error>().is_some();
+                if reconnect {
+                    view.connected = false;
+                    view.status = "连接失效，正在重新检查主控会话…".into();
+                }
                 view.error = Some(format!("{error:#}"));
             }
         } else {
+            if let Some(Command::Send(text)) = command {
+                view.rejected = Some(text);
+            }
             view.error = last_error.clone();
             view.status = "未连接 · F5 重试".into();
+        }
+        if reconnect {
+            connection = None;
+            last_error = None;
         }
         if output.send(view).is_err() {
             break;

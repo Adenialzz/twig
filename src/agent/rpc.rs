@@ -1,5 +1,5 @@
 //! 主控写接口独立于 Console 的只读 Codex 客户端。
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     io::ErrorKind,
@@ -8,6 +8,34 @@ use std::{
     time::{Duration, Instant},
 };
 use tungstenite::{Message, WebSocket};
+
+#[derive(Debug)]
+struct RpcError {
+    method: String,
+    value: Value,
+}
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Codex {}：{}", self.method, self.value)
+    }
+}
+impl std::error::Error for RpcError {}
+
+fn matches_error(error: &anyhow::Error, method: &str, message: &str) -> bool {
+    error.downcast_ref::<RpcError>().is_some_and(|e| {
+        e.method == method && e.value["code"] == -32600 && e.value["message"] == message
+    })
+}
+pub fn thread_not_loaded(error: &anyhow::Error, id: &str) -> bool {
+    matches_error(error, "thread/read", &format!("thread not loaded: {id}"))
+}
+pub fn no_rollout(error: &anyhow::Error, id: &str) -> bool {
+    matches_error(
+        error,
+        "thread/resume",
+        &format!("no rollout found for thread id {id}"),
+    )
+}
 
 pub struct Client {
     socket: WebSocket<UnixStream>,
@@ -103,7 +131,11 @@ impl Client {
                         continue;
                     }
                     if let Some(error) = value.get("error") {
-                        bail!("Codex {method}：{error}");
+                        return Err(RpcError {
+                            method: method.into(),
+                            value: error.clone(),
+                        }
+                        .into());
                     }
                     return value
                         .get("result")
@@ -111,7 +143,9 @@ impl Client {
                         .context("Codex 响应缺少 result");
                 }
                 Message::Ping(_) => self.socket.flush()?,
-                Message::Close(_) => bail!("Codex 关闭连接"),
+                Message::Close(_) => {
+                    return Err(tungstenite::Error::ConnectionClosed).context("Codex 关闭连接");
+                }
                 _ => {}
             }
         }
