@@ -422,6 +422,20 @@ fn feature<'a>(state: &'a State, name: &str) -> Result<&'a Feature> {
 
 fn check_worktree(config: &Config, feature: &Feature) -> Result<bool> {
     let trees = git::worktrees(&config.main)?;
+    let expected = PathBuf::from(git(
+        &config.main,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?)
+    .canonicalize()?;
+    check_worktree_in(&trees, &expected, feature)
+}
+
+// 只读批量查询共享同一轮快照；写操作仍通过 check_worktree 实时查询。
+fn check_worktree_in(
+    trees: &[(PathBuf, String)],
+    expected: &Path,
+    feature: &Feature,
+) -> Result<bool> {
     if let Some((_, branch)) = trees.iter().find(|(path, _)| path == &feature.path) {
         ensure!(
             feature.path.is_dir(),
@@ -435,11 +449,6 @@ fn check_worktree(config: &Config, feature: &Feature) -> Result<bool> {
         );
         let common = PathBuf::from(git(
             &feature.path,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?)
-        .canonicalize()?;
-        let expected = PathBuf::from(git(
-            &config.main,
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
         )?)
         .canonicalize()?;
@@ -692,8 +701,14 @@ fn list(project: &Project, config: &Config, state: &State) -> Result<()> {
         "{:<20} {:<28} {:<12} {:<12} 路径",
         "任务", "分支", "tmux", "Git"
     );
+    let trees = git::worktrees(&config.main);
+    let windows = tmux::windows(config, project)?;
     for (name, feature) in state {
-        let status = match check_worktree(config, feature) {
+        let status = match trees
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .and_then(|trees| check_worktree_in(trees, &project.common, feature))
+        {
             Ok(true) => {
                 if git(
                     &feature.path,
@@ -712,7 +727,7 @@ fn list(project: &Project, config: &Config, state: &State) -> Result<()> {
                 "Mismatch"
             }
         };
-        let window = tmux::window(config, project, name)?;
+        let window = tmux::window_in(&windows, name)?;
         println!(
             "{:<20} {:<28} {:<12} {:<12} {}",
             name,

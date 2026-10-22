@@ -168,7 +168,9 @@ impl Client {
             ensure!(!self.closed, "tmux control 连接已关闭，后台资源未删除");
             ensure!(Instant::now() < until, "等待 tmux 应答超时");
             self.pump()?;
-            thread::sleep(Duration::from_millis(2));
+            if self.lines.is_empty() {
+                thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 
@@ -430,14 +432,14 @@ fn snapshot(client: &mut Client, id: &str, offset: usize) -> Result<Option<Pane>
     let end = format!("#{{e|-:#{{e|-:#{{pane_height}},1}},{offset}}}");
     let parts = client.batch(&[
         format!(
-            "display-message -p -t {id} '{format} {offset}\t#{{cursor_shape}} #{{cursor_blinking}}'"
+            "display-message -p -t {id} '{format} {offset}\t#{{cursor_shape}} #{{cursor_blinking}}\t#{{pane_index}} #{{pane_current_command}}'"
         ),
         format!("capture-pane -p -e -N -S '{start}' -E '{end}' -t {id}"),
-        format!("display-message -p -t {id} '#{{pane_index}} #{{pane_current_command}}'"),
     ])?;
     client.events.retain(|event| output_pane(event) != Some(id));
     let state = String::from_utf8(parts[0].concat())?;
     let (state, cursor_style) = state.split_once('\t').context("无法读取 Pane 光标样式")?;
+    let (cursor_style, title) = cursor_style.split_once('\t').context("Pane 状态缺少标题")?;
     use crossterm::cursor::SetCursorStyle;
     let cursor_style = match cursor_style.trim() {
         "default 0" | "default 1" => SetCursorStyle::DefaultUserShape,
@@ -469,10 +471,7 @@ fn snapshot(client: &mut Client, id: &str, offset: usize) -> Result<Option<Pane>
             .then_some(((s[6] as u16).min(rect.width.saturating_sub(1)), s[7] as u16)),
         cursor_style,
         scroll_offset: s[9],
-        title: String::from_utf8_lossy(&parts[2].concat())
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect(),
+        title: title.chars().filter(|c| !c.is_control()).collect(),
     }))
 }
 
@@ -857,7 +856,13 @@ fn run_inner(
     let mut dirty = true;
     let mut pending = HashSet::new();
     let mut refreshed = Instant::now();
+    let mut refresh_cursor = 0;
+    let mut queued_input = None;
     loop {
+        if let Some(notice) = clipboard::poll() {
+            copy_notice = Some(notice);
+            dirty = true;
+        }
         if copy_notice.as_ref().is_some_and(clipboard::Notice::expired) {
             copy_notice = None;
             dirty = true;
@@ -905,17 +910,29 @@ fn run_inner(
         if let Some(picker) = &mut unread_picker {
             picker.sync(&label.unread);
         }
-        if refreshed.elapsed() >= Duration::from_millis(33) && !pending.is_empty() {
-            for pane in &mut panes {
+        // 已到达的输入优先；持续输入时仍至少每 100ms 服务一次画面。
+        let input_ready = queued_input.is_some() || event::poll(Duration::ZERO)?;
+        if refreshed.elapsed() >= Duration::from_millis(33)
+            && !pending.is_empty()
+            && (!input_ready || refreshed.elapsed() >= Duration::from_millis(100))
+        {
+            let started = Instant::now();
+            for _ in 0..panes.len() {
+                let index = refresh_cursor % panes.len();
+                refresh_cursor = (index + 1) % panes.len();
+                let pane = &mut panes[index];
                 if pending.remove(&pane.id)
                     && let Some(updated) = snapshot(&mut client, &pane.id, pane.scroll_offset)?
                 {
                     *pane = updated;
+                    dirty = true;
+                }
+                if started.elapsed() >= Duration::from_millis(8) {
+                    break;
                 }
             }
-            pending.clear();
+            pending.retain(|id| panes.iter().any(|p| &p.id == id));
             refreshed = Instant::now();
-            dirty = true;
         }
         if selection.as_ref().is_some_and(|selected| {
             !panes
@@ -949,11 +966,31 @@ fn run_inner(
             })?;
             dirty = false;
         }
-        if !event::poll(Duration::from_millis(16))? {
+        if queued_input.is_none() && !event::poll(Duration::from_millis(16))? {
             continue;
         }
         dirty = true;
-        let input = event::read()?;
+        let mut input = match queued_input.take() {
+            Some(input) => input,
+            None => event::read()?,
+        };
+        // 只合并连续的拖动坐标；松开、按键和粘贴必须保持原顺序。
+        if matches!(input, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Drag(MouseButton::Left))
+        {
+            for _ in 0..64 {
+                if !event::poll(Duration::ZERO)? {
+                    break;
+                }
+                let next = event::read()?;
+                if matches!(next, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Drag(MouseButton::Left))
+                {
+                    input = next;
+                } else {
+                    queued_input = Some(next);
+                    break;
+                }
+            }
+        }
         if matches!(input, Event::Key(_)) {
             notice.clear();
         }
@@ -1021,11 +1058,7 @@ fn run_inner(
                             if text.is_empty() {
                                 selection = None;
                             } else {
-                                let message = match clipboard::copy(&text) {
-                                    Ok(message) => message,
-                                    Err(error) => format!("复制失败：{error}"),
-                                };
-                                copy_notice = Some(clipboard::Notice::new(message));
+                                copy_notice = Some(clipboard::start(text));
                             }
                         }
                     }

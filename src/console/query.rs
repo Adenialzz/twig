@@ -49,6 +49,7 @@ pub fn output(command: &mut Command) -> Result<Output> {
         .env("GIT_TERMINAL_PROMPT", "0");
     let mut child = command.spawn().context("无法启动查询命令")?;
     let start = Instant::now();
+    let mut delay = 1;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -61,7 +62,8 @@ pub fn output(command: &mut Command) -> Result<Output> {
             let _ = child.wait();
             bail!("查询取消或超过 2 秒：{:?}", command.get_program());
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(delay));
+        delay = (delay * 2).min(10);
     };
     stdout.rewind()?;
     stderr.rewind()?;

@@ -75,16 +75,23 @@ pub fn ensure_session(config: &Config, project: &Project) -> Result<()> {
 }
 
 pub fn window(config: &Config, project: &Project, name: &str) -> Result<Option<String>> {
+    window_in(&windows(config, project)?, name)
+}
+
+pub fn windows(config: &Config, project: &Project) -> Result<String> {
     if !session_exists(config, project)? {
-        return Ok(None);
+        return Ok(String::new());
     }
-    let output = tmux(&[
+    tmux(&[
         "list-windows",
         "-t",
         &format!("={}", config.session),
         "-F",
         "#{window_id}\t#{window_name}\t#{@twig-feature}",
-    ])?;
+    ])
+}
+
+pub fn window_in(output: &str, name: &str) -> Result<Option<String>> {
     let mut found = None;
     let mut collision = false;
     for line in output.lines() {

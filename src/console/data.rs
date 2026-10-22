@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
@@ -62,11 +62,25 @@ pub struct Request {
     pub page: u64,
     pub turn: Option<String>,
     pub refresh: u64,
+    pub background: bool,
+}
+
+// 快照可覆盖；完成事件使用独立队列，不能丢弃。
+#[derive(Clone, Default)]
+pub struct Updates(Arc<Mutex<Option<Snapshot>>>);
+impl Updates {
+    pub fn take(&self) -> Option<Snapshot> {
+        self.0.lock().unwrap().take()
+    }
+    fn publish(&self, snapshot: &Snapshot) {
+        let snapshot = snapshot.clone();
+        *self.0.lock().unwrap() = Some(snapshot);
+    }
 }
 
 pub struct Worker {
     pub requests: Sender<Request>,
-    pub updates: Receiver<Snapshot>,
+    pub updates: Updates,
     pub completions: Receiver<Completion>,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -74,7 +88,8 @@ pub struct Worker {
 impl Worker {
     pub fn start(registry: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
-        let (out, updates) = mpsc::channel();
+        let updates = Updates::default();
+        let out = updates.clone();
         let (completed, completions) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
@@ -100,22 +115,47 @@ impl Drop for Worker {
     }
 }
 
+struct Owners {
+    paths: Vec<(PathBuf, String, PathBuf)>,
+    resolved: BTreeMap<PathBuf, Option<(String, PathBuf)>>,
+}
+impl Owners {
+    fn new(repos: &[Repo]) -> Self {
+        let mut paths: Vec<_> = repos
+            .iter()
+            .filter(|r| r.error.is_none())
+            .flat_map(|r| r.tasks.iter().map(move |t| (r, t)))
+            .filter_map(|(r, t)| {
+                Some((t.path.canonicalize().ok()?, r.name.clone(), t.path.clone()))
+            })
+            .collect();
+        paths.sort_by_key(|(path, _, _)| std::cmp::Reverse(path.components().count()));
+        Self {
+            paths,
+            resolved: BTreeMap::new(),
+        }
+    }
+    fn get(&mut self, cwd: &Path) -> Option<(String, PathBuf)> {
+        self.resolved
+            .entry(cwd.to_owned())
+            .or_insert_with(|| {
+                let cwd = cwd.canonicalize().ok()?;
+                self.paths
+                    .iter()
+                    .find(|(path, _, _)| cwd.starts_with(path))
+                    .map(|(_, r, p)| (r.clone(), p.clone()))
+            })
+            .clone()
+    }
+}
+#[cfg(test)]
 pub fn owner<'a>(cwd: &Path, repos: &'a [Repo]) -> Option<(&'a str, &'a Path)> {
-    let cwd = cwd.canonicalize().ok()?;
-    repos
-        .iter()
-        .filter(|repo| repo.error.is_none())
-        .flat_map(|repo| repo.tasks.iter().map(move |task| (repo, task)))
-        .filter_map(|(repo, task)| {
-            let path = task.path.canonicalize().ok()?;
-            cwd.starts_with(&path).then_some((
-                repo.name.as_str(),
-                task.path.as_path(),
-                path.components().count(),
-            ))
-        })
-        .max_by_key(|(_, _, depth)| *depth)
-        .map(|(repo, path, _)| (repo, path))
+    let (name, path) = Owners::new(repos).get(cwd)?;
+    let repo = repos.iter().find(|r| r.name == name)?;
+    Some((
+        &repo.name,
+        &repo.tasks.iter().find(|t| t.path == path)?.path,
+    ))
 }
 pub fn for_task<'a>(
     threads: &'a [Thread],
@@ -208,43 +248,60 @@ pub fn repositories(registry_path: &Path) -> Result<Vec<Repo>> {
         .collect()
 }
 
-fn refresh_git(repo: &mut Repo) {
-    let Some((_, config)) = &repo.context else {
-        return;
-    };
-    for task in &mut repo.tasks {
-        if query::cancelled() {
+struct GitScan {
+    project: String,
+    common: PathBuf,
+    trees: Result<Vec<(PathBuf, String)>>,
+    paths: std::collections::VecDeque<PathBuf>,
+}
+impl GitScan {
+    fn new(repo: &Repo, selected: Option<&Path>) -> Option<Self> {
+        let (project, config) = repo.context.as_ref()?;
+        let mut paths: Vec<_> = repo.tasks.iter().map(|t| t.path.clone()).collect();
+        paths.sort_by_key(|path| Some(path.as_path()) != selected);
+        Some(Self {
+            project: repo.name.clone(),
+            common: project.common.clone(),
+            trees: crate::git::worktrees(&config.main),
+            paths: paths.into(),
+        })
+    }
+    fn next(&mut self, repo: &mut Repo) {
+        let Some(path) = self.paths.pop_front() else {
             return;
-        }
+        };
+        let Some(task) = repo.tasks.iter_mut().find(|t| t.path == path) else {
+            return;
+        };
         let result = (|| -> Result<(String, String)> {
             ensure!(task.path.is_dir(), "工作目录缺失");
             if task.name != "main" {
+                let trees = self.trees.as_ref().map_err(|e| anyhow::anyhow!("{e:#}"))?;
                 ensure!(
-                    crate::check_worktree(
-                        config,
+                    crate::check_worktree_in(
+                        trees,
+                        &self.common,
                         &Feature {
                             path: task.path.clone(),
                             branch: task.branch.clone(),
                             base: String::new(),
-                            remote_start: None
+                            remote_start: None,
                         }
                     )?,
                     "Worktree 尚未创建"
                 );
             }
-            let branch = git(&task.path, &["branch", "--show-current"])?;
             let status = git(
                 &task.path,
-                &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                &[
+                    "status",
+                    "--porcelain=v1",
+                    "--branch",
+                    "-z",
+                    "--untracked-files=all",
+                ],
             )?;
-            Ok((
-                if branch.is_empty() {
-                    "(detached)".into()
-                } else {
-                    branch
-                },
-                git_summary(&status),
-            ))
+            branch_status(&status)
         })();
         match result {
             Ok((branch, status)) => {
@@ -259,6 +316,22 @@ fn refresh_git(repo: &mut Repo) {
             }
         }
     }
+}
+fn branch_status(status: &str) -> Result<(String, String)> {
+    let (header, files) = status.split_once('\0').context("Git 状态缺少分支头")?;
+    let branch = header.strip_prefix("## ").context("Git 分支头格式异常")?;
+    let branch = if branch == "HEAD (no branch)" {
+        "(detached)"
+    } else {
+        branch
+            .strip_prefix("No commits yet on ")
+            .or_else(|| branch.strip_prefix("Initial commit on "))
+            .unwrap_or(branch)
+            .split("...")
+            .next()
+            .unwrap()
+    };
+    Ok((branch.to_owned(), git_summary(files)))
 }
 fn git_summary(status: &str) -> String {
     let (mut staged, mut modified, mut untracked) = (0, 0, 0);
@@ -288,68 +361,90 @@ fn git_summary(status: &str) -> String {
         format!("暂存 {staged} / 修改 {modified} / 新增 {untracked}")
     }
 }
-fn refresh_windows(repo: &mut Repo) {
-    let Some((project, config)) = &repo.context else {
+fn refresh_windows(repos: &mut [Repo]) {
+    if repos.iter().all(|repo| repo.context.is_none()) {
         return;
-    };
-    let result = (|| -> Result<String> {
-        if !tmux::session_exists(config, project)? {
-            return Ok(String::new());
-        }
-        let output = tmux::tmux(&[
-            "list-windows",
-            "-t",
-            &format!("={}", config.session),
-            "-F",
-            "#{window_id}\t#{window_name}\t#{@twig-feature}\t#{pane_start_path}",
-        ])?;
-        ensure!(
-            output.lines().all(|line| line.split('\t').count() == 4),
-            "无法解析 tmux 窗口信息"
-        );
-        Ok(output)
-    })();
-    for task in &mut repo.tasks {
-        task.window = match &result {
-            Err(error) => format!("查询失败：{error:#}"),
-            Ok(text) => {
-                let mut found = 0;
-                let mut collision = false;
-                for line in text.lines() {
-                    let f: Vec<_> = line.split('\t').collect();
-                    if f.len() != 4 {
-                        continue;
-                    }
-                    if f[2] == task.name
-                        || (task.name == "main"
-                            && f[1] == "main"
-                            && f[2].is_empty()
-                            && Path::new(f[3]).canonicalize().ok().as_deref()
-                                == Some(config.main.as_path()))
-                    {
-                        found += 1;
-                    } else if f[1] == task.name {
-                        collision = true;
-                    }
-                }
-                if found > 1 {
-                    "归属冲突：重复标记".into()
-                } else if found == 1 {
-                    "已打开".into()
-                } else if collision {
-                    "归属冲突：同名窗口".into()
-                } else {
-                    "未打开".into()
-                }
+    }
+    let result = (|| -> Result<BTreeMap<String, Vec<Vec<String>>>> {
+        let output = crate::git::run("tmux", &[
+            "list-windows".as_ref(), "-a".as_ref(), "-F".as_ref(),
+            "#{session_name}\t#{@twig-repo}\t#{window_id}\t#{window_name}\t#{@twig-feature}\t#{pane_start_path}".as_ref(),
+        ], None)?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            if error.contains("no server running") || error.contains("No such file or directory") {
+                return Ok(BTreeMap::new());
             }
+            anyhow::bail!("无法查询 tmux：{}", error.trim());
+        }
+        let text = String::from_utf8(output.stdout)?;
+        let mut sessions: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
+        for line in text.lines() {
+            let fields: Vec<_> = line.split('\t').map(str::to_owned).collect();
+            ensure!(fields.len() == 6, "无法解析 tmux 窗口信息");
+            sessions.entry(fields[0].clone()).or_default().push(fields);
+        }
+        Ok(sessions)
+    })();
+    for repo in repos {
+        let Some((project, config)) = &repo.context else {
+            continue;
         };
+        let windows = result
+            .as_ref()
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|sessions| {
+                let rows = sessions
+                    .get(&config.session)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                if rows
+                    .iter()
+                    .any(|f| f[1] != project.common.to_string_lossy())
+                {
+                    Err(format!(
+                        "同名 tmux Session 不属于本项目：{}",
+                        config.session
+                    ))
+                } else {
+                    Ok(rows)
+                }
+            });
+        let mut marked = BTreeMap::<&str, usize>::new();
+        let mut names = HashSet::new();
+        if let Ok(rows) = &windows {
+            for f in *rows {
+                names.insert(f[3].as_str());
+                let name = if f[4].is_empty()
+                    && f[3] == "main"
+                    && Path::new(&f[5]).canonicalize().ok().as_deref()
+                        == Some(config.main.as_path())
+                {
+                    "main"
+                } else {
+                    f[4].as_str()
+                };
+                *marked.entry(name).or_default() += 1;
+            }
+        }
+        for task in &mut repo.tasks {
+            task.window = match &windows {
+                Err(error) => format!("查询失败：{error}"),
+                Ok(_) => match marked.get(task.name.as_str()).copied().unwrap_or(0) {
+                    0 if names.contains(task.name.as_str()) => "归属冲突：同名窗口".into(),
+                    0 => "未打开".into(),
+                    1 => "已打开".into(),
+                    _ => "归属冲突：重复标记".into(),
+                },
+            };
+        }
     }
 }
 
 fn collect(
     registry: PathBuf,
     requests: Receiver<Request>,
-    updates: Sender<Snapshot>,
+    updates: Updates,
     completions: Sender<Completion>,
     cancel: Arc<AtomicBool>,
 ) {
@@ -363,11 +458,16 @@ fn collect(
     let mut announced = HashSet::new();
     let mut registry_at = None;
     let mut activity_at = None;
+    let mut retry_at = None;
+    let mut retry_delay = 2;
     let mut git_at = None;
     let mut git_project = None;
+    let mut git_scan: Option<GitScan> = None;
     let mut cursor: Option<String> = None;
     let mut seen_cursors = HashSet::new();
     let mut handled_refresh = 0;
+    let mut unpublished = false;
+    let mut published_at = Instant::now();
     while !cancel.load(Ordering::Relaxed) {
         for next in requests.try_iter() {
             request = next;
@@ -375,6 +475,7 @@ fn collect(
         let force = request.refresh != handled_refresh;
         handled_refresh = request.refresh;
         let mut dirty = false;
+        let mut associations_changed = false;
         if force || due(registry_at, 10) {
             match repositories(&registry) {
                 Ok(mut repos) => {
@@ -413,78 +514,85 @@ fn collect(
             dirty = true;
             // 先发布项目列表，Codex 或 Git 慢时仍可开始导航。
             associate(&mut snapshot);
-            if updates.send(snapshot.clone()).is_err() {
-                break;
-            }
+            updates.publish(&snapshot);
         }
         if force || due(activity_at, 2) {
-            for repo in &mut snapshot.repos {
-                if query::cancelled() {
-                    return;
-                }
-                refresh_windows(repo);
+            if query::cancelled() {
+                return;
             }
-            let result = (|| -> Result<Vec<Thread>> {
-                if client.is_none() {
-                    client = Some(Client::discover()?);
-                }
-                let client = client.as_mut().unwrap();
-                let threads = client.loaded()?;
-                let mut paths: BTreeMap<_, _> = threads
-                    .iter()
-                    .filter(|t| owner(&t.cwd, &snapshot.repos).is_some())
-                    .map(|t| (t.id.clone(), t.cwd.clone()))
-                    .collect();
-                // 轮次结束后会话可能立即卸载，仍需读取已观察到的进行中轮次。
-                for (id, (path, turn)) in &watched {
-                    if turn.as_ref().is_some_and(|t| t.status == "inProgress") {
-                        paths.entry(id.clone()).or_insert_with(|| path.clone());
+            refresh_windows(&mut snapshot.repos);
+            updates.publish(&snapshot);
+            if force || retry_at.is_none_or(|at: Instant| Instant::now() >= at) {
+                let result = (|| -> Result<Vec<Thread>> {
+                    if client.is_none() {
+                        client = Some(Client::discover()?);
                     }
-                }
-                for (id, path) in paths {
-                    let Some((project, task_path)) = owner(&path, &snapshot.repos) else {
-                        continue;
-                    };
-                    let (latest, turns) =
-                        client.completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
-                    for turn in turns {
-                        if announced.insert((id.clone(), turn.id)) {
-                            let task = snapshot
-                                .repos
-                                .iter()
-                                .find(|r| r.name == project)
-                                .unwrap()
-                                .tasks
-                                .iter()
-                                .find(|t| t.path == task_path)
-                                .unwrap();
-                            let _ = completions.send(Completion {
-                                project: project.to_owned(),
-                                path: task_path.to_owned(),
-                                task: task.name.clone(),
-                            });
+                    let client = client.as_mut().unwrap();
+                    let threads = client.loaded()?;
+                    let mut owners = Owners::new(&snapshot.repos);
+                    let mut paths: BTreeMap<_, _> = threads
+                        .iter()
+                        .filter(|t| owners.get(&t.cwd).is_some())
+                        .map(|t| (t.id.clone(), t.cwd.clone()))
+                        .collect();
+                    // 轮次结束后会话可能立即卸载，仍需读取已观察到的进行中轮次。
+                    for (id, (path, turn)) in &watched {
+                        if turn.as_ref().is_some_and(|t| t.status == "inProgress") {
+                            paths.entry(id.clone()).or_insert_with(|| path.clone());
                         }
                     }
-                    watched.insert(id, (path, latest));
-                }
-                Ok(threads)
-            })();
-            match result {
-                Ok(threads) => {
-                    snapshot.threads = threads;
-                    // 历史页曾经返回 active/idle；当前完整 loaded 快照已不含该 ID
-                    // 时，其在本服务的状态应显示未加载，而非保留旧的运行状态。
-                    for thread in &mut snapshot.history {
-                        if !snapshot.threads.iter().any(|t| t.id == thread.id) {
-                            thread.status = serde_json::json!({"type":"notLoaded"});
+                    for (id, path) in paths {
+                        let Some((project, task_path)) = owners.get(&path) else {
+                            continue;
+                        };
+                        let (latest, turns) =
+                            client.completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
+                        for turn in turns {
+                            if announced.insert((id.clone(), turn.id)) {
+                                let task = snapshot
+                                    .repos
+                                    .iter()
+                                    .find(|r| r.name == project)
+                                    .unwrap()
+                                    .tasks
+                                    .iter()
+                                    .find(|t| t.path == task_path)
+                                    .unwrap();
+                                let _ = completions.send(Completion {
+                                    project: project.to_owned(),
+                                    path: task_path.to_owned(),
+                                    task: task.name.clone(),
+                                });
+                            }
                         }
+                        watched.insert(id, (path, latest));
                     }
-                    snapshot.codex_error = None;
-                    snapshot.codex_checked = Some(Instant::now());
-                }
-                Err(e) => {
-                    snapshot.codex_error = Some(format!("{e:#}"));
-                    client = None;
+                    Ok(threads)
+                })();
+                match result {
+                    Ok(threads) => {
+                        snapshot.threads = threads;
+                        associations_changed = true;
+                        // 历史页曾经返回 active/idle；当前完整 loaded 快照已不含该 ID
+                        // 时，其在本服务的状态应显示未加载，而非保留旧的运行状态。
+                        let loaded: HashSet<_> =
+                            snapshot.threads.iter().map(|t| t.id.as_str()).collect();
+                        for thread in &mut snapshot.history {
+                            if !loaded.contains(thread.id.as_str()) {
+                                thread.status = serde_json::json!({"type":"notLoaded"});
+                            }
+                        }
+                        snapshot.codex_error = None;
+                        snapshot.codex_checked = Some(Instant::now());
+                        retry_at = None;
+                        retry_delay = 2;
+                    }
+                    Err(e) => {
+                        snapshot.codex_error = Some(format!("{e:#}"));
+                        client = None;
+                        retry_at = Some(Instant::now() + Duration::from_secs(retry_delay));
+                        retry_delay = (retry_delay * 2).min(30);
+                    }
                 }
             }
             activity_at = Some(Instant::now());
@@ -494,17 +602,34 @@ fn collect(
         for next in requests.try_iter() {
             request = next;
         }
-        if force || request.project != git_project || due(git_at, 5) {
-            if let Some(repo) = snapshot
-                .repos
-                .iter_mut()
-                .find(|r| Some(&r.name) == request.project.as_ref())
-            {
-                refresh_git(repo);
-            }
-            git_at = Some(Instant::now());
+        if force || request.project != git_project || request.background {
+            git_scan = None;
+            git_at = None;
             git_project = request.project.clone();
-            dirty = true;
+        }
+        if !request.background {
+            if git_scan.is_none() && due(git_at, 5) {
+                git_scan = snapshot
+                    .repos
+                    .iter()
+                    .find(|r| Some(&r.name) == request.project.as_ref())
+                    .and_then(|repo| GitScan::new(repo, request.path.as_deref()));
+                if git_scan.is_none() {
+                    git_at = Some(Instant::now());
+                }
+            }
+            if let Some(scan) = &mut git_scan {
+                if let Some(repo) = snapshot.repos.iter_mut().find(|r| r.name == scan.project) {
+                    scan.next(repo);
+                    dirty = true;
+                } else {
+                    scan.paths.clear();
+                }
+                if scan.paths.is_empty() {
+                    git_scan = None;
+                    git_at = Some(Instant::now());
+                }
+            }
         }
         let key = request
             .path
@@ -514,6 +639,7 @@ fn collect(
         if key != snapshot.history_key || force {
             snapshot.history_key = key.clone();
             snapshot.history.clear();
+            associations_changed = true;
             snapshot.history_pages = 0;
             snapshot.history_scanned = 0;
             snapshot.history_more = true;
@@ -540,13 +666,17 @@ fn collect(
             })();
             match result {
                 Ok(page) => {
+                    associations_changed = true;
                     snapshot.history_scanned += page.data.len();
                     snapshot.history_pages += 1;
+                    let mut owners = Owners::new(&snapshot.repos);
+                    let mut ids: HashSet<_> =
+                        snapshot.history.iter().map(|t| t.id.clone()).collect();
                     for t in page.data {
                         if !t.ephemeral
-                            && owner(&t.cwd, &snapshot.repos)
-                                == request.project.as_deref().map(|p| (p, path.as_path()))
-                            && !snapshot.history.iter().any(|old| old.id == t.id)
+                            && owners.get(&t.cwd)
+                                == request.project.clone().map(|p| (p, path.clone()))
+                            && ids.insert(t.id.clone())
                         {
                             snapshot.history.push(t);
                         }
@@ -581,24 +711,31 @@ fn collect(
             snapshot.turn = Some((id.clone(), value));
             dirty = true;
         }
-        if dirty {
+        if associations_changed {
             associate(&mut snapshot);
-            if updates.send(snapshot.clone()).is_err() {
-                break;
-            }
         }
-        thread::sleep(Duration::from_millis(50));
+        unpublished |= dirty;
+        if unpublished
+            && (git_scan.is_none() || published_at.elapsed() >= Duration::from_millis(100))
+        {
+            updates.publish(&snapshot);
+            unpublished = false;
+            published_at = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(if git_scan.is_some() {
+            1
+        } else {
+            50
+        }));
     }
 }
 fn associate(snapshot: &mut Snapshot) {
+    let mut owners = Owners::new(&snapshot.repos);
     snapshot.associations = snapshot
         .threads
         .iter()
         .chain(&snapshot.history)
-        .filter_map(|t| {
-            owner(&t.cwd, &snapshot.repos)
-                .map(|(r, p)| (t.id.clone(), (r.to_owned(), p.to_owned())))
-        })
+        .filter_map(|t| owners.get(&t.cwd).map(|owner| (t.id.clone(), owner)))
         .collect();
 }
 fn due(at: Option<Instant>, seconds: u64) -> bool {
@@ -634,6 +771,45 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_header_keeps_upstream_detached_and_rename_counts() {
+        assert_eq!(
+            branch_status("## topic...origin/topic [ahead 1]\0R  new\0old\0?? extra\0").unwrap(),
+            ("topic".into(), "暂存 1 / 修改 0 / 新增 1".into())
+        );
+        assert_eq!(
+            branch_status("## HEAD (no branch)\0").unwrap(),
+            ("(detached)".into(), "干净".into())
+        );
+        assert!(branch_status("invalid").is_err());
+    }
+
+    #[test]
+    fn pending_snapshots_replace_old_values_without_dropping_completion_events() {
+        let updates = Updates::default();
+        let (out, events) = mpsc::channel();
+        for index in 0..3 {
+            updates.publish(&Snapshot {
+                history_pages: index,
+                ..Default::default()
+            });
+            out.send(Completion {
+                project: "repo".into(),
+                path: "/repo".into(),
+                task: index.to_string(),
+            })
+            .unwrap();
+        }
+        assert_eq!(updates.take().unwrap().history_pages, 2);
+        assert!(updates.take().is_none());
+        assert_eq!(
+            events
+                .try_iter()
+                .map(|event| event.task)
+                .collect::<Vec<_>>(),
+            ["0", "1", "2"]
+        );
+    }
     fn repo(name: &str, path: PathBuf) -> Repo {
         Repo {
             name: name.into(),
