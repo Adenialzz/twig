@@ -325,4 +325,4 @@ Twig 打开期间，会只读查询已关联任务的 Codex 轮次。检测到�
 
 ## 切换主控 Chat
 
-普通导航状态按 F2 切换主控 Chat，再按 F2 返回，保留项目/任务选择及聊天草稿。表单、搜索、帮助和工作台不触发切换；工作台先用 Ctrl-W d 返回导航。Console 新建表单仍创建普通任务；受管任务使用 `twig new PROJECT NAME --agent` 或由主控创建。见 [主控 Agent](agent.md)。
+普通导航状态点击顶部 Chat 标签或按 F2 切换主控 Chat，再按 F2 返回，保留项目/任务选择及聊天草稿。表单、搜索、帮助和工作台不触发切换；工作台先用 Ctrl-W d 返回导航。Console 新建表单仍创建普通任务；受管任务使用 `twig new PROJECT NAME --agent` 或由主控创建。见 [主控 Agent](agent.md)。

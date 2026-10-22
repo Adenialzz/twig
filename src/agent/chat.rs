@@ -278,7 +278,8 @@ fn run_ui(
         if dirty || last.elapsed() > Duration::from_secs(1) {
             terminal.draw(|frame| {
                 let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(3), Constraint::Length(5), Constraint::Length(2)]).split(frame.area());
-                frame.render_widget(Paragraph::new(format!("Chat · F2 Console · Ctrl-Q 退出 · F5 重连\n{}", view.status)).style(Style::default().fg(Color::Cyan)), rows[0]);
+                crate::tabs::draw(frame, rows[0], crate::tabs::Tab::Chat, "F2 切换标签 · Ctrl-Q 退出 · F5 重连");
+                frame.render_widget(Paragraph::new(view.status.as_str()).style(Style::default().fg(Color::Cyan)), ratatui::layout::Rect::new(rows[0].x, rows[0].y + 1, rows[0].width, rows[0].height.saturating_sub(1)));
                 let mut content = view.text.clone();
                 if let Some(error) = &view.error { content.push_str(&format!("\n错误：{error}\n")); }
                 if let Some(approval) = &view.approval { content.push_str(&format!("\n等待审批：{approval}\n")); }
@@ -297,7 +298,16 @@ fn run_ui(
             continue;
         }
         dirty = true;
-        match event::read()? {
+        let event = match event::read()? {
+            Event::Mouse(mouse)
+                if crate::tabs::clicked(mouse, terminal.get_frame().area())
+                    == Some(crate::tabs::Tab::Console) =>
+            {
+                Event::Key(event::KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            }
+            event => event,
+        };
+        match event {
             Event::Paste(text) => {
                 input.insert_str(cursor, &text);
                 cursor += text.len();

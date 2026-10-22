@@ -705,3 +705,7 @@ Rebase 验证（2026-10-22）：已接入本地 main 4812edf，保留创建任�
 协议与产品验收使用 Codex 0.163.0、本地固定 Responses 服务、独立 app-server/tmux、临时仓库和模拟飞书；未操作真实 Agent 会话或发送真实通知。产品手册见 docs/agent.md，验收入口见 examples/check_agent.py。
 
 本版验证：fmt、Clippy 与全部 133 项 Rust 测试通过；正式产品隔离验收覆盖无 UI 时主控调用 Twig CLI 通知模拟飞书、忙时排队、投递对账、漏失回调补查、服务重启、中文粘贴/F2 草稿、中断活动轮次与同名重建。工作台 Vim/Zsh PTY 回归通过，已构建 release 二进制，未安装到用户 PATH。
+
+### Console / Chat 标签栏（2026-10-22）
+
+两个页面共用顶部标签栏，高亮当前标签，鼠标点击目标标签切换；保留 F2 快捷键。项目/任务选择及聊天草稿仍保留，Tab/Shift-Tab 继续用于 Console 区域与表单导航。弹窗、搜索、帮助与工作台不触发顶层标签切换。

@@ -796,6 +796,20 @@ fn run_inner(
             }
             continue;
         }
+        let event = match event {
+            Event::Mouse(mouse)
+                if app.form.is_none()
+                    && !app.help
+                    && !app.searching
+                    && terminal.size()?.width >= 38
+                    && terminal.size()?.height >= 12
+                    && crate::tabs::clicked(mouse, terminal.get_frame().area())
+                        == Some(crate::tabs::Tab::Chat) =>
+            {
+                Event::Key(event::KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+            }
+            event => event,
+        };
         match event {
             Event::Resize(_, _) => {
                 selection = None;

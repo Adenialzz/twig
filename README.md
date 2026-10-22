@@ -64,4 +64,4 @@ Console 在内容变化时重绘，状态查询按任务分批更新。进入终
 
 ## 主控 Chat
 
-`twig chat` 打开主控，F2 与 Console 导航切换。需要已运行的 Codex daemon；不可用时只提示用户启动。受管任务使用 `twig new PROJECT TASK --agent`，通过 CLI 派活与完成回调跟进；退出 UI 不停止 Codex。飞书通知读取 `TWIG_FEISHU_WEBHOOK_URL`。详见 [主控指南](docs/agent.md)（`twig guide agent`）。
+`twig chat` 打开主控，点击顶部 Console / Chat 标签或按 F2 切换页面。需要已运行的 Codex daemon；不可用时只提示用户启动。受管任务使用 `twig new PROJECT TASK --agent`，通过 CLI 派活与完成回调跟进；退出 UI 不停止 Codex。飞书通知读取 `TWIG_FEISHU_WEBHOOK_URL`。详见 [主控指南](docs/agent.md)（`twig guide agent`）。

@@ -211,9 +211,9 @@ supports_websockets = false
         frontend.wait("空闲")
         frontend.send(b"\x1b[200~" + "草稿中文".encode() + b"\x1b[201~")
         frontend.wait("草稿中文")
-        frontend.send(b"\x1bOQ")
-        frontend.wait("F2 主控 Chat")
-        frontend.send(b"\x1bOQ")
+        frontend.send(b"\x1b[<0;3;1M\x1b[<0;3;1m")
+        frontend.wait("个项目")
+        frontend.send(b"\x1b[<0;13;1M\x1b[<0;13;1m")
         frontend.wait("草稿中文")
         frontend.wait("空闲")
         frontend.send(b"\x15")  # 清空草稿
@@ -227,7 +227,7 @@ supports_websockets = false
         frontend.close()
         frontend = None
         assert server.poll() is None
-        print("PASS: Chat PTY 中文输入、F2 往返草稿保留、发送、终端恢复及退出不停止服务", flush=True)
+        print("PASS: Chat PTY 中文输入、鼠标标签往返草稿保留、发送、终端恢复及退出不停止服务", flush=True)
 
         twig("agent", "notify", "--message", "通知测试")
         assert model.notices[-1] == {"msg_type": "text", "content": {"text": "通知测试"}}

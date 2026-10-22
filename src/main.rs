@@ -8,6 +8,7 @@ mod guide;
 mod pr;
 mod registry;
 mod startup;
+mod tabs;
 mod tmux;
 
 use anyhow::{Context, Result, bail, ensure};
