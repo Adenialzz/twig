@@ -232,6 +232,67 @@ impl Client {
         }
         Ok(())
     }
+
+    fn wheel(&mut self, pane: &Pane, mouse: event::MouseEvent) -> Result<bool> {
+        // 模式以 server 此刻的状态为准，不从字符快照推断或缓存。
+        let state = self.command(&format!(
+            "display-message -p -t {} '#{{mouse_any_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}'",
+            pane.id
+        ))?;
+        let state = String::from_utf8(state.concat())?;
+        let flags = state.split_whitespace().collect::<Vec<_>>();
+        ensure!(flags.len() == 3, "无法读取鼠标模式：{state}");
+        if flags[0] == "0" {
+            return Ok(false);
+        }
+        let bytes = wheel_bytes(mouse, pane.rect, flags[1] == "1", flags[2] == "1");
+        self.send(&pane.id, &bytes)?;
+        Ok(true)
+    }
+}
+
+fn wheel_bytes(mouse: event::MouseEvent, rect: Rect, sgr: bool, utf8: bool) -> Vec<u8> {
+    let mut button = if mouse.kind == MouseEventKind::ScrollUp {
+        64
+    } else {
+        65
+    };
+    for (modifier, bit) in [
+        (KeyModifiers::SHIFT, 4),
+        (KeyModifiers::ALT, 8),
+        (KeyModifiers::CONTROL, 16),
+    ] {
+        if mouse.modifiers.contains(modifier) {
+            button |= bit;
+        }
+    }
+    let x = u32::from(mouse.column - rect.x) + 1;
+    let y = u32::from(mouse.row - rect.y) + 1;
+    if sgr {
+        return format!("\x1b[<{button};{x};{y}M").into_bytes();
+    }
+    let mut bytes = b"\x1b[M".to_vec();
+    // 与 tmux 一致，1005 使用双字节 UTF-8；传统协议坐标限制为单字节。
+    if utf8 {
+        if x + 32 > 0x7ff || y + 32 > 0x7ff {
+            return Vec::new();
+        }
+        for value in [button + 32, x + 32, y + 32] {
+            bytes.extend_from_slice(
+                char::from_u32(value)
+                    .unwrap()
+                    .encode_utf8(&mut [0; 4])
+                    .as_bytes(),
+            );
+        }
+    } else {
+        bytes.extend([
+            button as u8 + 32,
+            (x + 32).min(255) as u8,
+            (y + 32).min(255) as u8,
+        ]);
+    }
+    bytes
 }
 
 impl Drop for Client {
@@ -944,7 +1005,9 @@ fn run_inner(
                             .iter_mut()
                             .find(|pane| pane.rect.contains((x, y).into()))
                         {
-                            pane.scroll_offset = if mouse.kind == MouseEventKind::ScrollUp {
+                            pane.scroll_offset = if client.wheel(pane, mouse)? {
+                                0
+                            } else if mouse.kind == MouseEventKind::ScrollUp {
                                 pane.scroll_offset + 3
                             } else {
                                 pane.scroll_offset.saturating_sub(3)
@@ -1053,6 +1116,30 @@ fn run_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wheel_protocols_preserve_coordinates_and_modifiers() {
+        let rect = Rect::new(10, 4, 400, 30);
+        let mut mouse = event::MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 11,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(wheel_bytes(mouse, rect, true, false), b"\x1b[<64;2;3M");
+        assert_eq!(wheel_bytes(mouse, rect, false, false), b"\x1b[M`\x22\x23");
+        mouse.kind = MouseEventKind::ScrollDown;
+        mouse.modifiers = KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL;
+        assert_eq!(wheel_bytes(mouse, rect, true, true), b"\x1b[<93;2;3M");
+        mouse.column = 309;
+        assert_eq!(
+            wheel_bytes(mouse, rect, false, true),
+            "\x1b[M}\u{14c}#".as_bytes()
+        );
+        assert_eq!(wheel_bytes(mouse, rect, false, false), b"\x1b[M}\xff#");
+        mouse.column = 2025;
+        assert!(wheel_bytes(mouse, rect, false, true).is_empty());
+    }
 
     fn visible_text(text: &str) -> String {
         text.lines()
