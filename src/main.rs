@@ -75,9 +75,9 @@ enum Action {
         #[arg(long, hide = true)]
         print_name: bool,
     },
-    /// 创建并进入任务 Shell 窗口；重复执行接续已有环境
+    /// 创建并进入新任务 Shell 窗口；拒绝已登记的同名任务
     #[command(
-        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-W d 返回 Console；--no-open 仅准备环境。\n同名本地分支或远端跟踪分支存在时询问是否使用，默认取消；本地优先，多个 remote 时选择来源，不自动 fetch。非交互环境拒绝。不会接管已有 Worktree；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动与重试：twig guide windows；twig guide troubleshooting"
+        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-W d 返回 Console；--no-open 仅准备环境。已登记的同名任务直接报错，请使用 open。\n同名本地分支或远端跟踪分支存在时询问是否使用，默认取消；本地优先，多个 remote 时选择来源，不自动 fetch。非交互环境拒绝。不会接管已有 Worktree；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动配置：twig guide windows；twig guide troubleshooting"
     )]
     New {
         /// 已登记的项目别名，不根据当前目录推断
@@ -121,7 +121,7 @@ enum Action {
     },
     /// 关闭窗口及其中的进程，保留 Worktree 和分支
     #[command(
-        after_help = "默认确认后终止窗口内全部进程，保留代码、分支和任务记录。\n重新准备窗口用 open 或 new --no-open；缺失窗口不重建。\n示例：twig stop myapp auth\n详细说明：twig guide cleanup"
+        after_help = "默认确认后终止窗口内全部进程，保留代码、分支和任务记录。\n重新准备窗口用 open；stop 不重建缺失窗口。\n示例：twig stop myapp auth\n详细说明：twig guide cleanup"
     )]
     Stop {
         /// 已登记的项目别名，不根据当前目录推断
@@ -290,7 +290,7 @@ fn execute(cli: Cli) -> Result<()> {
             let feature = feature(&state, &name)?;
             ensure!(
                 check_worktree(&config, feature)?,
-                "Worktree 不存在；请检查 twig ls <项目名>，必要时重试 twig new <项目名> {name}"
+                "Worktree 不存在；请检查 twig ls <项目名> 和 twig guide troubleshooting，new 不恢复已登记任务"
             );
             let window = tmux::ensure_window(&config, &project, &name, &feature.path)?;
             drop(lock); // 工作台交互期间不能持有项目锁。
@@ -575,62 +575,59 @@ fn new(
 ) -> Result<String> {
     config::task_name(name)?;
     ensure!(name != "main", "main 保留给项目主窗口");
-    if let Some(existing) = state.get(name) {
+    ensure!(
+        !state.contains_key(name),
+        "任务 {name} 已存在；请使用 twig open {alias} {name}，或从 Console 任务列表进入"
+    );
+    let branch = name.to_owned();
+    git(&config.main, &["check-ref-format", "--branch", &branch])?;
+    let branches = existing_branches(config, name)?;
+    let selected = if let Some(expected) = expected_branch {
+        let (common, source): (PathBuf, BranchStart) = serde_json::from_str(&expected)?;
         ensure!(
-            base.as_ref().is_none_or(|b| b == &existing.base),
-            "任务已存在，不能更改基础分支"
+            common == project.common && branches.contains(&source),
+            "分支已变化，请重新确认"
+        );
+        Some(source)
+    } else if branches.is_empty() {
+        None
+    } else {
+        Some(choose_branch(&branches, &base)?)
+    };
+    let base = base.unwrap_or_else(|| config.base.clone());
+    if let Some(source) = &selected {
+        ensure!(
+            existing_branches(config, name)?.contains(source),
+            "分支已变化，请重新确认"
         );
     } else {
-        let branch = name.to_owned();
-        git(&config.main, &["check-ref-format", "--branch", &branch])?;
-        let branches = existing_branches(config, name)?;
-        let selected = if let Some(expected) = expected_branch {
-            let (common, source): (PathBuf, BranchStart) = serde_json::from_str(&expected)?;
-            ensure!(
-                common == project.common && branches.contains(&source),
-                "分支已变化，请重新确认"
-            );
-            Some(source)
-        } else if branches.is_empty() {
-            None
-        } else {
-            Some(choose_branch(&branches, &base)?)
-        };
-        let base = base.unwrap_or_else(|| config.base.clone());
-        if let Some(source) = &selected {
-            ensure!(
-                existing_branches(config, name)?.contains(source),
-                "分支已变化，请重新确认"
-            );
-        } else {
-            ensure!(git::exists(&config.main, &base)?, "基础分支不存在：{base}");
-        }
-        let remote_start = selected.filter(|source| source.reference.starts_with("refs/remotes/"));
-        let path = config.root.join(name);
-        check_task_parent(&config.root, &path)?;
-        ensure!(
-            state
-                .values()
-                .all(|task| !path.starts_with(&task.path) && !task.path.starts_with(&path)),
-            "任务路径与已有任务相互包含"
-        );
-        ensure!(
-            !path.try_exists()? && std::fs::symlink_metadata(&path).is_err(),
-            "路径已存在：{}",
-            path.display()
-        );
-        // 先保存意图，确保外部命令部分成功后仍能通过同名 new 接续。
-        state.insert(
-            name.to_owned(),
-            Feature {
-                branch,
-                base,
-                path,
-                remote_start,
-            },
-        );
-        project.save("state.json", state)?;
+        ensure!(git::exists(&config.main, &base)?, "基础分支不存在：{base}");
     }
+    let remote_start = selected.filter(|source| source.reference.starts_with("refs/remotes/"));
+    let path = config.root.join(name);
+    check_task_parent(&config.root, &path)?;
+    ensure!(
+        state
+            .values()
+            .all(|task| !path.starts_with(&task.path) && !task.path.starts_with(&path)),
+        "任务路径与已有任务相互包含"
+    );
+    ensure!(
+        !path.try_exists()? && std::fs::symlink_metadata(&path).is_err(),
+        "路径已存在：{}",
+        path.display()
+    );
+    // 先保存意图，部分失败保留资源及可诊断记录；重复 new 不执行恢复。
+    state.insert(
+        name.to_owned(),
+        Feature {
+            branch,
+            base,
+            path,
+            remote_start,
+        },
+    );
+    project.save("state.json", state)?;
     let feature = feature(state, name)?;
     if !check_worktree(config, feature)? {
         check_task_parent(&config.root, &feature.path)?;
@@ -643,7 +640,7 @@ fn new(
         } else if let Some(source) = &feature.remote_start {
             ensure!(
                 existing_branches(config, name)?.contains(source),
-                "远端跟踪分支已变化；保留任务记录，请检查来源后重试"
+                "远端跟踪分支已变化；保留任务记录，请检查 twig guide troubleshooting"
             );
             git(
                 &config.main,
@@ -675,7 +672,7 @@ fn new(
     }
     let window = tmux::ensure_window(config, project, name, &feature.path).with_context(|| {
         format!(
-            "Worktree 已保留在 {}；修复后执行 twig new {alias} {name} 或 twig open {alias} {name}",
+            "Worktree 已保留在 {}；修复后执行 twig open {alias} {name}",
             feature.path.display()
         )
     })?;

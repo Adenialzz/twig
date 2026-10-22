@@ -20,9 +20,9 @@ twig ls myapp
 | 未找到 main/master | add 时用 --base 指定已有本地分支；仓库至少需要一次提交 |
 | 初始化部分成功 | 保留资源；修复错误后再次 add 补登记，通过 Console Enter 准备主窗口 |
 | new 的进入失败 | 非交互终端可能没有 TTY，但环境已经创建；用 ls 检查，交互终端 open；后续脚本用 --no-open |
-| Worktree 已创建，tmux 失败 | 修复 tmux/配置后重复 new PROJECT NAME，不删除已有工作 |
-| Worktree 创建失败 | 排除路径或分支冲突后重复 new；若放弃，可用 rm PROJECT NAME --keep-branch 清理记录，仍需通过安全检查 |
-| 窗口丢失 | open 或重复 new 按当前配置重建；不恢复原程序或对话 |
+| Worktree 已创建，tmux 失败 | 修复 tmux/配置后使用 open PROJECT NAME，不删除已有工作 |
+| Worktree 创建失败 | 保留记录及现场，先核对任务记录、分支与路径，按 Git 实际状态手动恢复；重复 new 会报任务已存在。若放弃，可用 rm PROJECT NAME --keep-branch 清理，仍需通过安全检查 |
+| 窗口丢失 | open 按当前配置重建；不恢复原程序或对话 |
 | 窗口初始化未完成 | 直接用 tmux 检查部分创建的 Pane；修正配置，确认可终止进程后 stop，再 open；不会自动重复启动 |
 | 命令找不到/退出非零 | 检查对应 Pane 输出、任务分支中的脚本及依赖；shell 模式回到提示符，process 模式保留退出现场 |
 | 同名窗口归属冲突 | 不会自动接管；核实后由用户重命名或关闭冲突窗口，再重试 |
@@ -33,7 +33,7 @@ twig ls myapp
 
 ## 手动删除过 Worktree 目录
 
-在主仓库检查 `git worktree list` 和 `git worktree prune --dry-run`。确认丢失目录不需要恢复后，由用户自行 prune，再用 `twig new PROJECT NAME` 接续重建。twig 不自动 prune，不把缺失目录当成可以随意删除的资源。
+在主仓库检查 `git worktree list` 和 `git worktree prune --dry-run`。先核对并保留需要恢复的数据，再按 Git 的 Worktree 状态与任务记录手动恢复路径和分支；恢复后使用 `twig open PROJECT NAME`。重复 `new` 会因已有登记而拒绝，`open` 也不会重建缺失的 Worktree。twig 不自动 prune，不把缺失目录当成可以随意删除的资源。
 
 ## 锁冲突
 

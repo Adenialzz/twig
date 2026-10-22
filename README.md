@@ -24,7 +24,7 @@ twig ls myapp
 twig open myapp feat/login
 ```
 
-仓库须已有提交，默认基础分支为本地 main/master。任务名直接作为分支名。同名本地分支或已 fetch 的远端跟踪分支存在时，CLI 和 Console 会询问是否使用，默认取消；本地优先，多个 remote 同名时选择来源，不自动 fetch。已被其他 Worktree 占用的本地分支不可使用。脚本使用 `new --no-open`，仍创建窗口并执行启动配置。
+仓库须已有提交，默认基础分支为本地 main/master。任务名直接作为分支名。同名本地分支或已 fetch 的远端跟踪分支存在时，CLI 和 Console 会询问是否使用，默认取消；本地优先，多个 remote 同名时选择来源，不自动 fetch。已被其他 Worktree 占用的本地分支不可使用。脚本使用 `new --no-open`，仍创建窗口并执行启动配置。Console 和 CLI 新建均拒绝已登记的同名任务，已有任务请使用 `open` 或从任务列表进入；失败留下记录时也不能用重复 `new` 恢复。
 
 裸 `twig` 或 `twig console` 打开交互控制台：宽屏采用项目、任务、全局 Codex 监控和任务详情的 2×2 布局；左下监控独立刷新，不随选择或搜索改变。任务区 Enter 在 Twig 内打开终端工作台；`Ctrl-W d` 返回导航，分屏和进程继续由 tmux server 托管。`stop PROJECT NAME` 停止窗口和进程，`rm PROJECT NAME` 安全删除任务，`rm PROJECT` 只取消登记。清理前阅读 [安全清理](docs/cleanup.md)。
 
@@ -56,4 +56,4 @@ Twig 打开期间会提示 Codex 新完成的轮次：导航和终端工作台�
 
 Console 导航页的列表、详情和终端工作台均支持鼠标拖选文字，松开自动复制，右下角显示字符数；选区期间画面固定，后台程序继续运行。`Esc` 清除选区，`Ctrl-C` 仍交给程序。本机使用系统剪贴板，SSH 通过终端请求复制，详见 [Console 手册](docs/console.md)。
 
-项目列表按最近成功创建任务或进入工作台的时间排序，记录随所选用户配置保存，重启后保留；仅浏览不更新。
+Console 登记项目和新建任务均使用独立居中弹窗。项目列表按最近成功创建任务或进入工作台的时间排序，记录随所选用户配置保存，重启后保留；仅浏览不更新。

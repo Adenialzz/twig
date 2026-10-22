@@ -115,12 +115,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
         frame.render_widget(Paragraph::new("终端过小，请扩大到至少 38×12；q 退出"), area);
         return;
     }
-    if let Some(form) = &app.form
-        && form.deletion.is_none()
-    {
-        draw_form(frame, area, form);
-        return;
-    }
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -882,47 +876,69 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         );
         return;
     }
+    let width = area.width.saturating_sub(4).min(72);
+    let height = area.height.saturating_sub(2).min(20);
+    let area = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
     if let Some(existing) = &form.existing {
         let border = block(" 使用已有分支 ".into(), true);
         let inner = border.inner(area);
         frame.render_widget(Clear, area);
         frame.render_widget(border, area);
+        let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(inner);
+        let source_hint = if existing.branches.len() > 1 {
+            format!(
+                "↑↓ 选择来源（{}/{}） · PgUp/PgDn 滚动",
+                existing.selected + 1,
+                existing.branches.len()
+            )
+        } else {
+            "PgUp/PgDn 滚动说明".into()
+        };
         frame.render_widget(
             Paragraph::new(format!(
-                "分支 {} 已存在，是否使用它创建任务？\n保留已有提交，忽略起点分支；远端来源建立跟踪。\n↑↓ 选择来源（{}/{}）\n{}取消    {}使用分支\nTab / ←→ 切换 · Enter 确认 · Esc 返回",
+                "分支 {} 已存在，是否使用它创建任务？\n保留已有提交，忽略起点分支；远端来源建立跟踪。\n{}",
                 safe(existing.branches[existing.selected].label()),
-                existing.selected + 1, existing.branches.len(),
+                source_hint,
+            )).wrap(Wrap { trim: false }).scroll((form.scroll, 0)),
+            rows[0],
+        );
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}取消    {}使用分支\nTab / ←→ 切换 · Enter 确认\nEsc 返回表单",
                 if existing.confirmed { "  " } else { "› " },
                 if existing.confirmed { "› " } else { "  " },
-            )).wrap(Wrap { trim: false }),
-            inner,
+            )),
+            rows[1],
         );
         return;
     }
-    let border = block(
-        if form.project.is_some() {
-            " 新建任务 "
-        } else {
-            " 登记已有仓库 "
-        }
-        .into(),
-        true,
-    );
-    let inner = border.inner(area);
+    if let Some(project) = &form.project {
+        draw_task_form(frame, area, form, project);
+        return;
+    }
+    let border = block(" 登记已有仓库 ".into(), true);
+    let inner = border.inner(area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(Clear, area);
     frame.render_widget(border, area);
-    let rows = Layout::vertical([
-        Constraint::Length(2),
+    let sections = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Min(1),
+        Constraint::Length(2),
     ])
     .split(inner);
-    let labels = if form.project.is_some() {
-        ["任务名", "起点分支（已有本地分支）"]
-    } else {
-        ["已有仓库路径（支持 ~ 和相对路径）", "项目别名"]
-    };
+    frame.render_widget(
+        Paragraph::new("登记已有 Git 仓库").style(Style::default().add_modifier(Modifier::BOLD)),
+        sections[0],
+    );
+    let rows = [sections[1], sections[2], sections[4], sections[3]];
+    let labels = ["仓库路径（~ / 相对路径）", "项目别名"];
     for (i, label) in labels.iter().enumerate() {
         let style = if form.field == i {
             Style::default()
@@ -956,7 +972,9 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             .saturating_sub(rows[i].width as usize)
             .min(u16::MAX as usize) as u16;
         frame.render_widget(
-            Paragraph::new(value).style(style).scroll((0, offset)),
+            Paragraph::new(value)
+                .style(style.bg(Color::DarkGray))
+                .scroll((0, offset)),
             Rect {
                 y: rows[i].y + 1,
                 height: 1,
@@ -968,11 +986,9 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         Paragraph::new(if form.busy() {
             "正在执行，请等待…\n执行期间不强制取消，避免中断写操作。"
         } else if form.completing_path() {
-            "↑↓ 选择目录 · Tab 补全/切字段\nEnter 确定路径并填别名 · Esc 取消"
-        } else if form.project.is_none() {
-            "可修改别名，Enter 完成登记 · Esc 取消\nShift+Tab 返回路径 · PgUp/PgDn 滚动错误"
+            "↑↓ 选目录 · Tab 补全/切字段\nEnter 下一步 · Esc 取消"
         } else {
-            "Tab 切字段 · Enter 确认 · Esc 取消\nPgUp/PgDn 滚动下方说明或错误"
+            "Enter 登记 · Esc 取消\nShift+Tab 返回 · PgUp/Dn 滚动"
         }),
         rows[2],
     );
@@ -991,23 +1007,40 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             })
             .map(|text| Line::from(safe(&text)))
             .collect();
-        list(
-            frame,
-            rows[3],
-            " 本地目录 · Tab 补全 ".into(),
-            items,
-            Some(form.directory_selection),
-            true,
-        );
+        if rows[3].height < 3 {
+            let mut state = ListState::default().with_selected(Some(form.directory_selection));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .highlight_style(Style::default().bg(Color::DarkGray))
+                    .highlight_symbol("› "),
+                rows[3],
+                &mut state,
+            );
+        } else {
+            list(
+                frame,
+                rows[3],
+                " 本地目录 · Tab 补全 ".into(),
+                items,
+                Some(form.directory_selection),
+                true,
+            );
+        }
         return;
     }
     let message = match &form.error {
-        Some(error) if form.operation_started => format!("操作失败：{}\n已创建的资源会保留；修正输入或处理错误后可重试。", safe(error)),
+        Some(error) if form.operation_started => format!(
+            "操作失败：{}\n已创建的资源会保留；修正输入或处理错误后可重试。",
+            safe(error)
+        ),
         Some(error) => format!("请检查输入：{}", safe(error)),
-        None => match &form.project {
-            Some(project) => format!("项目：{}。创建后留在控制台，Enter 进入 Shell。", safe(project)),
-            None if form.completing_path() && form.directory_error.is_some() => format!("路径补全失败：{}", safe(form.directory_error.as_deref().unwrap())),
-            None => "登记已有 Git 仓库；未初始化时自动初始化，不克隆、不创建空仓库。已有登记复用原别名。".into(),
+        None if form.completing_path() && form.directory_error.is_some() => format!(
+            "路径补全失败：{}",
+            safe(form.directory_error.as_deref().unwrap())
+        ),
+        None => {
+            "登记已有 Git 仓库；未初始化时自动初始化，不克隆、不创建空仓库。已有登记复用原别名。"
+                .into()
         }
     };
     frame.render_widget(
@@ -1023,11 +1056,268 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
     );
 }
 
+fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, project: &str) {
+    let border = block(" 新建任务 ".into(), true);
+    let inner = border.inner(area).inner(ratatui::layout::Margin::new(1, 0));
+    frame.render_widget(Clear, area);
+    frame.render_widget(border, area);
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(if inner.height >= 14 { 1 } else { 0 }),
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    let rows = [
+        sections[0],
+        sections[1],
+        sections[2],
+        sections[4],
+        sections[3],
+        sections[5],
+    ];
+    frame.render_widget(
+        Paragraph::new(format!("项目：{}", safe(project)))
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+    let base_label = if form
+        .branches
+        .iter()
+        .any(|branch| branch.name == form.fields[0])
+    {
+        "起点分支（复用时忽略）"
+    } else {
+        "起点分支（本地）"
+    };
+    for (i, label) in ["任务名", base_label].iter().enumerate() {
+        let row = rows[i + 2];
+        let style = Style::default().fg(if form.field == i {
+            Color::Cyan
+        } else {
+            Color::Gray
+        });
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} {label}",
+                if form.field == i { "›" } else { " " }
+            ))
+            .style(style),
+            Rect { height: 1, ..row },
+        );
+        let value = Line::from(format!(
+            "{}{}",
+            safe(&form.fields[i]),
+            if form.field == i && !form.busy() {
+                "▏"
+            } else {
+                ""
+            }
+        ));
+        let offset = value
+            .width()
+            .saturating_sub(row.width as usize)
+            .min(u16::MAX as usize) as u16;
+        if row.height > 1 {
+            frame.render_widget(
+                Paragraph::new(value)
+                    .style(style.bg(Color::DarkGray))
+                    .scroll((0, offset)),
+                Rect {
+                    y: row.y + 1,
+                    height: 1,
+                    ..row
+                },
+            );
+        }
+    }
+    if form.completing_branch() && form.error.is_none() && form.branch_error.is_none() {
+        let items: Vec<_> = form
+            .matching_branches()
+            .into_iter()
+            .map(|branch| ListItem::new(safe(&branch.label)))
+            .collect();
+        if items.is_empty() {
+            frame.render_widget(Paragraph::new("无匹配分支，将新建分支"), rows[4]);
+        } else {
+            let mut widget = List::new(items)
+                .highlight_style(Style::default().bg(Color::DarkGray))
+                .highlight_symbol("› ");
+            if rows[4].height >= 3 {
+                widget = widget.block(block(" 已有分支 · 选作任务 ".into(), true));
+            }
+            let mut state = ListState::default().with_selected(Some(form.branch_selection));
+            frame.render_stateful_widget(widget, rows[4], &mut state);
+        }
+    } else {
+        let message = match &form.error {
+            Some(error) if form.operation_started => {
+                format!(
+                    "操作失败：{}。已创建资源和记录保留；同名任务不能再次新建，请查看 twig guide troubleshooting。",
+                    safe(error)
+                )
+            }
+            Some(error) => format!("请检查输入：{}", safe(error)),
+            None if form.busy() => "正在执行，请等待…".into(),
+            None if form.completing_branch() && form.branch_error.is_some() => format!(
+                "读取分支失败：{}",
+                safe(form.branch_error.as_deref().unwrap())
+            ),
+            None => "创建后留在控制台，Enter 进入 Shell。".into(),
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .wrap(Wrap { trim: false })
+                .scroll((form.scroll, 0))
+                .style(Style::default().fg(if form.error.is_some() {
+                    Color::Red
+                } else {
+                    Color::Gray
+                })),
+            rows[4],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(if form.busy() {
+            "执行期间请等待，避免中断写操作。"
+        } else if form.completing_branch() {
+            "↑↓ 选择 · Tab 填入\nEnter 选中并确认 · Esc 取消"
+        } else {
+            "Tab 切字段 · Enter 创建\nEsc 取消 · PgUp/PgDn 滚动"
+        })
+        .wrap(Wrap { trim: false }),
+        rows[5],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
     use serde_json::json;
+
+    #[test]
+    fn task_dialog_is_centered_and_preserves_background_and_selection() {
+        let mut app = fixture();
+        let selected = (app.project.clone(), app.task.clone());
+        app.snapshot.repos.reverse();
+        app.reconcile();
+        assert_eq!(selected, (app.project.clone(), app.task.clone()));
+        app.form = Some(super::super::form::Form::task(
+            "alpha".into(),
+            "main".into(),
+        ));
+        for (width, height) in [(38, 12), (65, 24), (100, 30), (140, 40)] {
+            let buffer = render(&app, width, height, |frame, _, app| super::draw(frame, app));
+            let output = text(&buffer);
+            for expected in [
+                "新建任务",
+                "项目：alpha",
+                "任务名",
+                "起点分支",
+                "Enter 选中并确认",
+                "Esc 取消",
+            ] {
+                assert!(
+                    output.contains(expected),
+                    "{width}×{height}: {expected}\n{output}"
+                );
+            }
+            let popup_width = (width - 4).min(72);
+            let popup_height = (height - 2).min(20);
+            let x = (width - popup_width) / 2;
+            let y = (height - popup_height) / 2;
+            assert_eq!(buffer[(x, y)].symbol(), "┌");
+            assert_eq!(
+                buffer[(x + popup_width - 1, y + popup_height - 1)].symbol(),
+                "┘"
+            );
+            assert!(output.contains("Twig") || output.contains("twig"));
+        }
+    }
+
+    #[test]
+    fn project_dialog_keeps_candidates_errors_and_actions_visible() {
+        let mut app = fixture();
+        app.form = Some(super::super::form::Form::project());
+        for (width, height) in [(38, 12), (65, 24), (100, 30), (140, 40)] {
+            let form = app.form.as_mut().unwrap();
+            form.error = None;
+            form.directories = vec!["/projects/alpha/".into(), "/projects/beta/".into()];
+            form.directory_selection = 1;
+            let buffer = render(&app, width, height, |frame, _, app| super::draw(frame, app));
+            let output = text(&buffer);
+            for expected in [
+                "登记已有仓库",
+                "仓库路径",
+                "项目别名",
+                "beta/",
+                "Enter 下一步",
+                "Esc 取消",
+                "twig",
+            ] {
+                assert!(
+                    output.contains(expected),
+                    "{width}×{height}: {expected}\n{output}"
+                );
+            }
+            let x = (width - (width - 4).min(72)) / 2;
+            let y = (height - (height - 2).min(20)) / 2;
+            assert_eq!(buffer[(x, y)].symbol(), "┌");
+            app.form.as_mut().unwrap().error = Some("目录不存在".into());
+            let output = text(&render(&app, width, height, |frame, _, app| {
+                super::draw(frame, app)
+            }));
+            assert!(output.contains("目录不存在"));
+            assert!(output.contains("Esc 取消"));
+            assert!(!output.contains("beta/"));
+        }
+    }
+
+    #[test]
+    fn branch_picker_keeps_selection_and_actions_visible_on_small_screens() {
+        let mut app = fixture();
+        let mut form = super::super::form::Form::task("alpha".into(), "".into());
+        form.field = 0;
+        form.branches = (0..30)
+            .map(|i| {
+                let name = format!("feature/{i:02}");
+                super::super::form::BranchCandidate {
+                    label: name.clone(),
+                    name,
+                }
+            })
+            .collect();
+        form.branch_selection = 29;
+        app.form = Some(form);
+        for (width, height) in [(38, 12), (65, 24), (100, 30)] {
+            let output = text(&render(&app, width, height, |frame, _, app| {
+                super::draw(frame, app)
+            }));
+            for expected in ["feature/29", "Tab 填入", "Enter 选中并确认", "Esc 取消"] {
+                assert!(
+                    output.contains(expected),
+                    "{width}×{height}: {expected}\n{output}"
+                );
+            }
+        }
+        app.form.as_mut().unwrap().fields[0] = "absent".into();
+        assert!(
+            text(&render(&app, 65, 24, |frame, _, app| super::draw(
+                frame, app
+            )))
+            .contains("无匹配分支，将新建分支")
+        );
+        app.form.as_mut().unwrap().branch_error = Some("读取失败".into());
+        assert!(
+            text(&render(&app, 65, 24, |frame, _, app| super::draw(
+                frame, app
+            )))
+            .contains("读取分支失败")
+        );
+    }
 
     fn fixture() -> App {
         let mut app = App::new("/alpha".into());

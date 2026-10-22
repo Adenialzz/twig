@@ -49,7 +49,7 @@ twig ls myapp
 
 Open/Closed 表示 tmux 窗口存在/不存在，不代表 Agent 运行状态；Clean/Dirty 是普通 Git 状态，不包含 ignored 文件；Missing 表示未创建或已移除的 Worktree；Mismatch 表示目录、分支或归属异常，应阅读 stderr 的具体原因。命令可能显示 Mismatch 后仍成功退出，不能只凭退出码判断所有任务健康。
 
-## new：创建或接续任务
+## new：创建新任务
 
 ```sh
 twig new myapp auth
@@ -58,7 +58,7 @@ twig new myapp feat/login --base develop --no-open
 
 PROJECT 和 NAME 必填。`--base BRANCH` 选择已有本地起点，默认项目 base；不会 fetch。`--no-open` 仅跳过进入，仍创建窗口并执行启动配置。默认成功后打开 Twig 内置终端工作台，Ctrl-W d 返回 Console 并选中该任务；非交互环境进入失败时已经创建的资源仍保留。
 
-同名本地分支或远端跟踪分支存在时，new 询问是否使用它创建任务，默认取消。本地同名分支优先；只有远端跟踪分支时，使用本机已 fetch 的引用，多个 remote 同名则输入编号选择，再确认。远端来源确认后创建本地分支并建立 upstream 跟踪关系；本地来源直接复用。两者均保留已有提交并忽略 --base。不自动 fetch，不保证引用反映远端实时状态；需要更新时先自行 git fetch。分支被其他 Worktree 占用时显示路径并拒绝；非交互环境请改用交互终端或 Console 确认。重复 new 接续自己登记的资源，不重复询问，不接管外部目录或窗口。已有任务按记录中的分支/路径接续；传入与原记录不同的 --base 会报错，不会重置分支。任务路径不能与已有任务相互包含，中间目录不能是符号链接或其他仓库。创建失败不强制回滚；恢复方式见 `twig guide troubleshooting`。
+同名本地分支或远端跟踪分支存在时，new 询问是否使用它创建任务，默认取消。本地同名分支优先；只有远端跟踪分支时，使用本机已 fetch 的引用，多个 remote 同名则输入编号选择，再确认。远端来源确认后创建本地分支并建立 upstream 跟踪关系；本地来源直接复用。两者均保留已有提交并忽略 --base。不自动 fetch，不保证引用反映远端实时状态；需要更新时先自行 git fetch。分支被其他 Worktree 占用时显示路径并拒绝；非交互环境请改用交互终端或 Console 确认。已登记同名任务时直接报错，包括创建失败留下记录、窗口或 Worktree 缺失的情况；不复用、不恢复、不修改已有资源。已有任务用 `twig open PROJECT NAME` 或 Console 任务列表进入；Worktree 缺失时先按故障排查指南处理。不会接管外部目录或窗口。任务路径不能与已有任务相互包含，中间目录不能是符号链接或其他仓库。创建失败不强制回滚；恢复方式见 `twig guide troubleshooting`。
 
 ## open：进入已有任务
 
@@ -75,7 +75,7 @@ twig stop myapp auth
 twig stop myapp auth --yes
 ```
 
-PROJECT 和 NAME 必填。关闭窗口及其全部进程，保留 Worktree、分支和任务记录。默认询问 `[y/N]`；`-y/--yes` 跳过确认。已登记任务的窗口不存在时成功返回，不重建窗口。重新启动用 open，或 `new --no-open` 准备而不进入。
+PROJECT 和 NAME 必填。关闭窗口及其全部进程，保留 Worktree、分支和任务记录。默认询问 `[y/N]`；`-y/--yes` 跳过确认。已登记任务的窗口不存在时成功返回，不重建窗口。重新启动用 open；重复 new 会报任务已存在。
 
 ## rm：取消登记或删除任务
 

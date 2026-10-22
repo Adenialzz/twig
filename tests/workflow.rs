@@ -257,7 +257,7 @@ fn startup_mixed_modes_keep_process_output_and_close_shell() {
             .collect::<Vec<_>>(),
         panes[1..]
     );
-    f.ok(&["new", "local", "mixed", "--no-open"]);
+    f.fail(&["new", "local", "mixed", "--no-open"], "已存在");
     assert_eq!(
         f.mux(&["list-panes", "-t", &target, "-F", "#{pane_dead}"])
             .lines()
@@ -493,7 +493,7 @@ fn startup_layout_precedence_commands_and_reopen() {
     );
     assert!(!f.root.join("configured/unwanted").exists());
     fs::write(&local, "[tmux]\npanes = []\n").unwrap();
-    f.ok(&["new", "local", "configured", "--no-open"]);
+    f.fail(&["new", "local", "configured", "--no-open"], "已存在");
     assert_eq!(
         f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
             .lines()
@@ -501,7 +501,7 @@ fn startup_layout_precedence_commands_and_reopen() {
         2
     );
     f.ok(&["stop", "local", "configured", "-y"]);
-    f.ok(&["new", "local", "configured", "--no-open"]);
+    f.fail(&["open", "local", "configured"], "工作台需要交互式终端");
     assert_eq!(
         f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
             .lines()
@@ -528,16 +528,23 @@ fn startup_layout_precedence_commands_and_reopen() {
 fn startup_rejects_invalid_configuration_without_creating_window() {
     let f = Fixture::new();
     fs::create_dir(f.repo.join(".twig")).unwrap();
-    for text in [
+    for (index, text) in [
         "[tmux]\npanes = [{command = []}]",
         "[tmux]\npanes = [{}, {split = 'right', percent = 0}]",
         "[tmux]\npanes = [{focus = true}, {split = 'down', focus = true}]",
         "[tmux]\npanes = [{unknown = true}]",
         "[tmux]\npanes = [{mode = 'process'}]",
         "[tmux]\npanes = [{mode = 'unknown'}]",
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         fs::write(f.repo.join(".twig/config.toml"), text).unwrap();
-        f.fail(&["new", "local", "invalid", "--no-open"], "配置");
+        if index == 0 {
+            f.fail(&["new", "local", "invalid", "--no-open"], "配置");
+        } else {
+            f.fail(&["open", "local", "invalid"], "配置");
+        }
         assert!(
             !f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_name}"])
                 .lines()
@@ -549,7 +556,7 @@ fn startup_rejects_invalid_configuration_without_creating_window() {
         "[tmux]\npanes = [{command = ['/usr/bin/false']}]",
     )
     .unwrap();
-    f.ok(&["new", "local", "invalid", "--no-open"]);
+    f.fail(&["open", "local", "invalid"], "工作台需要交互式终端");
 }
 
 #[test]
@@ -565,11 +572,48 @@ fn startup_partial_failure_keeps_window_and_does_not_run_commands() {
     .unwrap();
     f.fail(&["new", "local", "partial", "--no-open"], "初始化失败");
     assert!(!f.root.join("partial/must-not-run").exists());
-    f.fail(&["new", "local", "partial", "--no-open"], "初始化未完成");
+    f.fail(&["new", "local", "partial", "--no-open"], "已存在");
     f.fail(&["open", "local", "partial"], "初始化未完成");
     fs::write(f.repo.join(".twig/config.toml"), "[tmux]\npanes = []").unwrap();
     f.ok(&["stop", "local", "partial", "-y"]);
-    f.ok(&["new", "local", "partial", "--no-open"]);
+    f.fail(&["open", "local", "partial"], "工作台需要交互式终端");
+}
+
+#[test]
+fn duplicate_new_preserves_state_branches_windows_and_usage() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "auth", "--no-open"]);
+    let state_path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
+    for stopped in [false, true] {
+        if stopped {
+            f.ok(&["stop", "local", "auth", "-y"]);
+        }
+        let state = fs::read(&state_path).unwrap();
+        let registry = fs::read(f.registry_path()).unwrap();
+        let refs = f.git(&["show-ref"]);
+        let windows = f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"]);
+        for args in [
+            vec!["new", "local", "auth"],
+            vec!["new", "local", "auth", "--no-open", "--base", "absent"],
+            vec![
+                "new",
+                "local",
+                "auth",
+                "--no-open",
+                "--expected-branch",
+                "invalid",
+            ],
+        ] {
+            f.fail(&args, "已存在");
+            assert_eq!(fs::read(&state_path).unwrap(), state);
+            assert_eq!(fs::read(f.registry_path()).unwrap(), registry);
+            assert_eq!(f.git(&["show-ref"]), refs);
+            assert_eq!(
+                f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"]),
+                windows
+            );
+        }
+    }
 }
 
 #[test]
@@ -577,7 +621,7 @@ fn lifecycle_and_recovery() {
     let f = Fixture::new();
     f.ok(&["add", "local", "--path", f.repo.to_str().unwrap()]);
     f.ok(&["new", "local", "--no-open", "auth"]);
-    f.ok(&["new", "local", "--no-open", "auth"]);
+    f.fail(&["new", "local", "--no-open", "auth"], "已存在");
     f.ok(&["new", "local", "--no-open", "search"]);
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
@@ -600,7 +644,7 @@ fn lifecycle_and_recovery() {
     f.ok(&["stop", "local", "auth", "-y"]);
     assert!(f.root.join("auth").is_dir());
     assert!(f.ok(&["ls", "local"]).contains("Closed"));
-    f.ok(&["new", "local", "--no-open", "auth"]);
+    f.fail(&["new", "local", "--no-open", "auth"], "已存在");
     // open 的非交互工作台会失败，但必须已经重建窗口。
     f.ok(&["stop", "local", "auth", "-y"]);
     let _ = f.run(&["open", "local", "auth"]);
@@ -616,7 +660,7 @@ fn lifecycle_and_recovery() {
     assert!(f.root.join("search").is_dir());
     f.mux(&["kill-server"]);
     assert!(f.ok(&["ls", "local"]).contains("Closed"));
-    f.ok(&["new", "local", "--no-open", "search"]);
+    f.fail(&["new", "local", "--no-open", "search"], "已存在");
 }
 
 #[test]
@@ -651,7 +695,7 @@ fn refuses_dirty_unmerged_and_busy_removal() {
 }
 
 #[test]
-fn detects_conflicts_and_resumes_partial_creation() {
+fn detects_conflicts_and_preserves_partial_creation() {
     let f = Fixture::new();
     f.git(&["branch", "existing"]);
     f.fail(&["new", "local", "--no-open", "existing"], "分支已存在");
@@ -666,7 +710,8 @@ fn detects_conflicts_and_resumes_partial_creation() {
         .unwrap();
     assert!(!out.status.success());
     assert!(f.root.join("partial").is_dir());
-    f.ok(&["new", "local", "--no-open", "partial"]);
+    f.fail(&["new", "local", "--no-open", "partial"], "已存在");
+    f.fail(&["open", "local", "partial"], "工作台需要交互式终端");
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
             .matches("worktree ")
@@ -696,9 +741,10 @@ fn ignored_files_and_missing_directory_are_protected() {
     f.ok(&["new", "local", "--no-open", "lost"]);
     f.ok(&["stop", "local", "lost", "-y"]);
     fs::remove_dir_all(f.root.join("lost")).unwrap();
-    f.fail(&["new", "local", "--no-open", "lost"], "目录丢失");
+    f.fail(&["new", "local", "--no-open", "lost"], "已存在");
     f.git(&["worktree", "prune"]);
-    f.ok(&["new", "local", "--no-open", "lost"]);
+    f.fail(&["new", "local", "--no-open", "lost"], "已存在");
+    assert!(!f.root.join("lost").exists());
 }
 
 #[test]
@@ -738,7 +784,7 @@ fn numeric_names_renamed_windows_and_background_jobs() {
         .next()
         .unwrap();
     f.mux(&["rename-window", "-t", id, "renamed"]);
-    f.ok(&["new", "local", "--no-open", "0"]);
+    f.fail(&["new", "local", "--no-open", "0"], "已存在");
     assert_eq!(
         f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"])
             .lines()
@@ -776,7 +822,8 @@ fn upstream_and_foreign_window_protection() {
         &format!("{}:foreign", f.session()),
         "personal",
     ]);
-    f.ok(&["new", "local", "--no-open", "foreign"]);
+    f.fail(&["new", "local", "--no-open", "foreign"], "已存在");
+    f.fail(&["open", "local", "foreign"], "工作台需要交互式终端");
 }
 
 #[test]
@@ -835,7 +882,7 @@ fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
             f.mux(&["capture-pane", "-p", "-t", "driver:"])
         );
     };
-    for (i, action) in ["open local auth", "new local fresh", "new local fresh"]
+    for (i, action) in ["open local auth", "new local fresh", "open local fresh"]
         .iter()
         .enumerate()
     {
@@ -878,7 +925,7 @@ fn new_preserves_environment_when_workbench_requires_a_terminal() {
             .join("lock")
             .exists()
     );
-    f.ok(&["new", "local", "--no-open", "auth"]);
+    f.fail(&["new", "local", "--no-open", "auth"], "已存在");
     assert!(f.ok(&["ls", "local"]).contains("Open"));
 }
 
@@ -887,7 +934,7 @@ fn slash_task_names_and_legacy_branches() {
     let f = Fixture::new();
     for name in ["feat/login", "fix/bug"] {
         f.ok(&["new", "local", "--no-open", name]);
-        f.ok(&["new", "local", "--no-open", name]);
+        f.fail(&["new", "local", "--no-open", name], "已存在");
         let state: serde_json::Value = serde_json::from_slice(
             &fs::read(support::project_dir(&f.repo, &f.registry_path()).join("state.json"))
                 .unwrap(),
@@ -916,10 +963,8 @@ fn slash_task_names_and_legacy_branches() {
     let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     state["legacy"]["branch"] = "feature/legacy".into();
     fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
-    assert!(
-        f.ok(&["new", "local", "--no-open", "legacy"])
-            .contains("feature/legacy")
-    );
+    f.fail(&["new", "local", "--no-open", "legacy"], "已存在");
+    assert!(f.ok(&["ls", "local"]).contains("feature/legacy"));
     f.ok(&["stop", "local", "legacy", "-y"]);
     f.ok(&["rm", "local", "legacy", "-y"]);
 }

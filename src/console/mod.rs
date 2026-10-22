@@ -160,7 +160,9 @@ impl App {
             1 => {
                 if let Some(repo) = self.repo() {
                     if let Some((_, config)) = &repo.context {
-                        self.form = Some(form::Form::task(repo.name.clone(), config.base.clone()));
+                        let mut form = form::Form::task(repo.name.clone(), config.base.clone());
+                        form.load_branches(&config.main);
+                        self.form = Some(form);
                     } else {
                         self.message = Some("项目不可用，请先处理项目异常".into());
                     }
@@ -783,19 +785,23 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                     KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
                         existing.confirmed = !existing.confirmed
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
+                    KeyCode::Up | KeyCode::Char('k') if existing.branches.len() > 1 => {
                         existing.selected = existing.selected.saturating_sub(1);
                         existing.confirmed = false;
+                        form.scroll = 0;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    KeyCode::Down | KeyCode::Char('j') if existing.branches.len() > 1 => {
                         existing.selected =
                             (existing.selected + 1).min(existing.branches.len() - 1);
                         existing.confirmed = false;
+                        form.scroll = 0;
                     }
                     KeyCode::Enter if !existing.confirmed => form.existing = None,
                     KeyCode::Enter => {
                         if let Err(error) = form.confirm(&registry) {
                             form.error = Some(format!("{error:#}"));
+                            form.existing = None;
+                            form.scroll = 0;
                         }
                     }
                     _ => {}
@@ -834,7 +840,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             match key.code {
                 KeyCode::Esc => app.form = None,
                 KeyCode::Tab => {
-                    if !form.complete_path() {
+                    if !form.complete_path() && !form.complete_branch() {
                         form.field = (form.field + 1) % 2;
                     }
                 }
@@ -847,6 +853,18 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                     form.directory_selection = (form.directory_selection + form.directories.len()
                         - 1)
                         % form.directories.len();
+                }
+                KeyCode::Down if form.completing_branch() => {
+                    let count = form.matching_branches().len();
+                    if count > 0 {
+                        form.branch_selection = (form.branch_selection + 1) % count;
+                    }
+                }
+                KeyCode::Up if form.completing_branch() => {
+                    let count = form.matching_branches().len();
+                    if count > 0 {
+                        form.branch_selection = (form.branch_selection + count - 1) % count;
+                    }
                 }
                 KeyCode::Backspace => {
                     form.fields[form.field].pop();
