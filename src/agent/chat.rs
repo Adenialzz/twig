@@ -26,6 +26,8 @@ struct View {
     entries: Vec<Entry>,
     thread: String,
     status: String,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
     error: Option<String>,
     approval: Option<String>,
     connected: bool,
@@ -129,6 +131,10 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 }
                 view.entries = view::transcript(&result);
                 view.thread = binding.thread.clone();
+                view.model = result["thread"]["model"].as_str().map(str::to_owned);
+                view.reasoning_effort = result["thread"]["reasoningEffort"]
+                    .as_str()
+                    .map(str::to_owned);
                 let state = store.load()?;
                 let pending = state
                     .messages

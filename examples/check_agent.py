@@ -151,6 +151,7 @@ def check(root):
     )
     (home / "config.toml").write_text(f'''model = "gpt-5.4"
 model_provider = "probe"
+model_reasoning_effort = "high"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 [features]
@@ -196,11 +197,13 @@ supports_websockets = false
         # 首次 Chat 必须从没有任何历史轮次的主控开始，而不是预先发过消息。
         frontend = Frontend(binary, config, cwd, env)
         frontend.wait("空闲")
+        frontend.wait("gpt-5.4 · 推理 high")
         empty_thread = state()["bindings"]["controller"]["thread"]
         frontend.send(b"\t")
         frontend.wait("个项目")
         frontend.send(b"\t")
         frontend.wait("空闲")
+        frontend.wait("gpt-5.4 · 推理 high")
         assert state()["bindings"]["controller"]["thread"] == empty_thread
         # 空 session 没有 rollout，服务重启后必须恢复入口而不是永远卡在旧 ID。
         workspace = Path(state()["bindings"]["controller"]["cwd"])
@@ -226,6 +229,7 @@ supports_websockets = false
         frontend = Frontend(binary, config, cwd, env)
         wait_for(lambda: state()["bindings"]["controller"]["thread"] != empty_thread, "空主控绑定未恢复")
         frontend.wait("空闲")
+        frontend.wait("gpt-5.4 · 推理 high")
         assert (workspace / "AGENTS.md").read_bytes() == instructions
         assert (workspace / "state.md").read_text() == "用户保留的全局计划"
         print("PASS: 空主控卸载后重建绑定，保留 AGENTS.md 和全局计划", flush=True)
@@ -245,6 +249,7 @@ supports_websockets = false
         wait_for(lambda: control.call("thread/read", {"threadId": original, "includeTurns": False})["thread"]["status"]["type"] == "idle", "Chat 未恢复卸载会话")
         assert state()["bindings"]["controller"]["thread"] == original
         frontend.wait("空闲")
+        frontend.wait("gpt-5.4 · 推理 high")
         frontend.send(b"after-unload\r")
         frontend.wait("probe complete 3")
         control.close()
@@ -314,6 +319,7 @@ supports_websockets = false
 
         frontend = Frontend(binary, config, cwd, env)
         frontend.wait("空闲")
+        frontend.wait("gpt-5.4 · 推理 high")
         frontend.send(b"\x1b[200~" + "草稿中文".encode() + b"\x1b[201~")
         frontend.wait("草稿中文")
         frontend.send(b"\x1b[<0;3;1M\x1b[<0;3;1m")
@@ -325,6 +331,7 @@ supports_websockets = false
         frontend.send(b"\t")
         frontend.wait("草稿中文")
         frontend.wait("空闲")
+        frontend.wait("gpt-5.4 · 推理 high")
         frontend.send(b"\x15")  # 清空草稿
         frontend.send(b"chat-test\r")
         frontend.wait("chat-test")

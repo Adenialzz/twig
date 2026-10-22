@@ -330,6 +330,14 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
                     Color::Yellow
                 }),
             ),
+            Span::styled(
+                format!(
+                    " · {} · 推理 {}",
+                    view.model.as_deref().unwrap_or("模型未知"),
+                    view.reasoning_effort.as_deref().unwrap_or("未指定")
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
         ])),
         Rect::new(body.x, screen.y + 1, width, 1),
     );
