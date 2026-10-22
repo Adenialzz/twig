@@ -57,3 +57,7 @@ new 拒绝已登记的同名任务。open 重用已有窗口，不重复运行�
 用 --config 可选择独立登记表，但不同登记表仍可能访问同一份外部 Git/tmux 资源。避免同一项目的并发写操作；锁只协调 twig，无法保护其他程序的写入。清理时确认目标、保存文件并停止相关活动进程。
 
 完整清理规则见 `twig guide cleanup`，远端操作见 `twig guide pr`。
+
+## 可选主控工作流
+
+`twig chat` 提供主控入口。主控通过 `new PROJECT NAME --agent --no-open` 建立受管 session，再通过 `agent send --project PROJECT --task NAME --message 内容` 派活。`agent read` 返回会话历史，`agent status` 返回本地绑定和消息状态；sent 仅表示 Codex 接受，须另外核对任务结果。普通 new 保留原行为。详见 [主控 Agent](agent.md)。

@@ -39,3 +39,5 @@ twig guide --all          # 输出完整手册
 - 普通任务命令不隐式 fetch/pull/push；pr 是显式联网操作，--push 才允许推送。用户启动程序的联网行为由程序决定。
 
 源码贡献者另见仓库根目录的 DESIGN.md、AGENTS.md 与 CONTRIBUTING.md；这些开发记录不是用户操作手册。
+
+- [主控 Agent 与 Chat](agent.md)：`twig guide agent`。

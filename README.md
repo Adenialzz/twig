@@ -2,7 +2,7 @@
 
 用 Git Worktree 和 tmux 管理独立任务环境的轻量 Rust CLI。
 
-一个项目对应一个 tmux Session，一个任务对应一个分支、Worktree 和窗口。默认普通 Shell，可配置分屏和启动程序。twig 不编排 Agent、不恢复对话、不自动合并。
+一个项目对应一个 tmux Session，一个任务对应一个分支、Worktree 和窗口。默认普通 Shell，可配置分屏和启动程序。普通任务不编排 Agent；可选主控通过 Codex daemon 派发与跟进受管任务，不自动合并。
 
 ## 安装
 
@@ -61,3 +61,7 @@ Console 登记项目和新建任务均使用独立居中弹窗；任务创建成
 工作台滚轮作用于鼠标所在 Pane：程序启用鼠标模式时交给程序滚动，否则浏览 tmux 历史。`Shift-PgUp/PgDn` 始终浏览 tmux 历史。
 
 Console 在内容变化时重绘，状态查询按任务分批更新。进入终端工作台后暂停不可见的 Git 状态查询，返回导航立即刷新；Codex 监控和完成通知继续采集。选中复制在后台按顺序执行，先显示「正在复制」，完成后显示结果。
+
+## 主控 Chat
+
+`twig chat` 打开主控，F2 与 Console 导航切换。需要已运行的 Codex daemon；不可用时只提示用户启动。受管任务使用 `twig new PROJECT TASK --agent`，通过 CLI 派活与完成回调跟进；退出 UI 不停止 Codex。飞书通知读取 `TWIG_FEISHU_WEBHOOK_URL`。详见 [主控指南](docs/agent.md)（`twig guide agent`）。

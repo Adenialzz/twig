@@ -595,7 +595,7 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
     p.resize(65, 22);
     thread::sleep(Duration::from_millis(100));
     p.send(b"\t?");
-    p.wait("Shift+Tab");
+    p.wait_screen("Shift+Tab");
     let start = Instant::now();
     p.send(b"\x03");
     p.wait("TERMINAL_RESTORED:0");

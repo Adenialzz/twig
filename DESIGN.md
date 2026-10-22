@@ -693,3 +693,15 @@ Console 新建任务成功后，等待采集快照包含新任务并完成选择
 未修改真实配置、任务或 Agent 会话，未安装或提交。
 
 Rebase 验证（2026-10-22）：已接入本地 main 4812edf，保留创建任务后直接进入工作台、滚轮按程序鼠标模式转发，以及光标形状/闪烁同步；光标和标题元数据合并在同一条快照查询中。fmt、Clippy、全部 127 项 Rust 测试及独立 PTY 验收通过，包含 Zsh vi 光标切换、跨 Pane 同步和退出重置。有限输出场景本次响应约 0.218 秒。用户要求将性能优化提交，未安装或推送。
+
+### 可用版主控工作流（2026-10-22）
+
+已实现 RFC 的第一版：twig chat 与 Console 通过 F2 切换，主控工作目录默认为 ~/.twig/controller/workspace；同步 RPC 连接用户已启动的 Codex daemon，不创建 Twig server。Chat 支持历史、输入、工具摘要、基础审批和错误提示。主控通过 CLI 派活、查看 session、读取状态与通知飞书。此处替代前文仅允许只读 Codex 观察的边界，但 Console 原有监控仍只读。
+
+受管任务显式 new --agent，新建状态文件并精确忽略，专用 Codex remote 窗口连接同一 session；普通 new/启动配置不变。完成 notify 调用短命 Twig CLI，事件和消息落盘，忙时排队，主控完成时出队；drain 补查漏掉的完成事件。发送结果未知不自动重发，以客户端消息 ID 对账，必要时显式取消。stop 中断受管轮次并取消待发消息，open 重新启用；删除保护活动会话和未决投递。
+
+飞书读取 TWIG_FEISHU_WEBHOOK_URL，URL 不写入命令参数或运行记录。第一版没有签名密钥、自动通知重试、自主预算、独立暂停按钮和 Chat 内任务跳转；复杂输入仍需原生 Codex。CLI 锁无法消除原生终端与 turn/start 的竞争，离线回调也不保证覆盖中断和失败事件。服务路径改变要求人工核对，不连接另一服务。
+
+协议与产品验收使用 Codex 0.163.0、本地固定 Responses 服务、独立 app-server/tmux、临时仓库和模拟飞书；未操作真实 Agent 会话或发送真实通知。产品手册见 docs/agent.md，验收入口见 examples/check_agent.py。
+
+本版验证：fmt、Clippy 与全部 133 项 Rust 测试通过；正式产品隔离验收覆盖无 UI 时主控调用 Twig CLI 通知模拟飞书、忙时排队、投递对账、漏失回调补查、服务重启、中文粘贴/F2 草稿、中断活动轮次与同名重建。工作台 Vim/Zsh PTY 回归通过，已构建 release 二进制，未安装到用户 PATH。

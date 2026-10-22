@@ -286,6 +286,7 @@ impl GitScan {
                             branch: task.branch.clone(),
                             base: String::new(),
                             remote_start: None,
+                            agent_thread: None,
                         }
                     )?,
                     "Worktree 尚未创建"

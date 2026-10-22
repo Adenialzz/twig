@@ -322,3 +322,7 @@ Twig 打开期间，会只读查询已关联任务的 Codex 轮次。检测到�
 浏览只读，不创建配置、锁或窗口，不 fetch/pull/push。提交登记/新建表单时会创建对应资源；任务区按 `Enter` 准备并进入 Shell。删除任务可通过 `/delete` 确认执行；停止及 PR/MR 操作继续使用明确的命令，见 [命令参考](commands.md)。
 
 命令行操作的参数与默认值见 [命令参考](commands.md)（`twig guide commands`）。
+
+## 切换主控 Chat
+
+普通导航状态按 F2 切换主控 Chat，再按 F2 返回，保留项目/任务选择及聊天草稿。表单、搜索、帮助和工作台不触发切换；工作台先用 Ctrl-W d 返回导航。Console 新建表单仍创建普通任务；受管任务使用 `twig new PROJECT NAME --agent` 或由主控创建。见 [主控 Agent](agent.md)。

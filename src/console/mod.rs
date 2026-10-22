@@ -588,6 +588,17 @@ fn open_terminal(
 }
 
 pub fn run(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> Result<()> {
+    run_mode(registry, cwd, initial, false)
+}
+pub fn run_chat(registry: PathBuf, cwd: PathBuf) -> Result<()> {
+    run_mode(registry, cwd, None, true)
+}
+fn run_mode(
+    registry: PathBuf,
+    cwd: PathBuf,
+    initial: Option<TerminalTarget>,
+    chat: bool,
+) -> Result<()> {
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "Console 工作台需要交互式终端；已准备的环境保留，脚本创建请用 new --no-open，查询请用 twig ls"
@@ -605,15 +616,24 @@ pub fn run(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> 
         );
         eprintln!("Console 异常：{info}");
     }));
-    let result = run_inner(registry, cwd, initial);
+    let result = run_inner(registry, cwd, initial, chat);
     std::panic::set_hook(previous);
     result
 }
-fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> Result<()> {
+fn run_inner(
+    registry: PathBuf,
+    cwd: PathBuf,
+    initial: Option<TerminalTarget>,
+    chat: bool,
+) -> Result<()> {
     let mut screen = Screen::start()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let worker = Worker::start(registry.clone());
     let mut app = App::new(cwd);
+    let mut chat_draft = crate::agent::chat::Draft::default();
+    if chat && crate::agent::chat::run(&mut terminal, registry.clone(), &mut chat_draft)? {
+        return Ok(());
+    }
     if let Some(target) = &initial {
         app.project = Some(target.project.clone());
         app.task = Some(app.initial_cwd.clone());
@@ -960,6 +980,16 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                 break;
             }
             worker.requests.send(app.request())?;
+            continue;
+        }
+        if key.code == KeyCode::F(2) {
+            selection = None;
+            if crate::agent::chat::run(&mut terminal, registry.clone(), &mut chat_draft)? {
+                break;
+            }
+            app.pane_prefix = false;
+            app.top_prefix = false;
+            app.delete_prefix = false;
             continue;
         }
         if app.pane_prefix {

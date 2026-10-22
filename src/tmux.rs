@@ -126,6 +126,12 @@ pub fn ensure_window(
     }
     let layout = if name == "main" {
         crate::startup::Layout::default()
+    } else if let Some(thread) = project
+        .state()?
+        .get(name)
+        .and_then(|task| task.agent_thread.clone())
+    {
+        crate::agent::task_layout(project, &thread)?
     } else {
         crate::startup::load(config, project)?
     };

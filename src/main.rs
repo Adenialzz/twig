@@ -1,3 +1,4 @@
+mod agent;
 mod codex;
 mod completion;
 mod config;
@@ -53,6 +54,12 @@ enum Action {
         after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-W d 返回导航并保留进程。\n浏览只读；提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
     )]
     Console,
+    /// 与主控 Codex 对话；F2 切换 Console，退出不停止会话
+    #[command(after_help = "daemon 不可用时只提示启动。完整说明：twig guide agent")]
+    Chat,
+    /// 主控 Agent CLI；使用 Codex daemon，不启动后台服务
+    #[command(after_help = "使用 twig agent init 初始化；完整说明：twig guide agent")]
+    Agent(agent::Cli),
     /// 登记并初始化已有 Git 仓库（不联网）
     #[command(
         after_help = "需要已有提交的非裸仓库。同路径复用原别名，别名冲突不覆盖。\n首次初始化创建配置、根目录及主窗口；已有配置时只补登记，冲突初始化参数拒绝。\n示例：twig add myapp --path ~/projects/myapp --base develop\n详细规则：twig guide commands；twig guide configuration"
@@ -92,6 +99,9 @@ enum Action {
         /// 不进入窗口；仍创建 Pane 并执行配置的启动命令（不是 dry-run）
         #[arg(long)]
         no_open: bool,
+        /// 创建受管 Codex 任务；专用启动方式替代 tmux 配置，不接管旧任务
+        #[arg(long)]
+        agent: bool,
         /// Console 确认时的仓库、分支与提交快照
         #[arg(long, hide = true)]
         expected_branch: Option<String>,
@@ -109,7 +119,7 @@ enum Action {
     Pr(pr::Args),
     /// 进入任务窗口；窗口丢失时重建 Shell
     #[command(
-        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n打开内置终端工作台，Ctrl-W d 返回 Console 并选中任务。不恢复原进程或对话。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
+        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n打开内置终端工作台，Ctrl-W d 返回 Console 并选中任务。普通任务不恢复原进程或对话；--agent 任务连接原 Codex session。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
     )]
     Open {
         /// 已登记的项目别名，不根据当前目录推断
@@ -121,7 +131,7 @@ enum Action {
     },
     /// 关闭窗口及其中的进程，保留 Worktree 和分支
     #[command(
-        after_help = "默认确认后终止窗口内全部进程，保留代码、分支和任务记录。\n重新准备窗口用 open；stop 不重建缺失窗口。\n示例：twig stop myapp auth\n详细说明：twig guide cleanup"
+        after_help = "默认确认后终止窗口内全部进程，保留代码、分支和任务记录。\n受管任务还会中断当前轮次并取消待发消息，不停止共享 daemon。重新准备窗口用 open；stop 不重建缺失窗口。\n示例：twig stop myapp auth\n详细说明：twig guide cleanup"
     )]
     Stop {
         /// 已登记的项目别名，不根据当前目录推断
@@ -191,6 +201,8 @@ fn execute(cli: Cli) -> Result<()> {
     let action = cli.command.unwrap_or(Action::Console);
     match action {
         Action::Console => return console::run(registry_path, invocation_dir, None),
+        Action::Chat => return console::run_chat(registry_path, invocation_dir),
+        Action::Agent(args) => return agent::execute(&registry_path, args.command),
         Action::Add {
             name,
             path,
@@ -254,6 +266,7 @@ fn execute(cli: Cli) -> Result<()> {
             no_open,
             expected_branch,
             project: alias,
+            agent,
         } => {
             let window = new(
                 &project,
@@ -261,8 +274,11 @@ fn execute(cli: Cli) -> Result<()> {
                 &mut state,
                 &alias,
                 &name,
-                base,
-                expected_branch,
+                CreateOptions {
+                    base,
+                    expected_branch,
+                    managed: agent,
+                },
             )?;
             drop(lock); // 工作台交互期间不能持有项目锁。
             registry::record_use(&registry_path, &alias)?;
@@ -293,6 +309,9 @@ fn execute(cli: Cli) -> Result<()> {
                 "Worktree 不存在；请检查 twig ls <项目名> 和 twig guide troubleshooting，new 不恢复已登记任务"
             );
             let window = tmux::ensure_window(&config, &project, &name, &feature.path)?;
+            if let Some(thread) = &feature.agent_thread {
+                agent::Store::new(&registry_path)?.reactivate(thread)?;
+            }
             drop(lock); // 工作台交互期间不能持有项目锁。
             console::run(
                 registry_path,
@@ -305,9 +324,15 @@ fn execute(cli: Cli) -> Result<()> {
             )
         }
         Action::Stop { name, yes, .. } => {
-            feature(&state, &name)?;
-            if let Some(window) = tmux::window(&config, &project, &name)? {
+            let feature = feature(&state, &name)?;
+            let window = tmux::window(&config, &project, &name)?;
+            if window.is_some() || feature.agent_thread.is_some() {
                 confirm(&format!("关闭 {name} 窗口并终止其中的全部进程？"), yes)?;
+                if let Some(thread) = &feature.agent_thread {
+                    agent::Store::new(&registry_path)?.stop_task(thread)?;
+                }
+            }
+            if let Some(window) = window {
                 tmux::tmux(&["kill-window", "-t", &window])?;
             }
             println!("已停止 {name}；Worktree 和分支保留");
@@ -331,7 +356,11 @@ fn execute(cli: Cli) -> Result<()> {
             }
             remove(&project, &config, &mut state, &name, &options)
         }
-        Action::Guide { .. } | Action::Console | Action::Add { .. } => unreachable!(),
+        Action::Guide { .. }
+        | Action::Console
+        | Action::Chat
+        | Action::Agent(_)
+        | Action::Add { .. } => unreachable!(),
     }
 }
 
@@ -573,15 +602,27 @@ fn choose_branch(branches: &[BranchStart], base: &Option<String>) -> Result<Bran
     Ok(branch.clone())
 }
 
+struct CreateOptions {
+    base: Option<String>,
+    expected_branch: Option<String>,
+    managed: bool,
+}
 fn new(
     project: &Project,
     config: &Config,
     state: &mut State,
     alias: &str,
     name: &str,
-    base: Option<String>,
-    expected_branch: Option<String>,
+    options: CreateOptions,
 ) -> Result<String> {
+    let CreateOptions {
+        base,
+        expected_branch,
+        managed,
+    } = options;
+    if managed {
+        agent::Store::new(&project.registry)?.initialize()?;
+    }
     config::task_name(name)?;
     ensure!(name != "main", "main 保留给项目主窗口");
     ensure!(
@@ -637,6 +678,7 @@ fn new(
             base,
             path,
             remote_start,
+            agent_thread: None,
         },
     );
     project.save("state.json", state)?;
@@ -682,6 +724,14 @@ fn new(
             ],
         )?;
     }
+    let task_path = feature.path.clone();
+    if managed {
+        agent::initialize_task_file(project, &task_path)?;
+        let thread = agent::Store::new(&project.registry)?.create_task(alias, name, &task_path)?;
+        state.get_mut(name).unwrap().agent_thread = Some(thread);
+        project.save("state.json", state)?;
+    }
+    let feature = crate::feature(state, name)?;
     let window = tmux::ensure_window(config, project, name, &feature.path).with_context(|| {
         format!(
             "Worktree 已保留在 {}；修复后执行 twig open {alias} {name}",
@@ -767,6 +817,12 @@ fn remove(
         println!("任务 {name} 已不存在；未操作任何外部资源");
         return Ok(());
     };
+    let agent_store = agent::Store::new(&project.registry)?;
+    let _agent_guard = feature
+        .agent_thread
+        .as_deref()
+        .map(|thread| agent_store.removal_guard(thread))
+        .transpose()?;
     let target = target.unwrap_or_else(|| config.target.clone());
     let validate = |report: bool| -> Result<(bool, bool)> {
         let present = check_worktree(config, &feature)?;

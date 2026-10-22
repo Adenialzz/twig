@@ -177,11 +177,15 @@ class Model(http.server.BaseHTTPRequestHandler):
             "content": [{"type": "output_text", "text": f"probe complete {index}", "annotations": []}],
         }
         has_output = any(item.get("type") == "function_call_output" for item in inputs[user_index + 1:])
-        if "controller followup" in message and not has_output:
+        followup = "controller followup" in message or (
+            message.startswith("任务反馈：") and hasattr(self.server, "followup_command")
+        )
+        if followup and not has_output:
             command = shlex.join([
                 sys.executable, str(Path(__file__).resolve()),
                 "--notification-cli", str(self.server.root),
             ])
+            command = getattr(self.server, "followup_command", command)
             item = {
                 "id": f"fc_{index}", "type": "function_call", "call_id": f"call_{index}",
                 "name": "exec_command",
