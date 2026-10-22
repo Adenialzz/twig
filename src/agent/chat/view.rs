@@ -292,7 +292,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
         );
         return Areas::default();
     }
-    let width = screen.width.saturating_sub(4).min(104);
+    let width = screen.width.saturating_sub(4);
     let body = Rect::new(
         screen.x + (screen.width - width) / 2,
         screen.y + 2,
