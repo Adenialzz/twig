@@ -186,6 +186,21 @@ impl Drop for Fixture {
             .output();
     }
 }
+struct ScreenSize {
+    rows: usize,
+    cols: usize,
+}
+impl alacritty_terminal::grid::Dimensions for ScreenSize {
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+    fn columns(&self) -> usize {
+        self.cols
+    }
+}
 struct Pty {
     child: Child,
     master: File,
@@ -270,6 +285,46 @@ impl Pty {
         self.master.write_all(text).unwrap();
     }
     fn wait(&mut self, needle: &str) {
+        self.wait_for(needle, false);
+    }
+    fn wait_screen(&mut self, needle: &str) {
+        self.wait_for(needle, true);
+    }
+    fn screen_text(&self) -> String {
+        use alacritty_terminal::{
+            Term,
+            event::VoidListener,
+            index::{Column, Line, Point},
+            vte::ansi::Processor,
+        };
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCGWINSZ, &mut size) },
+            0
+        );
+        let size = ScreenSize {
+            rows: size.ws_row.into(),
+            cols: size.ws_col.into(),
+        };
+        let mut term = Term::new(Default::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, &self.bytes);
+        (0..size.rows)
+            .map(|y| {
+                (0..size.cols)
+                    .filter_map(|x| {
+                        let cell = &term.grid()[Point::new(Line(y as i32), Column(x))];
+                        (!cell
+                            .flags
+                            .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER))
+                        .then_some(cell.c)
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    fn wait_for(&mut self, needle: &str, screen: bool) {
         let start = Instant::now();
         loop {
             let mut bytes = [0; 16384];
@@ -280,7 +335,11 @@ impl Pty {
                 self.bytes.extend_from_slice(&bytes[..n]);
                 self.text = strip_terminal_codes(&self.bytes);
             }
-            if self.text.contains(needle) {
+            if if screen {
+                self.screen_text().contains(needle)
+            } else {
+                self.text.contains(needle)
+            } {
                 if needle.starts_with("TERMINAL_RESTORED:") {
                     let current = terminal_attributes(self.master.as_raw_fd());
                     assert_eq!(current.c_iflag, self.original.c_iflag);
@@ -327,6 +386,116 @@ impl Drop for Pty {
 }
 
 #[test]
+fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
+    let f = Fixture::new();
+    f.init();
+    f.git(&["branch", "feature/demo"]);
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let gate = f.temp.path().join("branch-query-gate");
+    fs::write(&gate, "wait").unwrap();
+    fs::write(f.bin.join("git"), "#!/bin/sh\nif [ \"$1\" = for-each-ref ]; then while [ -f \"$TWIG_BRANCH_GATE\" ]; do sleep 0.02; done; fi\nexec \"$TWIG_REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(f.bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .env(
+            "TWIG_REAL_GIT",
+            String::from_utf8(real_git.stdout).unwrap().trim(),
+        )
+        .env("TWIG_BRANCH_GATE", &gate)
+        .arg("--config")
+        .arg(&f.registry);
+    let mut p = Pty::spawn(command);
+    p.wait("auth");
+    p.send(b"2n");
+    p.wait("正在读取分支候选");
+    p.send(b"brand-new\r");
+    p.wait("请稍候");
+    assert!(
+        !f.repo
+            .with_file_name("repo.worktrees")
+            .join("brand-new")
+            .exists()
+    );
+    fs::remove_file(&gate).unwrap();
+    p.send(&[127; 9]);
+    p.wait_screen("feature/demo");
+    p.send(b"\x03q");
+    assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
+fn navigation_batches_worktree_and_window_queries() {
+    let f = Fixture::new();
+    f.init();
+    f.twig(&["new", "demo", "second", "--no-open"]);
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let log = f.temp.path().join("queries");
+    for (name, script) in [
+        (
+            "git",
+            "#!/bin/sh\nprintf 'git %s\\n' \"$*\" >> \"$TWIG_QUERY_LOG\"\nexec \"$TWIG_REAL_GIT\" \"$@\"\n",
+        ),
+        (
+            "tmux",
+            "#!/bin/sh\nprintf 'tmux %s\\n' \"$*\" >> \"$TWIG_QUERY_LOG\"\nexec \"$TWIG_REAL_TMUX\" -L \"$TWIG_TEST_SOCKET\" -f /dev/null \"$@\"\n",
+        ),
+    ] {
+        fs::write(f.bin.join(name), script).unwrap();
+        fs::set_permissions(f.bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .env(
+            "TWIG_REAL_GIT",
+            String::from_utf8(real_git.stdout).unwrap().trim(),
+        )
+        .env("TWIG_QUERY_LOG", &log)
+        .arg("--config")
+        .arg(&f.registry);
+    let mut p = Pty::spawn(command);
+    p.wait_screen("干净");
+    let start = Instant::now();
+    let queries = loop {
+        let queries = fs::read_to_string(&log).unwrap();
+        if queries
+            .lines()
+            .filter(|line| line.starts_with("git status "))
+            .count()
+            == 3
+        {
+            break queries;
+        }
+        assert!(start.elapsed() < Duration::from_secs(3), "{queries}");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        queries
+            .lines()
+            .filter(|line| line.starts_with("git worktree list "))
+            .count(),
+        1
+    );
+    assert_eq!(
+        queries
+            .lines()
+            .filter(|line| line.starts_with("tmux list-windows "))
+            .count(),
+        1
+    );
+    assert!(!queries.contains("git branch --show-current"));
+    p.send(b"q");
+    assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
 fn navigation_drag_copies_text_and_preserves_readonly_state() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let f = Fixture::new();
@@ -341,7 +510,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     let mut p = Pty::spawn(command);
     p.wait("demo");
     p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
-    p.wait("已请求复制 4 chars");
+    p.wait_screen("已请求复制 4 chars");
     let prefix = b"\x1b]52;c;";
     let start = p
         .bytes
@@ -357,7 +526,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     p.bytes.clear();
     p.wait("demo");
     p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
-    p.wait("已请求复制 4 chars");
+    p.wait_screen("已请求复制 4 chars");
     p.send(b"\x1bq");
     p.wait("TERMINAL_RESTORED:0");
     assert!(

@@ -416,6 +416,15 @@ fn status_style(thread: &crate::codex::Thread, stale: bool) -> Style {
 fn monitor(frame: &mut Frame, area: Rect, app: &App) {
     let snapshot = &app.snapshot;
     let stale = snapshot.codex_error.is_some() || is_stale(snapshot.codex_checked);
+    let mut grouped = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for thread in &snapshot.threads {
+        if let Some(owner) = snapshot.associations.get(&thread.id) {
+            grouped.entry(owner).or_default().push(thread);
+        }
+    }
+    for threads in grouped.values_mut() {
+        threads.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
+    }
     let mut projects: Vec<_> = snapshot
         .repos
         .iter()
@@ -424,8 +433,9 @@ fn monitor(frame: &mut Frame, area: Rect, app: &App) {
                 .tasks
                 .iter()
                 .filter_map(|task| {
-                    let threads =
-                        data::for_task(&snapshot.threads, snapshot, &repo.name, &task.path);
+                    let threads = grouped
+                        .remove(&(repo.name.clone(), task.path.clone()))
+                        .unwrap_or_default();
                     (!threads.is_empty()).then_some((task, threads))
                 })
                 .collect();

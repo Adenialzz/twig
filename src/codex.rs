@@ -170,7 +170,7 @@ impl Client {
             };
             match message {
                 Message::Text(text) => {
-                    let value: Value = serde_json::from_str(text.as_str())?;
+                    let mut value: Value = serde_json::from_str(text.as_str())?;
                     // 观察者不回复审批请求，不把通知误认为查询结果。
                     if value["id"].as_u64() != Some(id) || value.get("method").is_some() {
                         continue;
@@ -179,8 +179,8 @@ impl Client {
                         bail!("Codex {method}：{error}");
                     }
                     return value
-                        .get("result")
-                        .cloned()
+                        .get_mut("result")
+                        .map(Value::take)
                         .context("Codex 响应缺少 result");
                 }
                 Message::Close(_) => bail!("Codex 服务关闭连接"),
@@ -203,9 +203,9 @@ impl Client {
                 if !ids.insert(id.to_owned()) {
                     continue;
                 }
-                let result =
+                let mut result =
                     self.request("thread/read", json!({"threadId":id,"includeTurns":false}))?;
-                let thread: Thread = serde_json::from_value(result["thread"].clone())
+                let thread: Thread = serde_json::from_value(result["thread"].take())
                     .context("Codex 线程格式不兼容")?;
                 if !thread.ephemeral {
                     threads.push(thread);

@@ -4,6 +4,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, text::Line};
 pub(super) struct Selection {
     buffer: Buffer,
     area: Rect,
+    screen: Rect,
     start: (u16, u16),
     end: (u16, u16),
     pub dragging: bool,
@@ -12,11 +13,18 @@ pub(super) struct Selection {
 
 impl Selection {
     pub fn fits(&self, area: Rect) -> bool {
-        self.buffer.area == area
+        self.screen == area
     }
     pub fn new(buffer: &Buffer, area: Rect, x: u16, y: u16) -> Self {
+        let mut region = Buffer::empty(area);
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                region[(x, y)] = buffer[(x, y)].clone();
+            }
+        }
         Self {
-            buffer: buffer.clone(),
+            buffer: region,
+            screen: buffer.area,
             area,
             start: (y, x),
             end: (y, x),

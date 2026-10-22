@@ -99,11 +99,19 @@ impl App {
             delete_prefix: false,
         }
     }
-    fn receive_notifications(&mut self, worker: &Worker, viewed: Option<(&str, &std::path::Path)>) {
+    fn receive_notifications(
+        &mut self,
+        worker: &Worker,
+        viewed: Option<(&str, &std::path::Path)>,
+    ) -> bool {
+        let before = self.notifications.current().cloned();
+        let mut changed = false;
         for completion in worker.completions.try_iter() {
+            changed = true;
             self.notifications.receive(completion, viewed);
         }
         self.notifications.tick(Instant::now());
+        changed || before.as_ref() != self.notifications.current()
     }
 
     fn begin_search(&mut self) {
@@ -397,6 +405,7 @@ impl App {
             page: self.page,
             turn: self.thread.clone().filter(|_| self.detail),
             refresh: self.refresh,
+            background: false,
         }
     }
 }
@@ -487,6 +496,9 @@ fn open_terminal(
     registry: &std::path::Path,
     mut jump: Option<twig_cli::notification::CompletionNotice>,
 ) -> Result<()> {
+    let mut background = app.request();
+    background.background = true;
+    worker.requests.send(background)?;
     let mut usage_error = None;
     let result = loop {
         let mut recorded = false;
@@ -502,7 +514,7 @@ fn open_terminal(
                 if let Some(notice) = jump.take() {
                     app.notifications.dismiss(&notice);
                 }
-                for snapshot in worker.updates.try_iter() {
+                if let Some(snapshot) = worker.updates.take() {
                     app.snapshot = snapshot;
                 }
                 let viewed = app
@@ -616,13 +628,18 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
     let mut unread_picker: Option<UnreadPicker> = None;
     let mut copy_notice: Option<twig_cli::clipboard::Notice> = None;
     let mut created_task = None;
+    let mut dirty = true;
+    let mut select_at = None;
+    let mut stale_count = 0;
     loop {
         if let Some(form) = &mut app.form {
+            dirty |= form.querying();
             match form.poll() {
                 Ok(Some(selection)) => {
                     if form.project.is_some() && form.deletion.is_none() {
                         created_task = Some(selection.clone());
                     }
+                    dirty = true;
                     app.pending_removed = form.deletion.as_ref().map(|_| form.fields[0].clone());
                     app.pending_selection = Some(selection);
                     app.form = None;
@@ -635,6 +652,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                     worker.requests.send(app.request())?;
                 }
                 Err(error) => {
+                    dirty = true;
                     form.error = Some(format!("{error:#}"));
                     form.scroll = 0;
                 }
@@ -642,11 +660,12 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             }
         }
         let mut updated = false;
-        for snapshot in worker.updates.try_iter() {
+        if let Some(snapshot) = worker.updates.take() {
             app.snapshot = snapshot;
             updated = true;
         }
         if updated {
+            dirty = true;
             app.reconcile();
             worker.requests.send(app.request())?;
         }
@@ -669,47 +688,70 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                 Err(error) => app.message = Some(format!("任务已创建，进入失败：{error:#}")),
             }
             worker.requests.send(app.request())?;
+            dirty = true;
         }
-        app.receive_notifications(&worker, None);
+        dirty |= app.receive_notifications(&worker, None);
         let unread_tasks = app.notifications.tasks();
         if let Some(picker) = &mut unread_picker {
             picker.sync(&unread_tasks);
+        }
+        if let Some(notice) = twig_cli::clipboard::poll() {
+            copy_notice = Some(notice);
+            dirty = true;
         }
         if copy_notice
             .as_ref()
             .is_some_and(twig_cli::clipboard::Notice::expired)
         {
             copy_notice = None;
+            dirty = true;
         }
-        let mut rendered = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::default());
-        let mut regions = Vec::new();
-        terminal.draw(|frame| {
-            if selection
-                .as_ref()
-                .is_some_and(|selection| !selection.fits(frame.area()))
-            {
-                selection = None;
-            }
-            ui::draw(frame, &app);
-            rendered = frame.buffer_mut().clone();
-            regions = ui::selection_regions(frame.area(), &app);
-            if let Some(selection) = &selection {
-                selection.draw(frame.buffer_mut());
-            }
-            if let Some(notice) = app.notifications.current() {
-                twig_cli::notification::draw(frame, notice);
-            }
-            if let Some(notice) = &copy_notice {
-                notice.draw(frame);
-            }
-            if let Some(picker) = &unread_picker {
-                picker.draw(frame, &unread_tasks);
-            }
-        })?;
+        let stale = app
+            .snapshot
+            .repos
+            .iter()
+            .flat_map(|r| &r.tasks)
+            .filter_map(|t| t.checked)
+            .chain(app.snapshot.codex_checked)
+            .filter(|at| at.elapsed() >= Duration::from_secs(30))
+            .count();
+        dirty |= stale != stale_count;
+        stale_count = stale;
+        if dirty {
+            terminal.draw(|frame| {
+                if selection
+                    .as_ref()
+                    .is_some_and(|selection| !selection.fits(frame.area()))
+                {
+                    selection = None;
+                }
+                ui::draw(frame, &app);
+                if let Some((x, y)) = select_at.take() {
+                    selection = ui::selection_regions(frame.area(), &app)
+                        .into_iter()
+                        .find(|area| area.contains((x, y).into()))
+                        .map(|area| selection::Selection::new(frame.buffer_mut(), area, x, y));
+                }
+                if let Some(selection) = &selection {
+                    selection.draw(frame.buffer_mut());
+                }
+                if let Some(notice) = app.notifications.current() {
+                    twig_cli::notification::draw(frame, notice);
+                }
+                if let Some(notice) = &copy_notice {
+                    notice.draw(frame);
+                }
+                if let Some(picker) = &unread_picker {
+                    picker.draw(frame, &unread_tasks);
+                }
+            })?;
+            dirty = false;
+        }
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
         let event = event::read()?;
+        dirty = true;
         if let Some(picker) = &mut unread_picker {
             if let Event::Key(key) = event {
                 match picker.key(key, &unread_tasks) {
@@ -742,12 +784,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             Event::Mouse(mouse) => {
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        selection = regions
-                            .iter()
-                            .find(|area| area.contains((mouse.column, mouse.row).into()))
-                            .map(|area| {
-                                selection::Selection::new(&rendered, *area, mouse.column, mouse.row)
-                            });
+                        selection = None;
+                        select_at = Some((mouse.column, mouse.row));
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some(selection) = &mut selection
@@ -766,9 +804,7 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                             if text.is_empty() {
                                 selection = None;
                             } else {
-                                let message = twig_cli::clipboard::copy(&text)
-                                    .unwrap_or_else(|error| format!("复制失败：{error}"));
-                                copy_notice = Some(twig_cli::clipboard::Notice::new(message));
+                                copy_notice = Some(twig_cli::clipboard::start(text));
                             }
                         }
                     }

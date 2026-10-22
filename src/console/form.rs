@@ -6,6 +6,12 @@ use std::{
     io::{Read, Seek},
     path::Path,
     process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
 };
 
 pub struct Form {
@@ -28,6 +34,8 @@ pub struct Form {
     default_alias: Option<String>,
     completion_input: Option<String>,
     job: Option<Job>,
+    branch_query: Option<BranchQuery>,
+    directory_cache: Option<(String, Instant, Vec<String>)>,
 }
 #[derive(Clone)]
 pub struct BranchCandidate {
@@ -64,6 +72,15 @@ struct Job {
     child: Child,
     output: File,
 }
+struct BranchQuery {
+    result: mpsc::Receiver<Result<Vec<BranchCandidate>>>,
+    cancel: Arc<AtomicBool>,
+}
+impl Drop for BranchQuery {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
 impl Form {
     pub fn project() -> Self {
         Self {
@@ -86,6 +103,8 @@ impl Form {
             default_alias: None,
             completion_input: None,
             job: None,
+            branch_query: None,
+            directory_cache: None,
         }
     }
     pub fn task(project: String, base: String) -> Self {
@@ -96,10 +115,19 @@ impl Form {
         }
     }
     pub fn load_branches(&mut self, path: &Path) {
-        match branch_candidates(path) {
-            Ok(branches) => self.branches = branches,
-            Err(error) => self.branch_error = Some(format!("{error:#}")),
-        }
+        let path = path.to_owned();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let (out, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            super::query::install(stop);
+            let _ = out.send(branch_candidates(&path));
+        });
+        self.branch_query = Some(BranchQuery { result, cancel });
+        self.branch_error = Some("正在读取分支候选…".into());
+    }
+    pub fn querying(&self) -> bool {
+        self.branch_query.is_some()
     }
     pub fn completing_branch(&self) -> bool {
         self.project.is_some()
@@ -181,6 +209,7 @@ impl Form {
         }
     }
     pub fn confirm(&mut self, registry: &Path) -> Result<()> {
+        ensure!(!self.querying(), "正在读取分支候选，请稍候");
         self.operation_started = false;
         if self.project.is_none() && self.field == 0 {
             ensure!(!self.fields[0].trim().is_empty(), "请输入仓库路径");
@@ -322,7 +351,46 @@ impl Form {
         Ok(())
     }
     // 写操作不使用采集超时，也不强杀，以保留可诊断的部分成功状态。
+    fn cached_directories(&mut self) -> Result<Vec<String>> {
+        let input = &self.fields[0];
+        if input == "~" {
+            return Ok(vec!["~/".into()]);
+        }
+        let (parent, prefix) = directory_prefix(input);
+        if self
+            .directory_cache
+            .as_ref()
+            .is_none_or(|(old, at, _)| old != &parent || at.elapsed() >= Duration::from_secs(1))
+        {
+            self.directory_cache =
+                Some((parent.clone(), Instant::now(), directory_entries(&parent)?));
+        }
+        Ok(filter_directories(
+            &self.directory_cache.as_ref().unwrap().2,
+            &parent,
+            prefix,
+        ))
+    }
     pub fn poll(&mut self) -> Result<Option<(String, String)>> {
+        if let Some(query) = &self.branch_query {
+            let result = match query.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(anyhow::anyhow!("分支查询已停止")))
+                }
+            };
+            if let Some(result) = result {
+                self.branch_query = None;
+                match result {
+                    Ok(branches) => {
+                        self.branches = branches;
+                        self.branch_error = None;
+                    }
+                    Err(e) => self.branch_error = Some(format!("{e:#}")),
+                }
+            }
+        }
         if self.branch_input != self.fields[0] {
             self.branch_input = self.fields[0].clone();
             self.branch_selection = 0;
@@ -332,7 +400,7 @@ impl Form {
             self.completion_input = Some(self.fields[0].clone());
             self.directory_selection = 0;
             self.directory_error = None;
-            match directories(&self.fields[0]) {
+            match self.cached_directories() {
                 Ok(paths) => self.directories = paths,
                 Err(error) => {
                     self.directories.clear();
@@ -411,15 +479,14 @@ fn branch_candidates(path: &Path) -> Result<Vec<BranchCandidate>> {
     Ok(candidates)
 }
 
-fn directories(input: &str) -> Result<Vec<String>> {
-    if input == "~" {
-        return Ok(vec!["~/".into()]);
-    }
-    let (parent, prefix) = input
+fn directory_prefix(input: &str) -> (String, &str) {
+    input
         .rsplit_once('/')
         .map(|(parent, prefix)| (format!("{parent}/"), prefix))
-        .unwrap_or_else(|| (String::new(), input));
-    let directory = registry::expand(Path::new(if parent.is_empty() { "." } else { &parent }))?;
+        .unwrap_or_else(|| (String::new(), input))
+}
+fn directory_entries(parent: &str) -> Result<Vec<String>> {
+    let directory = registry::expand(Path::new(if parent.is_empty() { "." } else { parent }))?;
     let mut paths = Vec::new();
     for entry in std::fs::read_dir(&directory)
         .with_context(|| format!("无法读取目录 {}", directory.display()))?
@@ -429,16 +496,34 @@ fn directories(input: &str) -> Result<Vec<String>> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
-            continue;
-        }
         let kind = entry.file_type()?;
         if kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()) {
-            paths.push(format!("{parent}{name}/"));
+            paths.push(format!("{name}/"));
         }
     }
     paths.sort();
     Ok(paths)
+}
+fn filter_directories(entries: &[String], parent: &str, prefix: &str) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|name| {
+            name.starts_with(prefix) && (!name.starts_with('.') || prefix.starts_with('.'))
+        })
+        .map(|name| format!("{parent}{name}"))
+        .collect()
+}
+#[cfg(test)]
+fn directories(input: &str) -> Result<Vec<String>> {
+    if input == "~" {
+        return Ok(vec!["~/".into()]);
+    }
+    let (parent, prefix) = directory_prefix(input);
+    Ok(filter_directories(
+        &directory_entries(&parent)?,
+        &parent,
+        prefix,
+    ))
 }
 
 #[cfg(test)]
