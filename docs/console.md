@@ -4,6 +4,8 @@
 
 Console 是 twig 的全局终端面板，用来浏览已登记的项目、任务和 Codex 会话，并进入项目或任务的 Shell。项目导航与任务终端共用 Twig 界面，tmux server 继续托管进程和分屏，不会自动创建侧边 Pane。可以从 tmux 外或另一个 Session 使用；不能在目标项目自身的 Session 中嵌套打开工作台。
 
+工作台同步活动 Pane 的光标形状与闪烁状态，切换 Pane 和重连后同样生效；返回导航或退出时恢复终端默认光标。zsh vi 模式的块状／竖线切换沿用你的 Shell 配置，Twig 不自行判断编辑模式。
+
 ## 1. 安装与打开
 
 安装步骤见 [安装指南](installation.md)（`twig guide installation`）。在任意目录打开，不要求当前目录是 Git 仓库：
