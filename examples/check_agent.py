@@ -33,6 +33,9 @@ from check_controller import Client, Model as ProbeModel, wait_for
 
 
 class Model(ProbeModel):
+    # 产品验收比协议实验多出恢复、切页及通知跳转轮次。
+    request_limit = 24
+
     def do_POST(self):
         if self.path == "/feishu":
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -94,7 +97,8 @@ class Frontend:
             except IndexError:
                 # PTY 分片可能停在宽字符差分重绘中间，等待后续字节完成该帧。
                 continue
-            if text in "\n".join(display[4:-9] if history else display):
+            history_end = next((y for y, line in enumerate(display) if "滚轮 / PgUp" in line or "Ctrl-End 回到最新" in line), len(display))
+            if text in "\n".join(display[5:history_end] if history else display):
                 return
             assert self.process.poll() is None, self.screen.display
         raise AssertionError((text, self.screen.display))
@@ -166,8 +170,8 @@ def check(root):
     (home / "config.toml").write_text(f'''model = "gpt-5.4"
 model_provider = "probe"
 model_reasoning_effort = "high"
-approval_policy = "never"
-sandbox_mode = "danger-full-access"
+approval_policy = "on-request"
+sandbox_mode = "read-only"
 [features]
 code_mode = false
 [model_providers.probe]
@@ -211,6 +215,7 @@ supports_websockets = false
         # 首次 Chat 必须从没有任何历史轮次的主控开始，而不是预先发过消息。
         frontend = Frontend(binary, config, cwd, env)
         frontend.wait("空闲")
+        frontend.wait("YOLO · 无需审批 · 完整访问权限")
         frontend.wait("gpt-5.4 · 推理 high")
         frontend.send(b"\x1bOQ")  # F2 不再切换页面
         frontend.absent_for("个项目", 1)
@@ -235,7 +240,7 @@ supports_websockets = false
         skill_file = workspace / ".agents/skills/twig-controller/SKILL.md"
         assert not skill_file.exists(), "agent init 不应安装 skill"
         skill_file.parent.mkdir(parents=True)
-        skill_file.write_text("用户自行安装的主控 skill\n")
+        skill_file.write_text("---\nname: twig-controller\ndescription: 隔离测试的自定义主控指令\n---\n用户自行安装的主控 skill\n")
         skill_content = skill_file.read_bytes()
         (workspace / "state.md").write_text("用户保留的全局计划")
         frontend.send(b"\x03")
@@ -281,6 +286,8 @@ supports_websockets = false
         time.sleep(8.5)
         frontend.wait("Tab 切换标签")
         frontend.absent_for("主控有新消息", 1)
+        frontend.send(b"\x17f")
+        frontend.absent_for("YOLO", 1)
         frontend.wait("Agent*")
         frontend.send(b"\t")
         frontend.wait("probe complete 2")
@@ -404,12 +411,13 @@ supports_websockets = false
         model.release["controller"].set()
         frontend.wait("主控有新消息")
         frontend.wait("Agent 有新消息")
-        frontend.send(b"\x17d")
-        frontend.wait("Agent*")
-        frontend.send(b"\t")
+        frontend.wait("Ctrl-W f 查看 Agent")
+        pane_pids = command("tmux", "list-panes", "-a", "-F", "#{pane_id}:#{pane_pid}")
+        frontend.send(b"\x17f")
         frontend.wait("chat-test hold-controller")
+        assert command("tmux", "list-panes", "-a", "-F", "#{pane_id}:#{pane_pid}") == pane_pids
         frontend.absent_for("Agent*", 1)
-        print("PASS: 工作台主控提醒与未读、返回 Chat 清除", flush=True)
+        print("PASS: 工作台 Ctrl-W f 直达主控、清除未读并保留 Pane 进程", flush=True)
         frontend.send(b"\x03")
         frontend.process.wait(timeout=5)
         assert frontend.process.returncode == 0
@@ -476,6 +484,132 @@ supports_websockets = false
         assert count == 1 == len([m for m in state()["messages"] if turn in m["text"]])
         client.socket.close()
         print("PASS: 漏失完成回调由 drain 补查，重复恢复不重复反馈", flush=True)
+        # 即使全局配置受限，主控恢复仍使用 YOLO，子任务保留原策略。
+        client = Client(socket)
+        restored = client.call("thread/resume", {"threadId": main["thread"]})
+        assert restored["approvalPolicy"] == "never", restored
+        assert restored["sandbox"]["type"] == "dangerFullAccess", restored
+        child = client.call("thread/resume", {"threadId": new_task["thread"]})
+        assert child["approvalPolicy"] == "on-request", child
+        assert child["sandbox"]["type"] == "readOnly", child
+        client.call("thread/resume", {"threadId": main["thread"], "approvalPolicy": "on-request", "sandbox": "read-only"})
+        twig("agent", "init")
+        restored = client.call("thread/resume", {"threadId": main["thread"]})
+        assert restored["approvalPolicy"] == "never", restored
+        assert restored["sandbox"]["type"] == "dangerFullAccess", restored
+        client.socket.close()
+        print("PASS: 受限默认配置下主控 YOLO、已有主控更新与子任务权限不变", flush=True)
+
+        frontend = Frontend(binary, config, cwd, env)
+        frontend.wait("空闲")
+        # 持有隔离记录锁，确保两条消息仍在 worker 输入队列时切页。
+        with (state_file.parent / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            frontend.send(b"before-tab-one\r")
+            frontend.wait("before-tab-one", history=True)
+            frontend.send(b"before-tab-two\r")
+            frontend.wait("before-tab-two", history=True)
+            frontend.send(b"\t")
+            frontend.wait("个项目")
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        wait_for(lambda: sum(m["text"].startswith("before-tab-") and m["status"] == "sent" for m in state()["messages"]) == 2, "切页后消息未全部持久化和投递")
+        history = json.loads(twig("agent", "read"))["thread"]["turns"]
+        texts = [part.get("text") for turn in history for item in turn["items"] if item["type"] == "userMessage" for part in item["content"]]
+        assert texts.count("before-tab-one") == texts.count("before-tab-two") == 1
+        frontend.send(b"\t")
+        frontend.wait("before-tab-two", history=True)
+        frontend.send(b"\x03")
+        frontend.process.wait(timeout=10)
+        frontend.close()
+        frontend = None
+        print("PASS: 连续发送后立即切回 Console，全部持久化并各投递一次", flush=True)
+        # 切页期间发生的拒收仍须在回到 Agent 后还原草稿并报告错误。
+        frontend = Frontend(binary, config, cwd, env)
+        frontend.wait("空闲")
+        with (state_file.parent / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = state()
+            data["bindings"]["controller"]["stopped"] = True
+            state_file.write_text(json.dumps(data))
+            frontend.send(b"rejected-while-hidden\r")
+            frontend.wait("rejected-while-hidden", history=True)
+            frontend.send(b"\t")
+            frontend.wait("个项目")
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        frontend.send(b"\t")
+        frontend.wait("任务已停止")
+        frontend.wait("rejected-while-hidden")
+        assert not any(m["text"] == "rejected-while-hidden" for m in state()["messages"])
+        frontend.send(b"\x15\x03")
+        frontend.process.wait(timeout=10)
+        frontend.close()
+        frontend = None
+        with (state_file.parent / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = state()
+            data["bindings"]["controller"]["stopped"] = False
+            state_file.write_text(json.dumps(data))
+        print("PASS: 切页期间发送被拒绝，返回后恢复草稿并保留错误", flush=True)
+
+
+        frontend = Frontend(binary, config, cwd, env)
+        frontend.wait("空闲")
+        model.entered["controller"].clear()
+        model.release["controller"].clear()
+        frontend.send(b"navigation-follow hold-controller\r")
+        assert model.entered["controller"].wait(10)
+        frontend.send(b"\t")
+        frontend.wait("个项目")
+        model.release["controller"].set()
+        frontend.wait("主控有新消息")
+        frontend.wait("Ctrl-W f 查看 Agent")
+        frontend.send(b"\x17f")
+        frontend.wait("navigation-follow hold-controller", history=True)
+        frontend.absent_for("Agent*", 1)
+        frontend.send(b"\t")
+        frontend.wait("个项目")
+        frontend.send(b"\x17f")
+        frontend.absent_for("YOLO", 1)
+        frontend.wait("个项目")
+        frontend.send(b"q")
+        frontend.process.wait(timeout=10)
+        frontend.close()
+        frontend = None
+        print("PASS: 导航 Ctrl-W f 跳主控并清除未读，无卡片时不跳转", flush=True)
+
+        # 空子任务没有 rollout，daemon 重启后不能拖垮正常主控。
+        twig("new", "demo", "empty", "--agent", "--no-open")
+        broken = next(b for b in state()["bindings"].values() if b["task"] == "empty")
+        server.terminate()
+        server.wait(timeout=10)
+        socket.unlink(missing_ok=True)
+        server = start_server()
+        wait_for(socket.exists, "空子任务实验重启失败")
+        failed = twig("agent", "send", "--project", "demo", "--task", "empty", "--message", "missing-rollout").strip()
+        assert next(m for m in state()["messages"] if m["id"] == failed)["status"] == "queued"
+        assert broken["thread"] in twig("agent", "drain", success=False)
+        frontend = Frontend(binary, config, cwd, env)
+        frontend.wait("YOLO · 无需审批 · 完整访问权限")
+        frontend.wait("thread not loaded")
+        frontend.send(b"healthy-controller-after-failure\r")
+        wait_for(lambda: any(m["text"] == "healthy-controller-after-failure" and m["status"] == "sent" for m in state()["messages"]), "子任务错误阻断主控发送")
+        healthy_turn = next(m["turn"] for m in state()["messages"] if m["text"] == "healthy-controller-after-failure")
+        client = Client(socket)
+        def healthy_reply():
+            turns = client.call("thread/read", {"threadId": main["thread"], "includeTurns": True})["thread"]["turns"]
+            return next((turn for turn in turns if turn["id"] == healthy_turn and turn["status"] == "completed"), None)
+        wait_for(healthy_reply, "主控接收后未完成回复")
+        reply = next(item["text"] for item in healthy_reply()["items"] if item["type"] == "agentMessage")
+        frontend.wait(reply, history=True)
+        client.socket.close()
+        failed_record = next(m for m in state()["messages"] if m["id"] == failed)
+        assert failed_record["status"] == "queued" and failed_record["error"]
+        frontend.send(b"\x03")
+        frontend.process.wait(timeout=10)
+        frontend.close()
+        frontend = None
+        print("PASS: 失效子任务明确报错，主控仍可连接和投递，不重发异常消息", flush=True)
+
     except BaseException:
         log.flush()
         log.seek(0)

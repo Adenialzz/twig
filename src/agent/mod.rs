@@ -224,10 +224,11 @@ impl Store {
             ) {
                 Ok(result) => {
                     check_thread(binding, &result)?;
+                    self.resume(&mut client, binding)?;
                     return Ok(binding.clone());
                 }
                 Err(error) if rpc::thread_not_loaded(&error, &binding.thread) => {
-                    match client.call("thread/resume", json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}})) {
+                    match client.call("thread/resume", self.resume_params(binding)?) {
                         Ok(result) => {
                             check_thread(binding, &result)?;
                             return Ok(binding.clone());
@@ -261,7 +262,7 @@ impl Store {
             &cwd.join("state.md"),
             "# 全局计划\n\n## 目标\n待用户交代\n\n## 待跟进\n无\n",
         )?;
-        let result = client.call("thread/start", json!({"cwd":cwd,"developerInstructions":instructions,"config":{"notify":self.callback()?}}))?;
+        let result = client.call("thread/start", json!({"cwd":cwd,"developerInstructions":instructions,"approvalPolicy":"never","sandbox":"danger-full-access","config":{"notify":self.callback()?}}))?;
         let binding = Binding {
             thread: result["thread"]["id"]
                 .as_str()
@@ -370,13 +371,22 @@ impl Store {
         let _lock = self.lock()?;
         let mut state = self.load()?;
         let mut client = self.client(&state)?;
+        let mut errors = Vec::new();
         // 显式恢复时补查漏掉的完成回调；所有绑定均由本功能从新 session 建立。
         for binding in state.bindings.values().cloned().collect::<Vec<_>>() {
             if binding.stopped || self.validate(&binding).is_err() {
                 continue;
             }
-            let result = client.thread(&binding.thread)?;
-            check_thread(&binding, &result)?;
+            let result = match client.thread(&binding.thread).and_then(|result| {
+                check_thread(&binding, &result)?;
+                Ok(result)
+            }) {
+                Ok(result) => result,
+                Err(error) => {
+                    errors.push(format!("会话 {}：{error:#}", binding.thread));
+                    continue;
+                }
+            };
             if let Some(turns) = result["thread"]["turns"].as_array() {
                 for turn in turns.iter().filter(|turn| turn["status"] == "completed") {
                     record_completion(
@@ -389,81 +399,109 @@ impl Store {
         }
         self.save(&state)?;
         drop(_lock);
-        self.flush()
+        if let Err(error) = self.flush() {
+            errors.push(format!("{error:#}"));
+        }
+        ensure!(errors.is_empty(), "{}", errors.join("\n"));
+        Ok(())
     }
     fn flush(&self) -> Result<()> {
         let _lock = self.lock()?;
         let mut state = self.load()?;
         let mut client = self.client(&state)?;
+        let mut errors = Vec::new();
         for binding in state.bindings.values().cloned().collect::<Vec<_>>() {
-            if binding.stopped {
-                continue;
-            }
-            if !state.messages.iter().any(|m| {
-                m.thread == binding.thread && matches!(m.status.as_str(), "queued" | "sending")
-            }) {
-                continue;
-            }
-            if let Err(error) = self.validate(&binding) {
-                for message in state
-                    .messages
-                    .iter_mut()
-                    .filter(|m| m.thread == binding.thread && m.status == "queued")
-                {
-                    message.status = "failed".into();
-                    message.error = Some(format!("{error:#}"));
+            if let Err(error) = self.flush_binding(&mut state, &mut client, &binding) {
+                let error = format!("会话 {}：{error:#}", binding.thread);
+                for message in state.messages.iter_mut().filter(|m| {
+                    m.thread == binding.thread && matches!(m.status.as_str(), "queued" | "sending")
+                }) {
+                    message.error = Some(error.clone());
                 }
                 self.save(&state)?;
-                continue;
+                errors.push(error);
             }
-            let mut result = client.thread(&binding.thread)?;
-            check_thread(&binding, &result)?;
-            if result["thread"]["status"]["type"] == "notLoaded" {
-                client.call("thread/resume", json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}}))?;
-                result = client.thread(&binding.thread)?;
-            }
+        }
+        ensure!(errors.is_empty(), "{}", errors.join("\n"));
+        Ok(())
+    }
+    fn flush_binding(
+        &self,
+        state: &mut State,
+        client: &mut rpc::Client,
+        binding: &Binding,
+    ) -> Result<()> {
+        if binding.stopped {
+            return Ok(());
+        }
+        if !state.messages.iter().any(|m| {
+            m.thread == binding.thread && matches!(m.status.as_str(), "queued" | "sending")
+        }) {
+            return Ok(());
+        }
+        if let Err(error) = self.validate(binding) {
             for message in state
                 .messages
                 .iter_mut()
-                .filter(|m| m.thread == binding.thread && m.status == "sending")
+                .filter(|m| m.thread == binding.thread && m.status == "queued")
             {
-                if let Some(turn) = find_message(&result, &message.id) {
-                    message.status = "sent".into();
-                    message.turn = Some(turn);
-                    message.error = None;
+                message.status = "failed".into();
+                message.error = Some(format!("{error:#}"));
+            }
+            self.save(state)?;
+            return Ok(());
+        }
+        let mut result = client.thread(&binding.thread)?;
+        check_thread(binding, &result)?;
+        if result["thread"]["status"]["type"] == "notLoaded" {
+            client.call("thread/resume", self.resume_params(binding)?)?;
+            result = client.thread(&binding.thread)?;
+        }
+        for message in state
+            .messages
+            .iter_mut()
+            .filter(|m| m.thread == binding.thread && m.status == "sending")
+        {
+            if let Some(turn) = find_message(&result, &message.id) {
+                message.status = "sent".into();
+                message.turn = Some(turn);
+                message.error = None;
+            }
+        }
+        self.save(state)?;
+        // 结果未知时不越过它发送后续消息。
+        if state
+            .messages
+            .iter()
+            .any(|m| m.thread == binding.thread && m.status == "sending")
+            || result["thread"]["status"]["type"] != "idle"
+        {
+            return Ok(());
+        }
+        if let Some(index) = state
+            .messages
+            .iter()
+            .position(|m| m.thread == binding.thread && m.status == "queued")
+        {
+            let message = &mut state.messages[index];
+            message.status = "sending".into();
+            let mut params = json!({"threadId":binding.thread,"clientUserMessageId":message.id,"input":[{"type":"text","text":message.text,"text_elements":[]}]});
+            if binding.project.is_none() {
+                params["approvalPolicy"] = json!("never");
+                params["sandboxPolicy"] = json!({"type":"dangerFullAccess"});
+            }
+            self.save(state)?;
+            match client.call("turn/start", params) {
+                Ok(response) => {
+                    state.messages[index].status = "sent".into();
+                    state.messages[index].error = None;
+                    state.messages[index].turn = response["turn"]["id"].as_str().map(str::to_owned);
+                }
+                Err(error) => {
+                    state.messages[index].error = Some(format!("投递结果未知：{error:#}"))
                 }
             }
-            self.save(&state)?;
-            // 结果未知时不越过它发送后续消息。
-            if state
-                .messages
-                .iter()
-                .any(|m| m.thread == binding.thread && m.status == "sending")
-                || result["thread"]["status"]["type"] != "idle"
-            {
-                continue;
-            }
-            if let Some(index) = state
-                .messages
-                .iter()
-                .position(|m| m.thread == binding.thread && m.status == "queued")
-            {
-                let message = &mut state.messages[index];
-                message.status = "sending".into();
-                let params = json!({"threadId":binding.thread,"clientUserMessageId":message.id,"input":[{"type":"text","text":message.text,"text_elements":[]}]});
-                self.save(&state)?;
-                match client.call("turn/start", params) {
-                    Ok(response) => {
-                        state.messages[index].status = "sent".into();
-                        state.messages[index].turn =
-                            response["turn"]["id"].as_str().map(str::to_owned);
-                    }
-                    Err(error) => {
-                        state.messages[index].error = Some(format!("投递结果未知：{error:#}"))
-                    }
-                }
-                self.save(&state)?;
-            }
+            self.save(state)?;
         }
         Ok(())
     }
@@ -507,6 +545,14 @@ impl Store {
         drop(_lock);
         self.flush()
     }
+    fn resume_params(&self, binding: &Binding) -> Result<Value> {
+        let mut params = json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}});
+        if binding.project.is_none() {
+            params["approvalPolicy"] = json!("never");
+            params["sandbox"] = json!("danger-full-access");
+        }
+        Ok(params)
+    }
     pub fn resume(&self, client: &mut rpc::Client, binding: &Binding) -> Result<bool> {
         self.validate(binding)?;
         let result = client.thread(&binding.thread)?;
@@ -519,7 +565,7 @@ impl Store {
         {
             return Ok(false);
         }
-        client.call("thread/resume", json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}}))?;
+        client.call("thread/resume", self.resume_params(binding)?)?;
         Ok(true)
     }
     pub fn stop_task(&self, thread: &str) -> Result<()> {

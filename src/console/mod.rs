@@ -27,6 +27,7 @@ pub(super) struct App {
     snapshot: Snapshot,
     notifications: notifications::Notifications,
     chat_status: (bool, bool),
+    open_agent: bool,
     project: Option<String>,
     task: Option<PathBuf>,
     thread: Option<String>,
@@ -69,6 +70,7 @@ impl App {
         Self {
             notifications: Default::default(),
             chat_status: (false, false),
+            open_agent: false,
             snapshot: Snapshot {
                 codex_error: Some("正在连接 Codex…".into()),
                 ..Default::default()
@@ -579,13 +581,19 @@ fn open_terminal(
                 }
             });
         match result {
-            Ok(Some(notice)) => match notification_target(app, registry, &notice) {
-                Ok(next) => {
-                    target = next;
-                    jump = Some(notice);
+            Ok(Some(twig_cli::workbench::Destination::Task(notice))) => {
+                match notification_target(app, registry, &notice) {
+                    Ok(next) => {
+                        target = next;
+                        jump = Some(notice);
+                    }
+                    Err(error) => break Err(error),
                 }
-                Err(error) => break Err(error),
-            },
+            }
+            Ok(Some(twig_cli::workbench::Destination::Agent)) => {
+                app.open_agent = true;
+                break Ok(());
+            }
             Ok(None) => break Ok(()),
             Err(error) => break Err(error),
         }
@@ -737,6 +745,16 @@ fn run_inner(
             worker.requests.send(app.request())?;
             dirty = true;
         }
+        if std::mem::take(&mut app.open_agent) {
+            selection = None;
+            app.pane_prefix = false;
+            app.top_prefix = false;
+            app.delete_prefix = false;
+            if open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
+                break;
+            }
+            dirty = true;
+        }
         dirty |= app.receive_notifications(&worker, None);
         let unread_tasks = app.notifications.tasks();
         if let Some(picker) = &mut unread_picker {
@@ -785,7 +803,7 @@ fn run_inner(
                 if let Some(notice) = app.notifications.current() {
                     twig_cli::notification::draw(frame, notice);
                 } else if app.chat_status.1 {
-                    twig_cli::notification::draw_chat(frame, "Tab 查看 Agent");
+                    twig_cli::notification::draw_chat(frame);
                 }
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
@@ -1053,6 +1071,8 @@ fn run_inner(
                         )?,
                         Err(error) => app.message = Some(format!("跳转失败：{error:#}")),
                     }
+                } else if app.chat_status.1 {
+                    app.open_agent = true;
                 }
             } else if let KeyCode::Char(direction) = key.code {
                 app.focus = match (app.focus, direction.to_ascii_lowercase()) {

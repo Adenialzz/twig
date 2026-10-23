@@ -33,14 +33,14 @@ pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
     );
 }
 
-pub fn draw_chat(frame: &mut Frame, hint: &str) {
+pub fn draw_chat(frame: &mut Frame) {
     draw_card(
         frame,
         " 主控有新消息 ",
         vec![
             Line::from("主控已完成回复"),
             Line::from(""),
-            Line::from(hint),
+            Line::from("Ctrl-W f 查看 Agent"),
         ],
     );
 }

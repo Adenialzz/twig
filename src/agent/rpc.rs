@@ -150,7 +150,4 @@ impl Client {
             }
         }
     }
-    pub fn answer(&mut self, request: &Value, result: Value) -> Result<()> {
-        self.send(json!({"id":request["id"],"result":result}))
-    }
 }

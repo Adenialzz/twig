@@ -202,11 +202,7 @@ fn history(view: &View, draft: &Draft) -> Text<'static> {
     }
     for (label, text, color) in [
         ("连接 / 投递错误", &view.error, Color::Red),
-        (
-            "等待审批 · Ctrl-Y 同意 / Ctrl-N 拒绝",
-            &view.approval,
-            Color::Yellow,
-        ),
+        ("需要用户处理 · 原生 Codex", &view.approval, Color::Yellow),
     ] {
         if let Some(text) = text {
             lines.push(Line::styled(
@@ -291,9 +287,9 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
     let width = screen.width.saturating_sub(4);
     let body = Rect::new(
         screen.x + (screen.width - width) / 2,
-        screen.y + crate::tabs::HEADER_HEIGHT,
+        screen.y + crate::tabs::HEADER_HEIGHT + 1,
         width,
-        screen.height - crate::tabs::HEADER_HEIGHT,
+        screen.height - crate::tabs::HEADER_HEIGHT - 1,
     );
     let (input, (cx, cy)) = input_lines(&draft.text, draft.cursor, width.saturating_sub(4));
     let input_height = (input.len() as u16)
@@ -304,15 +300,20 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(input_height),
-        Constraint::Length(2),
+        Constraint::Length(1),
     ])
     .split(body);
-    crate::tabs::draw(
-        frame,
-        screen,
-        crate::tabs::Tab::Agent,
-        "Tab 切换 · F5 重连 · Ctrl-C 清空/退出",
-        false,
+    crate::tabs::draw(frame, screen, crate::tabs::Tab::Agent, "", false);
+    frame.render_widget(
+        Paragraph::new("YOLO · 无需审批 · 完整访问权限")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Rect::new(
+            screen.x,
+            screen.y + crate::tabs::HEADER_HEIGHT,
+            screen.width,
+            1,
+        ),
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -404,7 +405,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
     }
     frame.render_widget(
         Paragraph::new(format!(
-            "Enter 发送 · Alt-Enter 换行 · Ctrl-U 清空\nAlt-C 复制回复 · F4 {}工具详情",
+            "Enter 发送 · Alt-Enter 换行 · Alt-C 复制 · F4 {}详情",
             if draft.details { "收起" } else { "展开" }
         ))
         .style(Style::default().fg(Color::DarkGray)),
@@ -483,6 +484,17 @@ mod tests {
                 .iter()
                 .map(|cell| cell.symbol())
                 .collect::<String>();
+            let warning: String = (0..width)
+                .map(|x| completed.buffer[(x, crate::tabs::HEADER_HEIGHT)].symbol())
+                .collect();
+            assert!(warning.contains("YOLO"));
+            let warning_x = (0..width)
+                .find(|&x| completed.buffer[(x, crate::tabs::HEADER_HEIGHT)].symbol() == "Y")
+                .unwrap();
+            assert_eq!(
+                completed.buffer[(warning_x, crate::tabs::HEADER_HEIGHT)].fg,
+                Color::Red
+            );
             assert!(text.contains("VISIBLE_TAIL"), "{width}×{height}");
             assert!(text.contains("SEND_ERROR"), "{width}×{height}");
             let cursor = terminal.get_cursor_position().unwrap();

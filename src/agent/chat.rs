@@ -11,14 +11,21 @@ use crossterm::{
     execute,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use serde_json::{Value, json};
-use std::{io::Stdout, path::PathBuf, sync::mpsc, thread, time::Duration};
+
+use std::{
+    collections::HashSet,
+    io::Stdout,
+    path::PathBuf,
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Duration,
+};
 use view::{Entry, Kind};
 
 enum Command {
     Send(String, String),
-    Answer(bool),
     Refresh,
+    Viewing(bool),
     Exit,
 }
 #[derive(Default)]
@@ -42,16 +49,18 @@ pub struct Draft {
     history_height: u16,
     details: bool,
     pending: Vec<(String, String)>,
+    runtime: Option<Runtime>,
 }
 
 impl Draft {
     fn merge_pending(&mut self, view: &mut View) {
+        let mut ids: HashSet<String> = view
+            .entries
+            .iter()
+            .filter_map(|entry| entry.id.clone())
+            .collect();
         for (id, text) in &self.pending {
-            if view
-                .entries
-                .iter()
-                .any(|entry| entry.id.as_deref() == Some(id))
-            {
+            if !ids.insert(id.clone()) {
                 continue;
             }
             let mut entry = Entry::new(Kind::User, text);
@@ -61,39 +70,71 @@ impl Draft {
     }
 }
 
-fn answer(request: &Value, accept: bool) -> Result<Value> {
-    use anyhow::bail;
-    match request["method"].as_str() {
-        Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval") => {
-            Ok(json!({"decision":if accept {"accept"} else {"decline"}}))
+#[derive(Default)]
+struct Updates {
+    latest: Option<View>,
+    rejected: Vec<(String, String)>,
+}
+
+struct Runtime {
+    tx: mpsc::Sender<Command>,
+    updates: Arc<Mutex<Updates>>,
+    view: View,
+    handle: Option<thread::JoinHandle<()>>,
+}
+impl Runtime {
+    fn start(registry: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let updates = Arc::new(Mutex::new(Updates::default()));
+        let output = updates.clone();
+        let handle = thread::spawn(move || worker(registry, rx, output));
+        Self {
+            tx,
+            updates,
+            view: View::default(),
+            handle: Some(handle),
         }
-        Some("item/permissions/requestApproval") => Ok(
-            json!({"permissions":if accept {request["params"]["permissions"].clone()} else {json!({})},"scope":"turn"}),
-        ),
-        Some("mcpServer/elicitation/request") if !accept => {
-            Ok(json!({"action":"decline","content":null}))
+    }
+}
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Exit 排在已接受的发送命令后，退出前完成持久化，不因切页丢弃输入。
+        let _ = self.tx.send(Command::Exit);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
         }
-        _ => bail!(
-            "此输入请求需在原生 Codex 中处理：codex resume <主控 thread ID>；Agent 可继续查看状态"
-        ),
     }
 }
 
-fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sender<View>) {
+fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<Updates>>) {
     let mut connection: Option<(Store, Binding, rpc::Client, bool)> = None;
     let mut last_error = None;
     let mut refresh = true;
+    let mut viewing = true;
     loop {
         let command = if refresh {
             None
         } else {
-            match input.recv_timeout(Duration::from_millis(700)) {
+            let received = if viewing {
+                input.recv_timeout(Duration::from_millis(700))
+            } else {
+                input
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            };
+            match received {
                 Ok(Command::Exit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Ok(c) => Some(c),
                 Err(mpsc::RecvTimeoutError::Timeout) => None,
             }
         };
         refresh = false;
+        if let Some(Command::Viewing(active)) = command {
+            viewing = active;
+            if !viewing {
+                continue;
+            }
+        }
         if matches!(command, Some(Command::Refresh)) {
             connection = None;
             last_error = None;
@@ -108,37 +149,30 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 let state = store.load()?;
                 let mut client = store.client(&state)?;
                 let subscribed = store.resume(&mut client, &binding)?;
-                store.drain()?;
                 Ok((store, binding, client, subscribed))
             })();
             match result {
                 Ok(c) => {
+                    last_error = c.0.drain().err().map(|e| format!("队列补查失败：{e:#}"));
                     connection = Some(c);
-                    last_error = None;
                 }
                 Err(e) => last_error = Some(format!("{e:#}")),
             }
         }
-        let mut view = View::default();
+        let mut view = View {
+            error: last_error.clone(),
+            ..View::default()
+        };
         let mut reconnect = false;
         if let Some((store, binding, client, subscribed)) = &mut connection {
             view.connected = true;
             let result = (|| -> Result<()> {
-                match command {
-                    Some(Command::Send(id, text)) => {
-                        if let Err(error) = store.enqueue_with_id(binding, text.clone(), id.clone())
-                        {
-                            view.rejected = Some((id, text));
-                            return Err(error);
-                        }
-                    }
-                    Some(Command::Answer(accept)) => {
-                        if let Some(request) = client.requests.first().cloned() {
-                            client.answer(&request, answer(&request, accept)?)?;
-                            client.requests.remove(0);
-                        }
-                    }
-                    _ => {}
+                if let Some(Command::Send(id, text)) = command
+                    && let Err(error) = store.enqueue_with_id(binding, text.clone(), id.clone())
+                {
+                    view.rejected = Some((id, text));
+                    last_error = Some(format!("{error:#}"));
+                    return Err(error);
                 }
                 if !*subscribed {
                     *subscribed = store.resume(client, binding)?;
@@ -172,15 +206,16 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 if unknown > 0 {
                     view.status.push_str(&format!(" · 待核对 {unknown}"));
                 }
+                let mut ids: HashSet<String> = view
+                    .entries
+                    .iter()
+                    .filter_map(|entry| entry.id.clone())
+                    .collect();
                 for message in state.messages.iter().filter(|m| {
                     m.thread == binding.thread
                         && matches!(m.status.as_str(), "queued" | "sending" | "sent" | "failed")
                 }) {
-                    if view
-                        .entries
-                        .iter()
-                        .any(|entry| entry.id.as_deref() == Some(&message.id))
-                    {
+                    if !ids.insert(message.id.clone()) {
                         continue;
                     }
                     let kind = if message.text.starts_with("任务反馈：") {
@@ -200,7 +235,10 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                     store.flush()?;
                 }
                 if let Some(request) = client.requests.first() {
-                    view.approval = Some(format!("{}\n{}", request["method"], request["params"]));
+                    view.approval = Some(format!(
+                        "{}\n{}\n请在原生 Codex 中处理该交互请求。",
+                        request["method"], request["params"]
+                    ));
                 }
                 Ok(())
             })();
@@ -224,9 +262,11 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
             connection = None;
             last_error = None;
         }
-        if output.send(view).is_err() {
-            break;
+        let mut updates = output.lock().unwrap();
+        if let Some(rejected) = view.rejected.take() {
+            updates.rejected.push(rejected);
         }
+        updates.latest = Some(view);
     }
 }
 
@@ -237,11 +277,14 @@ pub fn run(
     draft: &mut Draft,
 ) -> Result<bool> {
     execute!(std::io::stdout(), EnableBracketedPaste)?;
-    let (tx, rx) = mpsc::channel();
-    let (updates, views) = mpsc::channel();
-    thread::spawn(move || worker(registry, rx, updates));
-    let result = run_ui(terminal, &tx, views, draft);
-    let _ = tx.send(Command::Exit);
+    let mut runtime = draft
+        .runtime
+        .take()
+        .unwrap_or_else(|| Runtime::start(registry));
+    runtime.tx.send(Command::Viewing(true))?;
+    let result = run_ui(terminal, &mut runtime, draft);
+    let _ = runtime.tx.send(Command::Viewing(false));
+    draft.runtime = Some(runtime);
     execute!(std::io::stdout(), DisableBracketedPaste)?;
     terminal.clear()?;
     result
@@ -249,44 +292,47 @@ pub fn run(
 
 fn run_ui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    tx: &mpsc::Sender<Command>,
-    views: mpsc::Receiver<View>,
+    runtime: &mut Runtime,
     draft: &mut Draft,
 ) -> Result<bool> {
-    let mut view = View {
-        status: "正在连接 Codex…".into(),
-        ..View::default()
-    };
-    draft.merge_pending(&mut view);
+    let Runtime {
+        tx, updates, view, ..
+    } = runtime;
+    draft.merge_pending(view);
     let mut dirty = true;
     let mut selection: Option<Selection> = None;
     let mut select_at = None;
     let mut areas = view::Areas::default();
     let mut copy_notice = None;
     loop {
-        while let Ok(mut update) = views.try_recv() {
-            if let Some((id, rejected)) = update.rejected.take() {
-                draft.pending.retain(|(pending, _)| pending != &id);
-                view.entries
-                    .retain(|entry| entry.id.as_deref() != Some(&id));
-                draft.text = if draft.text.is_empty() {
-                    rejected
-                } else {
-                    format!("{rejected}\n{}", draft.text)
-                };
-                draft.cursor = draft.text.len();
-            }
-            draft.pending.retain(|(id, _)| {
-                !update
-                    .entries
-                    .iter()
-                    .any(|entry| entry.id.as_deref() == Some(id))
-            });
+        let (update, rejected) = {
+            let mut updates = updates.lock().unwrap();
+            (updates.latest.take(), std::mem::take(&mut updates.rejected))
+        };
+        for (id, rejected) in rejected {
+            draft.pending.retain(|(pending, _)| pending != &id);
+            view.entries
+                .retain(|entry| entry.id.as_deref() != Some(&id));
+            draft.text = if draft.text.is_empty() {
+                rejected
+            } else {
+                format!("{rejected}\n{}", draft.text)
+            };
+            draft.cursor = draft.text.len();
+            dirty = true;
+        }
+        if let Some(mut update) = update {
+            let ids: HashSet<_> = update
+                .entries
+                .iter()
+                .filter_map(|entry| entry.id.as_deref())
+                .collect();
+            draft.pending.retain(|(id, _)| !ids.contains(id.as_str()));
             if update.error.is_some() && update.entries.is_empty() {
                 update.entries = std::mem::take(&mut view.entries);
             }
             draft.merge_pending(&mut update);
-            view = update;
+            *view = update;
             dirty = true;
         }
         if let Some(notice) = twig_cli::clipboard::poll() {
@@ -308,7 +354,7 @@ fn run_ui(
                 {
                     selection = None;
                 }
-                areas = view::draw(frame, &view, draft, selection.is_none());
+                areas = view::draw(frame, view, draft, selection.is_none());
                 if !view.connected && view.error.is_none() {
                     return;
                 }
@@ -429,12 +475,6 @@ fn run_ui(
                         draft.text.clear();
                         draft.cursor = 0;
                     }
-                    KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        tx.send(Command::Answer(true))?
-                    }
-                    KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        tx.send(Command::Answer(false))?
-                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
                         if let Some(entry) = view
                             .entries
@@ -458,7 +498,7 @@ fn run_ui(
                         let text = std::mem::take(&mut draft.text);
                         tx.send(Command::Send(id.clone(), text.clone()))?;
                         draft.pending.push((id, text));
-                        draft.merge_pending(&mut view);
+                        draft.merge_pending(view);
                         draft.cursor = 0;
                         draft.scroll = 0;
                     }
@@ -514,6 +554,7 @@ fn run_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn local_echo_survives_stale_snapshots_and_merges_by_id_not_text() {

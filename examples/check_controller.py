@@ -147,6 +147,8 @@ def relay(root, event):
 
 
 class Model(http.server.BaseHTTPRequestHandler):
+    request_limit = 20
+
     def log_message(self, *_args):
         pass
 
@@ -170,7 +172,7 @@ class Model(http.server.BaseHTTPRequestHandler):
         with self.server.counter_lock:
             self.server.count += 1
             index = self.server.count
-        assert index < 20, "出现意外模型循环"
+        assert index < self.request_limit, "出现意外模型循环"
         item = {
             "id": f"msg_{index}", "type": "message", "role": "assistant",
             "status": "completed",

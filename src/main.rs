@@ -56,7 +56,9 @@ enum Action {
     )]
     Console,
     /// 与主控 Codex 对话；Tab 切换 Console，退出不停止会话
-    #[command(after_help = "daemon 不可用时只提示启动。完整说明：twig guide agent")]
+    #[command(
+        after_help = "主控默认 YOLO：无需审批、完整访问权限，页面常驻红色提示；子任务权限不变。daemon 不可用时只提示启动。完整说明：twig guide agent"
+    )]
     Chat,
     /// 主控 Agent CLI；使用 Codex daemon，不启动后台服务
     #[command(after_help = "使用 twig agent init 初始化；完整说明：twig guide agent")]
