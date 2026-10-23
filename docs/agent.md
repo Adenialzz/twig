@@ -22,7 +22,7 @@ twig chat
 首次打开 Agent 创建主控工作目录和会话，已有会话则恢复原 thread。daemon 不可用时显示启动提示，F5 重试；不会回退到另一种模型服务。
 
 - 点击顶部居中的圆角 Console / Agent 标签，或按 Tab：Agent 与 Console 导航相互切换，保留 Console 选择。
-- Enter：发送消息；Alt-Enter：换行；支持粘贴、左右方向键、Home/End、退格和 Delete。输入框随内容增高，超出高度时跟随光标滚动。
+- Enter：发送消息，立即显示在对话中，不显示发送中标记；投递异常时显示错误。Alt-Enter：换行；支持粘贴、左右方向键、Home/End、退格和 Delete。输入框随内容增高，超出高度时跟随光标滚动。
 - 滚轮 / PgUp/PgDn：浏览聊天记录；Ctrl-End 回到最新消息；Ctrl-U 清空输入。
 - 在对话或输入区拖选文字，松开复制；Alt-C 复制最近一条主控完整回复（保留 Markdown）。选区固定当前区域画面，Esc 或继续输入清除，后台会话继续运行。
 - F4：展开或收起工具输出、投递 ID 和会话 ID。错误信息始终显示。

@@ -21,6 +21,7 @@ pub(super) enum Kind {
 }
 
 pub(super) struct Entry {
+    pub id: Option<String>,
     pub kind: Kind,
     pub text: String,
     pub detail: String,
@@ -28,6 +29,7 @@ pub(super) struct Entry {
 impl Entry {
     pub fn new(kind: Kind, text: impl Into<String>) -> Self {
         Self {
+            id: None,
             kind,
             text: clean(&text.into()),
             detail: String::new(),
@@ -63,7 +65,9 @@ pub(super) fn transcript(value: &Value) -> Vec<Entry> {
                             } else {
                                 Kind::User
                             };
-                            Entry::new(kind, text)
+                            let mut entry = Entry::new(kind, text);
+                            entry.id = item["clientId"].as_str().map(str::to_owned);
+                            entry
                         }
                         Some("agentMessage") => {
                             Entry::new(Kind::Assistant, item["text"].as_str().unwrap_or_default())

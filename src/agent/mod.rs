@@ -296,6 +296,9 @@ impl Store {
         Ok(thread)
     }
     pub fn enqueue(&self, binding: &Binding, text: String) -> Result<String> {
+        self.enqueue_with_id(binding, text, message_id())
+    }
+    fn enqueue_with_id(&self, binding: &Binding, text: String, id: String) -> Result<String> {
         ensure!(!text.trim().is_empty(), "消息不能为空");
         self.validate(binding)?;
         let _lock = self.lock()?;
@@ -311,7 +314,6 @@ impl Store {
             state.bindings.values().any(|b| b.thread == binding.thread),
             "会话绑定已变化"
         );
-        let id = message_id();
         state.messages.push(Delivery {
             id: id.clone(),
             thread: binding.thread.clone(),

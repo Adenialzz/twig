@@ -16,7 +16,7 @@ use std::{io::Stdout, path::PathBuf, sync::mpsc, thread, time::Duration};
 use view::{Entry, Kind};
 
 enum Command {
-    Send(String),
+    Send(String, String),
     Answer(bool),
     Refresh,
     Exit,
@@ -31,7 +31,7 @@ struct View {
     error: Option<String>,
     approval: Option<String>,
     connected: bool,
-    rejected: Option<String>,
+    rejected: Option<(String, String)>,
 }
 
 #[derive(Default)]
@@ -41,6 +41,24 @@ pub struct Draft {
     scroll: u16,
     history_height: u16,
     details: bool,
+    pending: Vec<(String, String)>,
+}
+
+impl Draft {
+    fn merge_pending(&mut self, view: &mut View) {
+        for (id, text) in &self.pending {
+            if view
+                .entries
+                .iter()
+                .any(|entry| entry.id.as_deref() == Some(id))
+            {
+                continue;
+            }
+            let mut entry = Entry::new(Kind::User, text);
+            entry.id = Some(id.clone());
+            view.entries.push(entry);
+        }
+    }
 }
 
 fn answer(request: &Value, accept: bool) -> Result<Value> {
@@ -107,9 +125,10 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
             view.connected = true;
             let result = (|| -> Result<()> {
                 match command {
-                    Some(Command::Send(text)) => {
-                        if let Err(error) = store.enqueue(binding, text.clone()) {
-                            view.rejected = Some(text);
+                    Some(Command::Send(id, text)) => {
+                        if let Err(error) = store.enqueue_with_id(binding, text.clone(), id.clone())
+                        {
+                            view.rejected = Some((id, text));
                             return Err(error);
                         }
                     }
@@ -153,18 +172,24 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 if unknown > 0 {
                     view.status.push_str(&format!(" · 待核对 {unknown}"));
                 }
-                for message in state
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m.status.as_str(), "queued" | "sending" | "failed"))
-                {
-                    let label = match message.status.as_str() {
-                        "queued" => "等待投递",
-                        "sending" => "投递结果待核对",
-                        _ => "投递失败",
+                for message in state.messages.iter().filter(|m| {
+                    m.thread == binding.thread
+                        && matches!(m.status.as_str(), "queued" | "sending" | "sent" | "failed")
+                }) {
+                    if view
+                        .entries
+                        .iter()
+                        .any(|entry| entry.id.as_deref() == Some(&message.id))
+                    {
+                        continue;
+                    }
+                    let kind = if message.text.starts_with("任务反馈：") {
+                        Kind::Workflow
+                    } else {
+                        Kind::User
                     };
-                    let mut entry =
-                        Entry::new(Kind::Workflow, format!("{label}\n{}", message.text));
+                    let mut entry = Entry::new(kind, &message.text);
+                    entry.id = Some(message.id.clone());
                     entry.detail = format!("消息 ID：{}", message.id);
                     view.entries.push(entry);
                     if let Some(error) = &message.error {
@@ -189,8 +214,8 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: mpsc::Sende
                 view.error = Some(format!("{error:#}"));
             }
         } else {
-            if let Some(Command::Send(text)) = command {
-                view.rejected = Some(text);
+            if let Some(Command::Send(id, text)) = command {
+                view.rejected = Some((id, text));
             }
             view.error = last_error.clone();
             view.status = "未连接 · F5 重试".into();
@@ -232,6 +257,7 @@ fn run_ui(
         status: "正在连接 Codex…".into(),
         ..View::default()
     };
+    draft.merge_pending(&mut view);
     let mut dirty = true;
     let mut selection: Option<Selection> = None;
     let mut select_at = None;
@@ -239,7 +265,10 @@ fn run_ui(
     let mut copy_notice = None;
     loop {
         while let Ok(mut update) = views.try_recv() {
-            if let Some(rejected) = update.rejected.take() {
+            if let Some((id, rejected)) = update.rejected.take() {
+                draft.pending.retain(|(pending, _)| pending != &id);
+                view.entries
+                    .retain(|entry| entry.id.as_deref() != Some(&id));
                 draft.text = if draft.text.is_empty() {
                     rejected
                 } else {
@@ -247,9 +276,16 @@ fn run_ui(
                 };
                 draft.cursor = draft.text.len();
             }
+            draft.pending.retain(|(id, _)| {
+                !update
+                    .entries
+                    .iter()
+                    .any(|entry| entry.id.as_deref() == Some(id))
+            });
             if update.error.is_some() && update.entries.is_empty() {
                 update.entries = std::mem::take(&mut view.entries);
             }
+            draft.merge_pending(&mut update);
             view = update;
             dirty = true;
         }
@@ -399,8 +435,11 @@ fn run_ui(
                         draft.cursor += 1;
                     }
                     KeyCode::Enter if !draft.text.trim().is_empty() && view.connected => {
-                        view.status = "正在保存并发送…".into();
-                        tx.send(Command::Send(std::mem::take(&mut draft.text)))?;
+                        let id = super::message_id();
+                        let text = std::mem::take(&mut draft.text);
+                        tx.send(Command::Send(id.clone(), text.clone()))?;
+                        draft.pending.push((id, text));
+                        draft.merge_pending(&mut view);
                         draft.cursor = 0;
                         draft.scroll = 0;
                     }
@@ -450,5 +489,36 @@ fn run_ui(
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_echo_survives_stale_snapshots_and_merges_by_id_not_text() {
+        let mut draft = Draft {
+            pending: vec![("a".into(), "same".into()), ("b".into(), "same".into())],
+            ..Draft::default()
+        };
+        let mut view = View::default();
+        draft.merge_pending(&mut view);
+        draft.merge_pending(&mut view);
+        assert_eq!(view.entries.len(), 2);
+        assert_eq!(draft.pending.len(), 2);
+        let mut fresh = View {
+            entries: view::transcript(
+                &json!({"thread":{"turns":[{"items":[{"type":"userMessage","clientId":"a","content":[{"text":"same"}]}]}]}}),
+            ),
+            ..View::default()
+        };
+        draft.merge_pending(&mut fresh);
+        assert_eq!(fresh.entries.len(), 2);
+        assert_eq!(fresh.entries[0].id.as_deref(), Some("a"));
+        assert_eq!(fresh.entries[1].id.as_deref(), Some("b"));
+        let mut stale = View::default();
+        draft.merge_pending(&mut stale);
+        assert_eq!(stale.entries.len(), 2);
     }
 }

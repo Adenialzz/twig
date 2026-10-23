@@ -82,8 +82,8 @@ class Frontend:
                 return base64.b64decode(matches[-1]).decode()
         raise AssertionError("没有收到 OSC 52 复制请求")
 
-    def wait(self, text):
-        deadline = time.monotonic() + 15
+    def wait(self, text, timeout=15, history=False):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if select.select([self.master], [], [], 0.05)[0]:
                 data = os.read(self.master, 65536)
@@ -94,7 +94,7 @@ class Frontend:
             except IndexError:
                 # PTY 分片可能停在宽字符差分重绘中间，等待后续字节完成该帧。
                 continue
-            if text in "\n".join(display):
+            if text in "\n".join(display[4:-9] if history else display):
                 return
             assert self.process.poll() is None, self.screen.display
         raise AssertionError((text, self.screen.display))
@@ -260,7 +260,12 @@ supports_websockets = false
         frontend.send(b"first-chat-message\r")
         frontend.wait("probe complete 1")
         frontend.absent_for("主控有新消息")
-        frontend.send(b"hold-controller\r")
+        with (state_file.parent / "lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            frontend.send(b"hold-controller\r")
+            frontend.wait("hold-controller", timeout=1, history=True)
+            assert not any(m["text"] == "hold-controller" for m in state()["messages"])
+            fcntl.flock(lock, fcntl.LOCK_UN)
         assert model.entered["controller"].wait(10)
         frontend.send(b"\t")
         frontend.wait("个项目")
@@ -273,6 +278,7 @@ supports_websockets = false
         frontend.wait("Agent*")
         frontend.send(b"\t")
         frontend.wait("probe complete 2")
+        assert "\n".join(frontend.screen.display).count("hold-controller") == 1
         frontend.absent_for("Agent*", 1)
         frontend.send(b"\t")
         frontend.wait("个项目")
