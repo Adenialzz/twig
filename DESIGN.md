@@ -761,3 +761,7 @@ Enter 后 UI 立即追加用户消息，不等待后台保存、投递或历史�
 ### 主控工作流 Skill（2026-10-23）
 
 新增 skills/twig-controller/SKILL.md，随 binary 嵌入，agent init 在主控工作目录缺失时写入 .agents/skills/twig-controller/SKILL.md，已有副本不覆盖。新主控提示词缩短为 skill 入口与实际可执行文件/配置路径。skill 统一受管及普通会话派活、授权边界、子任务主动回报模板、状态核对及验收，明确不以完成事件替代结果。已有主控可显式读取 skill，不改既有 developerInstructions。
+
+### Skill 改为安装时复制（2026-10-23）
+
+按用户确认，make install 复制更新 skill 到 ~/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md；去除 binary 嵌入和运行时安装。不写 Codex 主目录。安装副本随版本覆盖，自定义约定另存；自定义 --config 的主控工作区或直接 cargo install 需手动复制。初始化只引用工作区相对路径，已有会话不自动改指令。

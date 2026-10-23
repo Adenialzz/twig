@@ -37,7 +37,9 @@ Agent 顶部显示 Codex 返回的当前会话模型及推理强度，随会话�
 
 ## 主控 Skill
 
-Twig 内置 `twig-controller` skill，源文件为仓库 `skills/twig-controller/SKILL.md`。打开 Agent 或执行 `agent init` 时，在主控工作目录 `.agents/skills/twig-controller/SKILL.md` 缺失时创建；已有文件保留，不覆盖用户修改。新主控初始化指令指向该 skill。已有主控需要显式阅读该文件；更新已有副本前先比较差异。
+主控使用 `twig-controller` skill，源文件为仓库 `skills/twig-controller/SKILL.md`。`make install` 将它复制更新到 `~/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md`，不安装到 Codex 主目录。该副本随安装覆盖更新，自定义约定请放在其他文件。打开 Agent 或执行 `agent init` 不再安装或修改 skill；新主控指令只引用工作目录下的 `.agents/skills/twig-controller/SKILL.md`，已有主控需显式阅读。
+
+使用 `cargo install` 或直接运行构建产物时，需自行复制该 skill；使用自定义 `--config` 时，将 skill 放到相应主控工作目录的同一相对路径，默认安装不访问这些独立工作目录。
 
 skill 规定每次派活必须传递实际 Twig 可执行文件、配置路径和回报命令，要求子任务阶段完成或阻塞时用 `agent send --message ...` 主动回报主控（不带项目/任务参数）。回报包括任务身份、结果、修改、验证和未完成事项。受管完成回调仅作为唤醒线索，主控仍须核对验收；普通会话尤其不能依赖自动回调。
 

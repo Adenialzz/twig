@@ -233,8 +233,9 @@ supports_websockets = false
         workspace = Path(state()["bindings"]["controller"]["cwd"])
         instructions = (workspace / "AGENTS.md").read_bytes()
         skill_file = workspace / ".agents/skills/twig-controller/SKILL.md"
-        assert skill_file.read_bytes() == (Path(__file__).resolve().parents[1] / "skills/twig-controller/SKILL.md").read_bytes()
-        skill_file.write_text(skill_file.read_text() + "\n用户保留的主控约定\n")
+        assert not skill_file.exists(), "agent init 不应安装 skill"
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text("用户自行安装的主控 skill\n")
         skill_content = skill_file.read_bytes()
         (workspace / "state.md").write_text("用户保留的全局计划")
         frontend.send(b"\x03")

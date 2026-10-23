@@ -224,14 +224,12 @@ impl Store {
             ) {
                 Ok(result) => {
                     check_thread(binding, &result)?;
-                    write_controller_skill(&binding.cwd)?;
                     return Ok(binding.clone());
                 }
                 Err(error) if rpc::thread_not_loaded(&error, &binding.thread) => {
                     match client.call("thread/resume", json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}})) {
                         Ok(result) => {
                             check_thread(binding, &result)?;
-                            write_controller_skill(&binding.cwd)?;
                             return Ok(binding.clone());
                         }
                         Err(error) if rpc::no_rollout(&error, &binding.thread) => {
@@ -252,7 +250,6 @@ impl Store {
         let mut client = rpc::Client::connect(&socket)?;
         let cwd = self.dir.join("workspace");
         fs::create_dir_all(&cwd)?;
-        write_controller_skill(&cwd)?;
         let exe = std::env::current_exe()?;
         let instructions = format!(
             "你是 Twig 主控 Agent，使用中文与用户沟通。Twig 可执行文件：{}；每条命令必须带 --config {}。先读取并遵循工作目录的 .agents/skills/twig-controller/SKILL.md。用 state.md 维护全局计划。每次派活都要求子任务按 skill 中的模板主动向本主控回报结果，并传递上述实际可执行文件和配置路径。遵循用户已授权范围及项目约定。",
@@ -636,15 +633,6 @@ fn message_id() -> String {
             .as_nanos()
     )
 }
-fn write_controller_skill(cwd: &Path) -> Result<()> {
-    let dir = cwd.join(".agents/skills/twig-controller");
-    fs::create_dir_all(&dir)?;
-    write_new(
-        &dir.join("SKILL.md"),
-        include_str!("../../skills/twig-controller/SKILL.md"),
-    )
-}
-
 fn write_new(path: &Path, text: &str) -> Result<()> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => Ok(file.write_all(text.as_bytes())?),
