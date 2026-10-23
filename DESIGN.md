@@ -765,3 +765,7 @@ Enter 后 UI 立即追加用户消息，不等待后台保存、投递或历史�
 ### Skill 改为安装时复制（2026-10-23）
 
 按用户确认，make install 复制更新 skill 到 ~/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md；去除 binary 嵌入和运行时安装。不写 Codex 主目录。安装副本随版本覆盖，自定义约定另存；自定义 --config 的主控工作区或直接 cargo install 需手动复制。初始化只引用工作区相对路径，已有会话不自动改指令。
+
+### Agent 连接占位（2026-10-23）
+
+移除空对话欢迎内容，首次连接及 F5 重连期间仅全屏居中显示“连接中…”，成功后恢复正文和输入框，失败保留正常错误页与 F5 重试。连接期间不接受不可见的新输入，保留 Tab 返回与 Ctrl-C 清空/退出。

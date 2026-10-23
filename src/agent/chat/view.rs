@@ -1,7 +1,7 @@
 use super::{Draft, View};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
@@ -166,28 +166,6 @@ fn markdown(text: &str) -> Vec<Line<'static>> {
 
 fn history(view: &View, draft: &Draft) -> Text<'static> {
     let mut lines = Vec::new();
-    if view.entries.is_empty() {
-        lines.extend([
-            Line::from(""),
-            Line::styled(
-                "今天想推进什么？",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Line::from("把目标交给主控，一起查看项目、拆分任务、跟进结果。"),
-            Line::from(""),
-            Line::styled(
-                "  查看所有项目，汇总需要我处理的事情",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Line::styled(
-                "  给 demo 创建一个任务，修复登录问题",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Line::from(""),
-        ]);
-    }
     for entry in &view.entries {
         let (label, color) = match entry.kind {
             Kind::User => ("你", Color::Cyan),
@@ -289,6 +267,20 @@ pub(super) struct Areas {
 
 pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_cursor: bool) -> Areas {
     let screen = frame.area();
+    if !view.connected && view.error.is_none() {
+        frame.render_widget(
+            Paragraph::new("连接中…")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Cyan)),
+            Rect::new(
+                screen.x,
+                screen.y + screen.height / 2,
+                screen.width,
+                screen.height.min(1),
+            ),
+        );
+        return Areas::default();
+    }
     if screen.width < 32 || screen.height < 12 {
         frame.render_widget(
             Paragraph::new("请扩大终端到至少 32×12\nTab 返回 Console · Ctrl-C 清空/退出"),
@@ -427,6 +419,42 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn connecting_screen_only_shows_centered_text_and_empty_chat_has_no_welcome() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for (width, height) in [(32, 12), (65, 22), (120, 32)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut draft = Draft::default();
+            terminal
+                .draw(|frame| {
+                    draw(frame, &View::default(), &mut draft, true);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text = buffer
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert_eq!(text.split_whitespace().collect::<String>(), "连接中…");
+            let row = (0..width)
+                .map(|x| buffer[(x, height / 2)].symbol())
+                .collect::<String>();
+            assert_eq!(row.split_whitespace().collect::<String>(), "连接中…");
+        }
+        assert!(
+            history(
+                &View {
+                    connected: true,
+                    ..View::default()
+                },
+                &Draft::default()
+            )
+            .lines
+            .is_empty()
+        );
+    }
+
     #[test]
     fn narrow_and_wide_layouts_keep_input_tail_and_errors_visible() {
         use ratatui::{Terminal, backend::TestBackend};

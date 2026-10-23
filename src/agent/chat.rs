@@ -309,6 +309,9 @@ fn run_ui(
                     selection = None;
                 }
                 areas = view::draw(frame, &view, draft, selection.is_none());
+                if !view.connected && view.error.is_none() {
+                    return;
+                }
                 if let Some((x, y)) = select_at.take() {
                     selection = [areas.history, areas.input]
                         .into_iter()
@@ -328,7 +331,18 @@ fn run_ui(
             continue;
         }
         dirty = true;
-        let event = match event::read()? {
+        let event = event::read()?;
+        if !view.connected && view.error.is_none() {
+            match &event {
+                Event::Resize(_, _) => {}
+                Event::Key(key)
+                    if matches!(key.code, KeyCode::Tab | KeyCode::F(5))
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)) => {}
+                _ => continue,
+            }
+        }
+        let event = match event {
             Event::Mouse(mouse)
                 if crate::tabs::clicked(mouse, terminal.get_frame().area())
                     == Some(crate::tabs::Tab::Console) =>
@@ -398,7 +412,12 @@ fn run_ui(
                 }
                 match key.code {
                     KeyCode::Tab => return Ok(false),
-                    KeyCode::F(5) => tx.send(Command::Refresh)?,
+                    KeyCode::F(5) => {
+                        tx.send(Command::Refresh)?;
+                        view.connected = false;
+                        view.error = None;
+                        selection = None;
+                    }
                     KeyCode::F(4) => {
                         draft.details = !draft.details;
                         draft.history_height = 0;
