@@ -753,3 +753,11 @@ Console 采集线程只读当前配置的主控绑定，将其纳入已有 compl
 ### 用户消息立即显示（2026-10-23）
 
 Enter 后 UI 立即追加用户消息，不等待后台保存、投递或历史查询，不显示发送中标记。UI 生成的消息 ID 贯穿持久化和 clientUserMessageId，以 ID 合并本地消息、队列记录与服务端历史，相同文本的不同消息不合并。拒绝保存时保留报错并恢复草稿，未知投递仍使用既有对账流程，不自动重发。
+
+### 普通会话通信与受管生命周期边界（2026-10-23）
+
+澄清未绑定只限制 twig agent send/read，不代表当前 daemon 中的普通 Codex session 不可读取或通信。用户授权并核对 thread ID、cwd、状态后可用底层接口与原 session 通信，结果未知不自动重发；不迁移、不接管，不添加 CLI 或改变生命周期。用户指南、自动化指南、send/read 帮助与未绑定错误、主控新会话初始化指令同步。已有主控的开发者指令和 workspace/AGENTS.md 不热更新，应重新读取 guide；本次不修改真实主控工作区。
+
+### 主控工作流 Skill（2026-10-23）
+
+新增 skills/twig-controller/SKILL.md，随 binary 嵌入，agent init 在主控工作目录缺失时写入 .agents/skills/twig-controller/SKILL.md，已有副本不覆盖。新主控提示词缩短为 skill 入口与实际可执行文件/配置路径。skill 统一受管及普通会话派活、授权边界、子任务主动回报模板、状态核对及验收，明确不以完成事件替代结果。已有主控可显式读取 skill，不改既有 developerInstructions。

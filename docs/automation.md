@@ -61,3 +61,13 @@ new 拒绝已登记的同名任务。open 重用已有窗口，不重复运行�
 ## 可选主控工作流
 
 `twig chat` 提供主控入口。主控通过 `new PROJECT NAME --agent --no-open` 建立受管 session，再通过 `agent send --project PROJECT --task NAME --message 内容` 派活。`agent read` 返回会话历史，`agent status` 返回本地绑定和消息状态；sent 仅表示 Codex 接受，须另外核对任务结果。普通 new 保留原行为。详见 [主控 Agent](agent.md)。
+
+## 已有普通任务与受管任务的通信边界
+
+`twig agent send/read` 面向主控和已绑定的受管任务，受管绑定同时带来持久化投递队列、完成回调和生命周期保护。普通任务没有绑定，不代表其中已有 Codex session 不能通信；也不能假定每个普通任务都运行 Codex，或都能被当前 daemon 看见。
+
+先用 `twig ls PROJECT` 确认 Worktree 路径，再查询当前 daemon 的 `thread/loaded/list`，逐个用 `thread/read` 核对 thread ID、cwd、状态及必要的历史；同目录多个候选时不能仅凭 cwd 选一个。当前服务可见且身份已核对的已有 session，可在用户授权目标和消息范围后通过底层 Codex 接口向原 thread 发送。发送前复查状态，忙碌或不可见时先核对现场；结果未知不能自动重发。具体握手、分页、状态与结果核对见 [普通任务中的现有 Codex session](agent.md#普通任务中的现有-codex-session)。
+
+“不迁移或接管旧任务”限制的是 Twig 受管生命周期，不禁止读取或经授权直接通信。直接通信不会自动增加 Twig 绑定、投递队列、完成回调或受管 session 停止保护，也不能依靠 `agent drain` 核对这些直接请求。普通任务原有资源和进程检查不变；不要通过 new 重建旧任务来绕过未绑定提示。
+
+主控派活规范由 `twig-controller` skill 提供，入口见 [主控 Skill](agent.md#主控-skill)。每次派活都要求子任务主动回报结果或阻塞，明确回报命令所用的可执行文件和配置绝对路径；自动完成回调不替代结果回报。

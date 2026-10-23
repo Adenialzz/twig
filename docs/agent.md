@@ -35,6 +35,12 @@ Agent 顶部显示 Codex 返回的当前会话模型及推理强度，随会话�
 
 离开 Agent 后，主控完成新一轮回复时，Console 和工作台显示 8 秒浮动提醒；多个主控回复合并提醒。任务完成卡片优先，主控卡片随后显示。顶部 `Agent*` 表示有未读，工作台底部显示「Agent 有新消息」；导航按 Tab 查看，工作台先 Ctrl-W d 返回再按 Tab。进入 Agent 清除主控未读和卡片，查看 Agent 期间收到的完成事件静默。首次发现的历史轮次不提醒；提醒只在 Twig 打开期间采集，不持久化，不自动发飞书。
 
+## 主控 Skill
+
+Twig 内置 `twig-controller` skill，源文件为仓库 `skills/twig-controller/SKILL.md`。打开 Agent 或执行 `agent init` 时，在主控工作目录 `.agents/skills/twig-controller/SKILL.md` 缺失时创建；已有文件保留，不覆盖用户修改。新主控初始化指令指向该 skill。已有主控需要显式阅读该文件；更新已有副本前先比较差异。
+
+skill 规定每次派活必须传递实际 Twig 可执行文件、配置路径和回报命令，要求子任务阶段完成或阻塞时用 `agent send --message ...` 主动回报主控（不带项目/任务参数）。回报包括任务身份、结果、修改、验证和未完成事项。受管完成回调仅作为唤醒线索，主控仍须核对验收；普通会话尤其不能依赖自动回调。
+
 ## 创建与派发任务
 
 主控使用与用户相同的 CLI，普通任务仍使用原有启动配置。受管任务显式使用 `--agent`：
@@ -48,11 +54,32 @@ twig agent read --project myapp --task fix/login
 
 `new --agent` 创建 Worktree、`.twig/state.md` 和绑定的 Codex session，再创建专用 tmux 窗口，以 `codex resume --remote ... THREAD_ID` 连接原 session。它替代本任务的 `[tmux]` 启动配置，不额外执行配置中的启动命令，避免重复启动 Agent。普通 `new` 不创建受管 session 或状态文件。
 
-新任务状态文件记录目标、进展、阻塞、下一步和验证结果，由任务 Agent 维护，主控读取。该文件通过共享 Git 目录 `info/exclude` 中的精确规则 `/.twig/state.md` 忽略，不忽略项目 `.twig/config.toml`。若新分支已经包含同名文件，报告冲突并保留现场，不覆盖。不迁移或接管旧任务。
+新任务状态文件记录目标、进展、阻塞、下一步和验证结果，由任务 Agent 维护，主控读取。该文件通过共享 Git 目录 `info/exclude` 中的精确规则 `/.twig/state.md` 忽略，不忽略项目 `.twig/config.toml`。若新分支已经包含同名文件，报告冲突并保留现场，不覆盖。不迁移或接管旧任务指受管生命周期边界，不禁止读取或在用户授权下直接与已有 Codex session 通信。
 
 失败可能已经创建 Worktree、session 或窗口。先检查 `twig ls` 和 `twig agent status`，不要重复执行 new 或删除记录来重试。
 
 `open` 重建缺失的受管窗口时连接原 session。`stop` 中断受管任务当前轮次、取消其尚未投递的消息并关闭窗口；重新 open 才允许继续投递。共享 daemon 不会被停止。删除仍保护活动会话、排队/待核对消息和文件；`.twig/state.md` 属于 ignored 文件，须按现有规则显式选择 `--delete-ignored` 才可删除。
+
+## 普通任务中的现有 Codex session
+
+未绑定不等于不可通信。需要区分两层能力：
+
+| 类型 | 通信方式 | Twig 提供的保障 |
+| --- | --- | --- |
+| Twig 受管任务 | `twig agent send/read --project PROJECT --task TASK` | 明确的 session 绑定、持久化投递队列、完成回调和受管生命周期保护 |
+| 普通任务中的现有 Codex session | 当前 daemon 可见时，经核对与授权，通过底层 Codex app-server 接口通信 | 不自动获得受管绑定、投递队列、完成回调或受管 session 的停止/删除保护；普通任务原有资源与进程检查不变 |
+
+普通任务可能只有 Shell，也可能运行 Codex；其 session 不一定被当前 daemon 看见。`twig agent send/read` 的未绑定错误仅说明该命令不支持此目标，不能据此断言 session 不存在或无法通信，也不要为获得绑定而重复 new、迁移或替换原 session。
+
+发现与核对路径：
+
+1. 用同一 `--config` 下的 `twig ls PROJECT` 取得目标任务 Worktree 的完整路径。用 `codex app-server daemon version` 查询当前服务和 socket，不启动或重启服务。
+2. 通过支持该服务传输方式的 Codex app-server 客户端连接原 socket，完成 `initialize` / `initialized` 握手。分页调用 `thread/loaded/list`，再对候选 ID 调用 `thread/read`（`threadId`、`includeTurns: false`），核对返回的 ID、规范化后的 cwd 和状态。这里列出的是 RPC 方法，不是 Twig 子命令。
+3. cwd 只用于筛选，不能单独证明是目标会话。同一目录可能有多个 session；结合用户指定 ID、会话标题和必要的历史核对，无法唯一确认时先请用户指定。读取历史按当前协议使用 `thread/turns/list` 分页，支持时也可用 `thread/read` 的 `includeTurns: true`；空会话可能尚无 rollout。列表未命中只表示当前服务未发现，不能推断其他服务或原生终端中没有会话。
+4. 向原 session 发送前必须有用户对目标及消息内容/任务范围的授权；已有明确授权无需重复确认。发送前再次核对 ID、cwd 和状态。对已加载且 idle 的目标，可用底层 `turn/start` 指定原 `threadId` 和文本 input；不要创建替代 thread。忙碌、等待审批或不可见时先核对现场，不盲目投递或恢复。idle 不是锁，其他客户端可能在检查后开始新轮次。
+5. 记录请求、目标 ID、客户端消息 ID（当前协议支持时）和返回的 turn ID，再查询历史核对结果。超时或断连可能已经送达；无法确认时报告结果未知，不自动重发。接受消息和完成一轮都不等于任务通过验收。
+
+这条路径不修改 Twig 绑定、notify 配置或任务生命周期，也不会让 `twig agent drain` 替直接发送的消息排队或对账。底层调用仍遵循 Codex 自身权限和审批；接口参数以当前安装版本为准，参考 [Codex app-server 官方协议](https://learn.chatgpt.com/docs/app-server)。Twig 本次不提供普通 session 的直接发送 CLI。
 
 ## 主控 CLI
 
@@ -72,7 +99,7 @@ twig agent notify --message '需要你确认验收条件'
 
 ## 持久化与恢复
 
-默认主控目录为 `~/.twig/controller/`：`workspace/` 保存主控 AGENTS.md 和全局 state.md，`runtime.json` 保存 session 绑定、消息和完成事件。非默认配置文件名使用配置路径标识隔离主控数据，避免同目录多个配置串用。Codex 自身保存对话与轮次历史。
+默认主控目录为 `~/.twig/controller/`：`workspace/` 保存主控 AGENTS.md 和全局 state.md，`runtime.json` 保存 session 绑定、消息和完成事件。非默认配置文件名使用配置路径标识隔离主控数据，避免同目录多个配置串用。Codex 自身保存对话与轮次历史。初始化指令和 workspace/AGENTS.md 不会随 Twig 升级自动覆盖；已有主控需要重新阅读最新 `twig guide agent` 和 `twig guide automation` 获取边界说明。
 
 Twig 不运行独立后台 server。Codex notify 启动短命令转交完成事件；主控自己的完成回调用于消费队列，不会生成无限的自我通知。回调使用创建会话时的 Twig 可执行文件绝对路径，因此不要在任务运行中删除该二进制。安装或移动后，应重新进入 Agent，并核对受管任务的运行配置。
 

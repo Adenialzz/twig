@@ -232,6 +232,10 @@ supports_websockets = false
         # 空 session 没有 rollout，服务重启后必须恢复入口而不是永远卡在旧 ID。
         workspace = Path(state()["bindings"]["controller"]["cwd"])
         instructions = (workspace / "AGENTS.md").read_bytes()
+        skill_file = workspace / ".agents/skills/twig-controller/SKILL.md"
+        assert skill_file.read_bytes() == (Path(__file__).resolve().parents[1] / "skills/twig-controller/SKILL.md").read_bytes()
+        skill_file.write_text(skill_file.read_text() + "\n用户保留的主控约定\n")
+        skill_content = skill_file.read_bytes()
         (workspace / "state.md").write_text("用户保留的全局计划")
         frontend.send(b"\x03")
         frontend.process.wait(timeout=5)
@@ -255,6 +259,7 @@ supports_websockets = false
         frontend.wait("空闲")
         frontend.wait("gpt-5.4 · 推理 high")
         assert (workspace / "AGENTS.md").read_bytes() == instructions
+        assert skill_file.read_bytes() == skill_content
         assert (workspace / "state.md").read_text() == "用户保留的全局计划"
         print("PASS: 空主控卸载后重建绑定，保留 AGENTS.md 和全局计划", flush=True)
         frontend.send(b"first-chat-message\r")

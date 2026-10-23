@@ -28,13 +28,19 @@ pub enum Action {
     /// 查询主控、受管任务和消息投递状态（JSON）
     Status,
     /// 向主控或指定受管任务发消息；忙时排队
+    #[command(
+        after_help = "send 仅支持主控或已绑定的受管任务。普通任务的已有 Codex session 仍可能经核对和用户授权直接通信；见 twig guide agent。此命令不接管已有 session。"
+    )]
     Send {
         #[command(flatten)]
         target: Target,
         #[arg(long)]
         message: String,
     },
-    /// 读取主控或指定任务的 Codex 历史（JSON）
+    /// 读取主控或指定受管任务的 Codex 历史（JSON）
+    #[command(
+        after_help = "read 仅支持主控或已绑定的受管任务；未绑定不代表已有 Codex session 不可读取或通信。发现与核对路径见 twig guide agent。"
+    )]
     Read {
         #[command(flatten)]
         target: Target,
@@ -168,7 +174,7 @@ impl Store {
                 .state()?
                 .get(name)
                 .and_then(|task| task.agent_thread.clone())
-                .context("任务不是受管任务；仅支持通过 twig new --agent 新建的任务")?
+                .context("任务未绑定受管会话，twig agent send/read 不支持此目标；未绑定不代表已有 Codex session 不可通信。核对当前 daemon 的 thread ID、cwd 和状态，经用户授权可通过底层接口通信；见 twig guide agent。不要重复 new 或接管旧任务")?
         } else {
             "controller".into()
         };
@@ -176,7 +182,7 @@ impl Store {
             .bindings
             .get(&id)
             .cloned()
-            .context("尚未绑定会话；主控请运行 twig agent init，任务请通过 twig new --agent 新建")
+            .context("缺少 Twig 会话绑定；主控可运行 twig agent init，已有任务请核对 agent status。普通 session 的读取与授权通信见 twig guide agent；不要重复 new")
     }
     pub fn validate(&self, binding: &Binding) -> Result<()> {
         if let (Some(alias), Some(name)) = (&binding.project, &binding.task) {
@@ -218,12 +224,14 @@ impl Store {
             ) {
                 Ok(result) => {
                     check_thread(binding, &result)?;
+                    write_controller_skill(&binding.cwd)?;
                     return Ok(binding.clone());
                 }
                 Err(error) if rpc::thread_not_loaded(&error, &binding.thread) => {
                     match client.call("thread/resume", json!({"threadId":binding.thread,"excludeTurns":true,"config":{"notify":self.callback()?}})) {
                         Ok(result) => {
                             check_thread(binding, &result)?;
+                            write_controller_skill(&binding.cwd)?;
                             return Ok(binding.clone());
                         }
                         Err(error) if rpc::no_rollout(&error, &binding.thread) => {
@@ -244,9 +252,10 @@ impl Store {
         let mut client = rpc::Client::connect(&socket)?;
         let cwd = self.dir.join("workspace");
         fs::create_dir_all(&cwd)?;
+        write_controller_skill(&cwd)?;
         let exe = std::env::current_exe()?;
         let instructions = format!(
-            "你是 Twig 主控 Agent，使用中文与用户沟通。工作目录中的 state.md 保存全局计划。通过 CLI 管理所有项目与任务。Twig 可执行文件：{}；每次命令必须带 --config {}。\n先阅读 twig guide agent 和 twig guide automation。查询项目使用 twig ls；派活使用 twig new PROJECT TASK --agent --no-open，然后 twig agent send --project PROJECT --task TASK --message 内容。用 twig agent read 查看任务结果。任务在各自 Worktree 工作，维护 .twig/state.md。任务完成回调会给你发消息；等待期间结束本轮，无需轮询或持续推理。轮次结束不等于目标完成，需对照验收标准和测试结果。需要用户决策或重要目标完成时调用 twig agent notify --message 内容，通过飞书提醒。不要把自己的完成事件当成新任务。遵循用户已授权的目标和项目约定。",
+            "你是 Twig 主控 Agent，使用中文与用户沟通。Twig 可执行文件：{}；每条命令必须带 --config {}。先读取并遵循工作目录的 .agents/skills/twig-controller/SKILL.md。用 state.md 维护全局计划。每次派活都要求子任务按 skill 中的模板主动向本主控回报结果，并传递上述实际可执行文件和配置路径。遵循用户已授权范围及项目约定。",
             exe.display(),
             self.registry.display()
         );
@@ -627,6 +636,15 @@ fn message_id() -> String {
             .as_nanos()
     )
 }
+fn write_controller_skill(cwd: &Path) -> Result<()> {
+    let dir = cwd.join(".agents/skills/twig-controller");
+    fs::create_dir_all(&dir)?;
+    write_new(
+        &dir.join("SKILL.md"),
+        include_str!("../../skills/twig-controller/SKILL.md"),
+    )
+}
+
 fn write_new(path: &Path, text: &str) -> Result<()> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => Ok(file.write_all(text.as_bytes())?),
