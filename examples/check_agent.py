@@ -212,6 +212,16 @@ supports_websockets = false
         frontend = Frontend(binary, config, cwd, env)
         frontend.wait("空闲")
         frontend.wait("gpt-5.4 · 推理 high")
+        frontend.send(b"\x1bOQ")  # F2 不再切换页面
+        frontend.absent_for("个项目", 1)
+        frontend.send("清空测试".encode())
+        frontend.wait("清空测试")
+        frontend.send(b"\x03" + "已清空".encode())
+        frontend.wait("已清空")
+        frontend.absent_for("清空测试", 1)
+        frontend.send(b"\x15   \x03" + "空白已清空".encode())
+        frontend.wait("空白已清空")  # 纯空白也先清空，不能退出
+        frontend.send(b"\x15")
         empty_thread = state()["bindings"]["controller"]["thread"]
         frontend.send(b"\t")
         frontend.wait("个项目")
@@ -223,7 +233,7 @@ supports_websockets = false
         workspace = Path(state()["bindings"]["controller"]["cwd"])
         instructions = (workspace / "AGENTS.md").read_bytes()
         (workspace / "state.md").write_text("用户保留的全局计划")
-        frontend.send(b"\x11")
+        frontend.send(b"\x03")
         frontend.process.wait(timeout=5)
         frontend.close()
         frontend = None
@@ -312,7 +322,7 @@ supports_websockets = false
         frontend.send(b"\x15")
         print("PASS: Chat 拖选复制、完整回复复制、诊断展开和中文长输入光标跟随", flush=True)
         print("PASS: Chat 中有历史会话被卸载后恢复原 ID 并继续对话", flush=True)
-        frontend.send(b"\x11")
+        frontend.send(b"\x03")
         frontend.process.wait(timeout=5)
         frontend.close()
         frontend = None
@@ -388,7 +398,7 @@ supports_websockets = false
         frontend.wait("chat-test hold-controller")
         frontend.absent_for("Agent*", 1)
         print("PASS: 工作台主控提醒与未读、返回 Chat 清除", flush=True)
-        frontend.send(b"\x11")
+        frontend.send(b"\x03")
         frontend.process.wait(timeout=5)
         assert frontend.process.returncode == 0
         assert termios.tcgetattr(frontend.slave) == frontend.before

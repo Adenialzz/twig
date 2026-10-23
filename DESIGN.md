@@ -745,3 +745,7 @@ Console 采集线程只读当前配置的主控绑定，将其纳入已有 compl
 ### Agent 标签与居中导航（2026-10-22）
 
 界面 Chat 更名为 Agent，Console / Agent 两个标签整体居中，使用三行圆角边框，选中项为青色。渲染与鼠标命中复用同一布局，窗口缩放同步；Tab 仍来回切换，未读为 Agent*。标签下方单独保留状态行，正文和输入框继续使用全宽。CLI 入口仍为 twig chat，twig agent 保持主控工具子命令。
+
+### Agent 快捷键简化（2026-10-23）
+
+页面切换仅保留 Tab 和点击标签，移除 F2。Agent 页 Ctrl-C 有输入时清空并重置光标，空输入时退出 Twig；纯空白仍算输入。移除 Ctrl-Q 退出绑定，Ctrl-U 仍可清空。退出不向 Codex 发送中断，不停止 daemon 或任务；Console 与工作台既有 Ctrl-C 语义保持原样。

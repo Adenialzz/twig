@@ -287,7 +287,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
     let screen = frame.area();
     if screen.width < 32 || screen.height < 12 {
         frame.render_widget(
-            Paragraph::new("请扩大终端到至少 32×12\nTab 返回 Console · Ctrl-Q 退出"),
+            Paragraph::new("请扩大终端到至少 32×12\nTab 返回 Console · Ctrl-C 清空/退出"),
             screen,
         );
         return Areas::default();
@@ -315,7 +315,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
         frame,
         screen,
         crate::tabs::Tab::Agent,
-        "Tab 切换 · F5 重连 · Ctrl-Q 退出",
+        "Tab 切换 · F5 重连 · Ctrl-C 清空/退出",
         false,
     );
     frame.render_widget(

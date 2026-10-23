@@ -835,7 +835,7 @@ fn run_inner(
                     && crate::tabs::clicked(mouse, terminal.get_frame().area())
                         == Some(crate::tabs::Tab::Agent) =>
             {
-                Event::Key(event::KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+                Event::Key(event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             }
             event => event,
         };
@@ -1025,7 +1025,7 @@ fn run_inner(
             worker.requests.send(app.request())?;
             continue;
         }
-        if matches!(key.code, KeyCode::Tab | KeyCode::F(2)) {
+        if matches!(key.code, KeyCode::Tab) {
             selection = None;
             if open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
                 break;

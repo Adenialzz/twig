@@ -297,7 +297,7 @@ fn run_ui(
                 if crate::tabs::clicked(mouse, terminal.get_frame().area())
                     == Some(crate::tabs::Tab::Console) =>
             {
-                Event::Key(event::KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE))
+                Event::Key(event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             }
             event => event,
         };
@@ -361,14 +361,18 @@ fn run_ui(
                     continue;
                 }
                 match key.code {
-                    KeyCode::Tab | KeyCode::F(2) => return Ok(false),
+                    KeyCode::Tab => return Ok(false),
                     KeyCode::F(5) => tx.send(Command::Refresh)?,
                     KeyCode::F(4) => {
                         draft.details = !draft.details;
                         draft.history_height = 0;
                     }
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(true);
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if draft.text.is_empty() {
+                            return Ok(true);
+                        }
+                        draft.text.clear();
+                        draft.cursor = 0;
                     }
                     KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         tx.send(Command::Answer(true))?
