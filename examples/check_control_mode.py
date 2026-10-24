@@ -28,7 +28,9 @@ class Frontend:
         fcntl.ioctl(
             self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0)
         )
-        self.before = termios.tcgetattr(self.slave)
+        self.before = termios.tcgetattr(self.master)
+        # PENDIN 是内核重排待输入的瞬时标志，不属于需要还原的 raw 模式配置。
+        self.before[3] &= ~termios.PENDIN
         self.screen = pyte.Screen(100, 30)
         self.stream = pyte.ByteStream(self.screen)
         self.output = bytearray()
@@ -83,7 +85,9 @@ class Frontend:
         self.send(b"\x17d")
         self.until(lambda: self.process.poll() is not None, "前端退出")
         assert self.process.returncode == 0
-        assert termios.tcgetattr(self.slave) == self.before
+        restored = termios.tcgetattr(self.master)
+        restored[3] &= ~termios.PENDIN
+        assert restored == self.before, (restored, self.before)
         self.settle()
         assert re.findall(rb"\x1b\[([0-6]) q", self.output)[-1] == b"0"
 

@@ -1175,13 +1175,17 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                 }
                 Err(e) => panic!("{e}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
-                .set_read_timeout(Some(Duration::from_millis(200)))
+                .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut ws = match tungstenite::accept(socket) {
                 Ok(ws) => ws,
                 Err(_) => continue,
             };
+            ws.get_mut()
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
             while !done.load(Ordering::Relaxed) {
                 let text = match ws.read() {
                     Ok(tungstenite::Message::Text(t)) => t,
@@ -1382,10 +1386,14 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
                 }
                 Err(e) => panic!("{e}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
-                .set_read_timeout(Some(Duration::from_millis(100)))
+                .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut ws = tungstenite::accept(socket).unwrap();
+            ws.get_mut()
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
             while !done.load(Ordering::Relaxed) {
                 let text = match ws.read() {
                     Ok(tungstenite::Message::Text(t)) => t,
