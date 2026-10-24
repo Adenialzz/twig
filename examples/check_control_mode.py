@@ -77,9 +77,11 @@ class Frontend:
         until = time.monotonic() + 5
         while time.monotonic() < until:
             self.read_output(0.05)
+            # 先采样退出状态，避免退出条件判断后恰好正常退出却被下面误报。
+            exited = self.process.poll() is not None
             if predicate():
                 return
-            assert self.process.poll() is None, self.screen.display
+            assert not exited, (description, self.process.returncode, self.screen.display)
         raise AssertionError((description, self.screen.display, bytes(self.output[-1500:])))
 
     def detach(self):
@@ -180,15 +182,29 @@ def main():
             second.send(b"\x1b[<65;2;3M" * 12)
             second.wait("SCROLL_059")
             # 有限输出负载：约 120 行，用于交互延迟回归，不是吞吐压测。
-            second.send(b"i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; i=$((i+1)); sleep 0.01; done\r")
+            second.send(b"PS1='LOAD_READY> '; i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; i=$((i+1)); sleep 0.01; done; printf 'LOAD_%s\\n' FINISHED\r")
             second.wait("LOAD_10")
             # 有选区时 Ctrl-C 仍中断 Shell 前台程序，不拦截为复制。
             second.send(b"\x1b[<0;1;3M\x1b[<32;5;3M")
+            second.until(lambda: second.screen.buffer[2][0].reverse, "负载期间选区反显")
             started = time.monotonic()
-            second.send(b"\x03printf 'INPUT_%s\\n' RESPONSIVE\r")
-            second.wait("INPUT_RESPONSIVE")
-            latency = time.monotonic() - started
-            assert latency < 2, latency
+            try:
+                # 中断可能清空终端输入队列；先确认 Shell 已恢复，再发送下一条命令。
+                second.send(b"\x03")
+                second.until(
+                    lambda: any(line.strip() == "LOAD_READY>" for line in second.screen.display),
+                    "Ctrl-C 后返回 Shell",
+                )
+                assert "LOAD_FINISHED" not in mux("capture-pane", "-p", "-S", "-150").decode().splitlines(), "负载自然结束，未被 Ctrl-C 中断"
+                second.send(b"printf 'INPUT_%s\\n' RESPONSIVE\r")
+                second.wait("INPUT_RESPONSIVE")
+                latency = time.monotonic() - started
+                assert latency < 2, latency
+            except AssertionError:
+                print("中断验收失败时的 tmux 实际画面：", flush=True)
+                print(mux("capture-pane", "-p", "-S", "-150").decode(), flush=True)
+                print(mux("list-panes", "-F", "#{pane_id} pid=#{pane_pid} command=#{pane_current_command} dead=#{pane_dead}").decode(), flush=True)
+                raise
 
             # 隔离的模拟程序接收滚轮；右侧非活动 Pane 验证坐标和目标归属。
             receiver = Path(root) / "mouse-input"
