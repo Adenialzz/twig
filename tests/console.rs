@@ -8,7 +8,7 @@ use std::{
         unix::{fs::PermissionsExt, process::CommandExt},
     },
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -24,7 +24,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let repo = temp.path().join("repo");
         let bin = temp.path().join("bin");
         fs::create_dir(&repo).unwrap();
@@ -206,6 +206,7 @@ struct Pty {
     master: File,
     text: String,
     bytes: Vec<u8>,
+    screen_bytes: Vec<u8>,
     original: libc::termios,
 }
 impl Pty {
@@ -248,14 +249,16 @@ impl Pty {
         }
         let original = terminal_attributes(master.as_raw_fd());
         let child = command.spawn().unwrap();
-        unsafe {
-            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
-        }
+        assert_ne!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+            -1
+        );
         Self {
             child,
             master,
             text: String::new(),
             bytes: Vec::new(),
+            screen_bytes: Vec::new(),
             original,
         }
     }
@@ -275,8 +278,7 @@ impl Pty {
             .as_bytes(),
         );
         self.wait("CREATED_OK");
-        self.text.clear();
-        self.bytes.clear();
+        self.clear_output();
         self.send(b"\x17d");
         self.wait("任务 / ");
         self.wait(&format!("› {task}"));
@@ -284,11 +286,71 @@ impl Pty {
     fn send(&mut self, text: &[u8]) {
         self.master.write_all(text).unwrap();
     }
+    fn clear_output(&mut self) {
+        // 只清空当前阶段的捕获，保留屏幕记录以解析后续差量刷新。
+        self.bytes.clear();
+        self.text.clear();
+    }
+    fn read_output(&mut self) {
+        let previous_len = self.bytes.len();
+        let mut bytes = [0; 16384];
+        // 每轮限制读取次数，让持续输出也不能阻止超时和退出检查。
+        for _ in 0..16 {
+            let mut ready = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut ready, 1, 0) };
+            assert_ne!(
+                result,
+                -1,
+                "PTY poll 失败：{}",
+                std::io::Error::last_os_error()
+            );
+            if result == 0 || ready.revents & libc::POLLIN == 0 {
+                break;
+            }
+            match self.master.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.bytes.extend_from_slice(&bytes[..n]);
+                    self.screen_bytes.extend_from_slice(&bytes[..n]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                // Linux 在 PTY 的 slave 关闭后返回 EIO，macOS 返回 EOF。
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                Err(error) => panic!("读取 PTY 输出失败：{error}"),
+            }
+        }
+        if self.bytes.len() != previous_len {
+            self.text = strip_terminal_codes(&self.bytes);
+        }
+    }
+    fn wait_exit(&mut self) -> ExitStatus {
+        let start = Instant::now();
+        loop {
+            self.read_output();
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(12),
+                "等待 PTY 子进程 {} 退出超时，输出：{}",
+                self.child.id(),
+                self.text
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     fn wait(&mut self, needle: &str) {
-        self.wait_for(needle, false);
+        self.wait_for(needle, false, true);
     }
     fn wait_screen(&mut self, needle: &str) {
-        self.wait_for(needle, true);
+        self.wait_for(needle, true, true);
+    }
+    fn wait_screen_absent(&mut self, needle: &str) {
+        self.wait_for(needle, true, false);
     }
     fn screen_text(&self) -> String {
         use alacritty_terminal::{
@@ -308,7 +370,7 @@ impl Pty {
         };
         let mut term = Term::new(Default::default(), &size, VoidListener);
         let mut parser: Processor = Processor::new();
-        parser.advance(&mut term, &self.bytes);
+        parser.advance(&mut term, &self.screen_bytes);
         (0..size.rows)
             .map(|y| {
                 (0..size.cols)
@@ -324,22 +386,16 @@ impl Pty {
             .collect::<Vec<_>>()
             .join("\n")
     }
-    fn wait_for(&mut self, needle: &str, screen: bool) {
+    fn wait_for(&mut self, needle: &str, screen: bool, present: bool) {
         let start = Instant::now();
         loop {
-            let mut bytes = [0; 16384];
-            while let Ok(n) = self.master.read(&mut bytes) {
-                if n == 0 {
-                    break;
-                }
-                self.bytes.extend_from_slice(&bytes[..n]);
-                self.text = strip_terminal_codes(&self.bytes);
-            }
-            if if screen {
+            self.read_output();
+            let found = if screen {
                 self.screen_text().contains(needle)
             } else {
                 self.text.contains(needle)
-            } {
+            };
+            if found == present {
                 if needle.starts_with("TERMINAL_RESTORED:") {
                     let current = terminal_attributes(self.master.as_raw_fd());
                     assert_eq!(current.c_iflag, self.original.c_iflag);
@@ -356,8 +412,12 @@ impl Pty {
             }
             assert!(
                 start.elapsed() < Duration::from_secs(12),
-                "未看到 {needle}: {}",
-                self.text
+                "等待 {needle} 可见={present} 超时：{}",
+                if screen {
+                    self.screen_text()
+                } else {
+                    self.text.clone()
+                }
             );
             thread::sleep(Duration::from_millis(20));
         }
@@ -383,6 +443,19 @@ impl Drop for Pty {
             let _ = self.child.wait();
         }
     }
+}
+
+#[test]
+fn pty_exit_drains_output_larger_than_the_terminal_buffer() {
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        "head -c 65536 /dev/zero | tr '\\000' x; printf '\\nEXIT_DRAINED\\n'",
+    ]);
+    let mut p = Pty::spawn(command);
+    assert!(p.wait_exit().success());
+    p.wait("EXIT_DRAINED");
+    assert!(p.bytes.len() >= 65536);
 }
 
 #[test]
@@ -424,7 +497,7 @@ fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
     p.send(&[127; 9]);
     p.wait_screen("feature/demo");
     p.send(b"\x03q");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -492,7 +565,7 @@ fn navigation_batches_worktree_and_window_queries() {
     );
     assert!(!queries.contains("git branch --show-current"));
     p.send(b"q");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -522,8 +595,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     assert_eq!(STANDARD.decode(&p.bytes[start..end]).unwrap(), b"demo");
     // 缩放清除旧坐标的选区；窄屏仍可拖选，Esc 只清除选区。
     p.resize(80, 24);
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.wait("demo");
     p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
     p.wait_screen("已请求复制 4 chars");
@@ -663,14 +735,14 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
     p.wait_screen("任务 / ");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
     let visited = fs::read(&f.registry).unwrap();
     let mut p = f.terminal(false);
     p.wait_screen("主工作目录");
     order(&p, &["主工作目录", "second", "auth"]);
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
     assert_eq!(fs::read(&f.registry).unwrap(), visited);
 }
 
@@ -720,8 +792,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
                 .join("lock")
                 .exists()
         );
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("任务 / ");
         // 返回后聚焦项目区，按 2 保留任务选择，可以再次进入同一 Shell。
@@ -729,13 +800,12 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("任务 / ");
         p.send(b"q");
         p.wait("TERMINAL_RESTORED:0");
-        assert!(p.child.wait().unwrap().success());
+        assert!(p.wait_exit().success());
     }
 }
 
@@ -780,8 +850,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
             .lines()
             .all(|pid| pids.lines().any(|after| after == pid))
     );
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
@@ -792,8 +861,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     for client in clients.lines() {
         mux(&["detach-client", "-t", client]);
     }
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
     p.send(b"q");
@@ -825,8 +893,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait(&format!("PROJECT_DIR:{}", other.display()));
     p.send(b"\x17d");
     p.wait("任务 / ");
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"/demo\r\r/auth\r\r");
     p.wait(" · 全局 Codex ");
     p.send(b"printf 'TASK_DIR:%s\\n' \"$PWD\"\r");
@@ -871,11 +938,12 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("auth");
     p.send(b"2/auth\r\r");
     p.wait("终端已返回导航：不能在当前");
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"2n");
     p.wait("新建任务");
-    p.send(b"feat/nested\r");
+    p.send(b"feat/nested");
+    p.wait_screen("无匹配分支，将新建分支");
+    p.send(b"\r");
     p.wait("终端已返回导航：不能在当前");
     let state: serde_json::Value = serde_json::from_slice(
         &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
@@ -899,6 +967,11 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         command.args(["-c", "\"$TWIG_TEST_BIN\" --config \"$TWIG_TEST_CONFIG\" \"$@\"; printf '\\nTERMINAL_RESTORED:%s\\n' $?",
             "test", action, "demo", "feat/unified"]);
         let mut p = Pty::spawn(command);
+        // macOS 临时目录较长，详情栏需能完整显示路径，避免按换行片段匹配。
+        p.resize(
+            u16::try_from(target.as_os_str().len() * 2 + 20).unwrap(),
+            36,
+        );
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'DIRECT_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("DIRECT_DIR:{}", target.display()));
@@ -924,25 +997,21 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
             assert_eq!(previous, &pids);
         }
         previous_pids = Some(pids);
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("工作目录");
         p.wait(&target.display().to_string());
         p.send(b"i");
         p.wait("收起");
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"i");
         p.wait("更多");
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"2\r");
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("REENTER_DIR:{}", target.display()));
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("任务 / ");
         p.send(b"q");
@@ -1027,8 +1096,7 @@ fn custom_prefix_directions_alt_resize_and_mouse_work_in_terminal() {
         mux(&["display-message", "-p", "-t", id, "#{pane_width}"]).trim(),
         (width + 6).to_string()
     );
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert!(
@@ -1100,13 +1168,17 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                 }
                 Err(e) => panic!("{e}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
-                .set_read_timeout(Some(Duration::from_millis(200)))
+                .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut ws = match tungstenite::accept(socket) {
                 Ok(ws) => ws,
                 Err(_) => continue,
             };
+            ws.get_mut()
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
             while !done.load(Ordering::Relaxed) {
                 let text = match ws.read() {
                     Ok(tungstenite::Message::Text(t)) => t,
@@ -1307,10 +1379,14 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
                 }
                 Err(e) => panic!("{e}"),
             };
+            socket.set_nonblocking(false).unwrap();
             socket
-                .set_read_timeout(Some(Duration::from_millis(100)))
+                .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut ws = tungstenite::accept(socket).unwrap();
+            ws.get_mut()
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
             while !done.load(Ordering::Relaxed) {
                 let text = match ws.read() {
                     Ok(tungstenite::Message::Text(t)) => t,
@@ -1402,20 +1478,17 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
         p.send(b"\x17d");
         p.wait("任务 / ");
     }
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     if use_picker {
         // 卡片到期后仍能选择未读；取消不会清除记录。
         thread::sleep(Duration::from_secs(9));
         p.send(b"\x17u");
-        p.wait("demo / auth / 未读 1");
+        p.wait_screen("demo / auth / 未读 1");
         p.send(b"\x1b");
-        // 独立 Esc 与下一个快捷键分开，避免终端编码为 Alt-Ctrl-W。
-        thread::sleep(Duration::from_millis(200));
-        p.bytes.clear();
-        p.text.clear();
+        p.wait_screen_absent("demo / auth / 未读 1");
+        p.clear_output();
         p.send(b"\x17u");
-        p.wait("demo / auth / 未读 1");
+        p.wait_screen("demo / auth / 未读 1");
         p.send(b"jk\x1b[B\x1b[A\r");
     } else {
         p.send(b"\x17f");
@@ -1430,8 +1503,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
             .join("auth")
             .display()
     ));
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.resize(138, 36);
     p.send(b"printf 'DISMISSED_%s\\n' OK\r");
     p.wait("DISMISSED_OK");
@@ -1441,14 +1513,12 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
     // 当前实际打开的是 auth：第二轮应静默，不排入下一张卡片。
     // 强制重绘，确认成功跳转后旧提示已关闭，静默轮次也没有提示。
     thread::sleep(Duration::from_secs(9));
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.resize(139, 36);
     p.send(b"printf 'SILENT_TURN_%s\\n' OK\r");
     p.wait("SILENT_TURN_OK");
     assert!(!p.text.contains("Codex 本轮已完成"), "{}", p.text);
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert!(!p.text.contains("[未读"), "{}", p.text);
@@ -1528,8 +1598,7 @@ fn forms_register_create_retry_and_enter_task() {
     p.wait("尚未登记项目");
     p.send(b"n");
     p.wait("登记已有仓库");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x1b");
     // 弹窗外空列表未变化，检查被弹窗遮挡的详情区恢复。
     p.wait("任务详情");
@@ -1557,8 +1626,7 @@ fn forms_register_create_retry_and_enter_task() {
             .join("config.json")
             .exists()
     );
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     // 创建项目后焦点已在任务区；通过候选补全打开任务表单。
     p.send(b"/ne\t\r");
     p.wait("新建任务");
@@ -1571,8 +1639,7 @@ fn forms_register_create_retry_and_enter_task() {
             .join("state.json")
             .exists()
     );
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fmain\r");
     p.created_task(&f, "feat/fresh");
     let state: serde_json::Value = serde_json::from_slice(
@@ -1595,7 +1662,7 @@ fn forms_register_create_retry_and_enter_task() {
     );
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -1674,8 +1741,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     p.wait("使用已有分支");
     // 默认取消，候选选择本身不创建资源。
     p.send(b"\r");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.wait("新建任务");
     assert_eq!(fs::read(&state_path).unwrap(), state_before);
     assert_eq!(refs(), before);
@@ -1712,8 +1778,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         // 默认取消后再次提交，仍须保持同一远端候选。
         p.send(b"\r");
         p.wait("新建任务");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(b"\r");
         p.wait("使用已有分支");
         p.send(b"\t\r");
@@ -1850,8 +1915,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         p.wait("新建任务");
         p.send(b"km");
         p.wait("upstream/feat/km_story");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         // 不按 Tab，直接使用高亮候选。
         p.send(b"\x1b[B\r");
         if stale {
@@ -1870,8 +1934,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         p.wait("分支 upstream/feat/km_story 已存在");
         assert!(!p.text.contains("选择来源"));
         p.send(b"\r");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.wait("新建任务");
         assert_eq!(fs::read(&state_path).unwrap(), before);
         p.send(b"\r");
@@ -2031,7 +2094,7 @@ fn existing_branch_cli_requires_confirmation_and_preserves_commit() {
         p.wait("[y/N]");
         assert_eq!(fs::read(&state_path).unwrap(), before);
         p.send(answer.as_bytes());
-        let status = p.child.wait().unwrap();
+        let status = p.wait_exit();
         assert_eq!(status.success(), answer == "y\n");
     }
     let state: serde_json::Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
@@ -2057,8 +2120,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.send(b"existing\r");
     p.wait("使用已有分支");
     p.send(b"\r");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\r");
     p.wait("使用已有分支");
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
@@ -2072,8 +2134,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.wait("occupied");
     assert_eq!(fs::read(&state_path).unwrap(), before);
     f.git(&["worktree", "remove", occupied.to_str().unwrap()]);
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\r");
     p.wait("使用已有分支");
     p.send(b"\t\r");
@@ -2110,7 +2171,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     let mut p = Pty::spawn(command());
     p.wait("分支编号：");
     p.send(b"\n");
-    assert!(!p.child.wait().unwrap().success());
+    assert!(!p.wait_exit().success());
     assert_eq!(fs::read(&state_path).unwrap(), before);
     let mut p = Pty::spawn(command());
     p.wait("分支编号：");
@@ -2119,7 +2180,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     f.git(&["update-ref", "refs/remotes/upstream/feat/remote", "main"]);
     p.send(b"y\n");
     p.wait("分支已变化");
-    assert!(!p.child.wait().unwrap().success());
+    assert!(!p.wait_exit().success());
     assert_eq!(fs::read(&state_path).unwrap(), before);
     f.git(&[
         "update-ref",
@@ -2131,7 +2192,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     p.send(b"2\n");
     p.wait("[y/N]");
     p.send(b"y\n");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
     let head = Command::new("git")
         .current_dir(&f.repo)
         .args(["rev-parse", "feat/remote"])
@@ -2185,7 +2246,7 @@ fn remote_branch_single_source_and_local_precedence() {
         assert!(!p.text.contains("分支编号"));
         assert_eq!(p.text.contains("upstream/feat/remote"), !local);
         p.send(b"y\n");
-        assert!(p.child.wait().unwrap().success());
+        assert!(p.wait_exit().success());
         let output = Command::new("git")
             .current_dir(&f.repo)
             .args(["rev-parse", "feat/remote"])
@@ -2214,8 +2275,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     p.send(b"\t");
     // 切换来源重置为取消，Enter 返回表单。
     p.send(b"j\r");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\r");
     p.wait("origin/feat/remote");
     p.send(b"j");
@@ -2305,8 +2365,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
         (b"2".as_slice(), "任务 /"),
         (b"1".as_slice(), "› demo"),
     ] {
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(keys);
         p.wait(expected);
     }
@@ -2314,8 +2373,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     p.send(b"2/auth12\r");
     // 切走再切回以读取完整标题，避免把终端差量更新当成完整文本。
     for (keys, expected) in [(b"1", "› demo"), (b"2", "任务 / auth12")] {
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(keys);
         p.wait(expected);
     }
@@ -2327,21 +2385,22 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     p.resize(66, 22);
     p.wait("task12");
     p.send(b"\x03");
+    p.wait_screen_absent("新建任务");
     p.send(b"1");
+    p.wait_screen("项目 /");
     // 前缀取消后 n 仍打开项目表单；表单内 Ctrl-W 不改变焦点。
     p.send(b"\x17");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x1b");
     // 等待独立 Esc 被解析，避免与后续 n 合并为 Alt-n。
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(200));
     p.send(b"n");
-    p.wait("登记已有仓库");
+    p.wait_screen("登记已有仓库");
     p.send(b"\x17l");
     p.send(b"\x03");
     p.send(b"\x03");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2373,7 +2432,7 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
     assert!(registry.contains("[projects.repo]"));
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2400,8 +2459,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
     fs::remove_file(path.join("unsaved")).unwrap();
     // 失败后回到取消，取消勾选删除分支，再明确选择确认。
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b" \t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
@@ -2412,7 +2470,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     p.wait("不能删除主工作目录");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2453,16 +2511,14 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     state["auth"]["branch"] = "auth".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     fs::write(path.join("unsaved"), "keep me").unwrap();
     p.send(b"\t\r");
     p.wait("未提交、未跟踪");
     assert!(path.is_dir());
     f.git(&["show-ref", "--verify", "refs/heads/auth"]);
     fs::remove_file(path.join("unsaved")).unwrap();
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\t\r");
     p.wait("已选中 demo / main");
     let output = Command::new("git")
@@ -2473,7 +2529,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     assert!(!output.status.success());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2502,14 +2558,13 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     p.send(b"\x1b[B \r");
     p.wait("主工作目录");
     assert!(path.join(".venv/data").exists());
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"dd\t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
