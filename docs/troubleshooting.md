@@ -30,7 +30,6 @@ twig ls myapp
 | Worktree 显示 Mismatch | 检查目录存在、当前分支与仓库归属；不要盲目覆盖任务记录 |
 | rm 拒绝删除 | 按错误检查脏文件、ignored 文件、活动进程和合并/upstream；见 cleanup |
 | Worktree 已删但分支删除失败 | Git branch -d 有额外检查；分支和记录仍保留，可用 rm PROJECT NAME --keep-branch 完成清理 |
-| 推送成功但 PR 创建失败 | 远端提交保留；修复 gh/glab 认证、权限或参数问题后重试 pr，不强推回滚 |
 
 ## 手动删除过 Worktree 目录
 

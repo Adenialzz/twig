@@ -50,13 +50,7 @@ twig
 
 ## 完成与清理
 
-提交、审查和合并由 Git 及托管平台负责。需要 PR/MR 时：
-
-```sh
-twig pr myapp feat/login --push
-```
-
-这会显式推送任务分支并查找或创建草稿请求，需要已配置 remote 并安装、登录 gh/glab。详情见 [PR/MR](pr.md)。
+提交、推送、PR/MR、审查和合并由 Git 及托管平台负责，可让 Codex 直接使用 gh/glab 完成。
 
 在其他终端确认任务进程可以结束后：
 

@@ -16,11 +16,10 @@ source <(COMPLETE=zsh twig)
 
 | 输入后按 Tab | 候选来源 |
 | --- | --- |
-| `twig ls ` / `new ` / `open ` / `stop ` / `rm ` / `pr ` | 已登记项目别名 |
-| `twig open myapp ` / `new myapp ` / `stop myapp ` / `rm myapp ` / `pr myapp ` | 该项目的已有任务；`new` 仍可输入新名称 |
+| `twig ls ` / `new ` / `open ` / `stop ` / `rm ` | 已登记项目别名 |
+| `twig open myapp ` / `new myapp ` / `stop myapp ` / `rm myapp ` | 该项目的已有任务；`new` 仍可输入新名称 |
 | `twig new myapp auth --base `、`twig rm myapp auth --target ` | 该项目已有本地分支，不含远端跟踪分支 |
 | `twig add myapp --path /repo --base ` / `--target ` | 指定路径的已有本地分支 |
-| `twig pr myapp auth --remote ` / `--provider ` | Git 实际 remote / 支持的平台 |
 | `--config `、`--path `、`--root ` | 文件或目录路径 |
 
 动态候选按输入前缀过滤，识别光标前的项目别名和 `--config PATH`（也支持 `--config=PATH`）。从任意目录操作同一别名，任务候选相同。

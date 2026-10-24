@@ -1161,7 +1161,6 @@ fn global_commands_ignore_cwd_and_project_removal_preserves_resources() {
         vec!["new", "local"],
         vec!["open", "local"],
         vec!["stop", "local"],
-        vec!["pr", "local"],
         vec!["rm"],
         vec!["rm", "local", "--keep-branch"],
         vec!["rm", "local", "--delete-ignored"],

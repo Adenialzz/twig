@@ -153,12 +153,3 @@ pub fn branches(current: &OsStr) -> Vec<CompletionCandidate> {
         .collect())
     })
 }
-
-pub fn git_remotes(current: &OsStr) -> Vec<CompletionCandidate> {
-    candidates(current, |matches| {
-        Ok(git(&repo_path(matches)?, &["remote"])?
-            .lines()
-            .map(str::to_owned)
-            .collect())
-    })
-}

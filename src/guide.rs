@@ -18,8 +18,6 @@ pub enum Topic {
     Console,
     /// 停止窗口、安全删除与文件保护
     Cleanup,
-    /// 推送及创建草稿 PR/MR
-    Pr,
     /// Zsh 补全安装与使用
     Completion,
     /// Agent 和脚本的非交互调用
@@ -40,7 +38,6 @@ impl Topic {
             Self::Windows => include_str!("../docs/windows.md"),
             Self::Console => include_str!("../docs/console.md"),
             Self::Cleanup => include_str!("../docs/cleanup.md"),
-            Self::Pr => include_str!("../docs/pr.md"),
             Self::Completion => include_str!("../docs/completion.md"),
             Self::Agent => include_str!("../docs/agent.md"),
             Self::Automation => include_str!("../docs/automation.md"),

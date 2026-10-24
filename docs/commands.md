@@ -96,26 +96,6 @@ twig rm myapp auth --keep-branch --delete-ignored --yes
 
 没有 force 选项。默认拒绝脏文件、ignored 文件、活动进程、未合并或相对本地 upstream 尚未推送的提交。完整条件、删除顺序和部分失败见 [安全清理](cleanup.md)（`twig guide cleanup`）。
 
-## pr：查找或创建草稿 PR/MR
-
-```sh
-twig pr myapp auth
-twig pr myapp auth --push --remote origin --target main
-```
-
-PROJECT 和 NAME 必填。这是显式联网命令；已有匹配的开放请求则返回链接，否则创建草稿。
-
-| 选项 | 含义与默认值 |
-| --- | --- |
-| --push | 显式推送任务分支并设置 upstream；默认不推送，不强推 |
-| --remote REMOTE | Git remote；默认 upstream remote，否则唯一 remote |
-| --target BRANCH | 远端目标分支；默认项目 target |
-| --provider github\|gitlab | 公共域名自动识别，自建域名必须指定 |
-| --title TEXT | 新草稿标题，默认任务最新提交标题 |
-| --body-file PATH | 新草稿正文文件，默认最新提交完整说明；相对调用目录解析 |
-
-已有请求不修改标题/正文。带 --push 时即使请求已存在也先推送。只支持同仓库请求；完整预检、认证、URL 限制和失败处理见 [PR/MR](pr.md)（`twig guide pr`）。
-
 ## console：交互面板
 
 ```sh
