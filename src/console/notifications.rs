@@ -1,3 +1,6 @@
+use super::inbox::{Event, Inbox, State as InboxState};
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
@@ -6,16 +9,16 @@ use std::{
 use twig_cli::notification::{CompletionNotice, UnreadTask};
 
 /// 首次成功读取只建立基线；待发消息确认送达后才消耗其 ID。
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Deliveries {
-    initialized: bool,
-    seen: std::collections::HashSet<String>,
+    pub initialized: bool,
+    pub seen: std::collections::HashSet<String>,
 }
 impl Deliveries {
     pub fn observe(
         &mut self,
         state: &crate::agent::State,
-        mut notify: impl FnMut(&crate::agent::Binding) -> anyhow::Result<()>,
+        mut notify: impl FnMut(&crate::agent::Binding, &str) -> anyhow::Result<()>,
     ) -> Vec<String> {
         let mut errors = Vec::new();
         for message in state.messages.iter().filter(|m| m.status == "sent") {
@@ -24,7 +27,7 @@ impl Deliveries {
             }
             if self.initialized
                 && let Some(binding) = state.bindings.values().find(|b| b.thread == message.thread)
-                && let Err(error) = notify(binding)
+                && let Err(error) = notify(binding, &message.id)
             {
                 errors.push(format!("消息 {} 未读检查失败：{error:#}", message.id));
                 continue;
@@ -37,6 +40,7 @@ impl Deliveries {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Completion {
     pub message: bool,
     pub project: String,
@@ -55,9 +59,29 @@ pub struct Notifications {
     current: Option<(CompletionNotice, Instant)>,
     unread: BTreeMap<(String, PathBuf), Unread>,
     sequence: u64,
+    known: std::collections::HashSet<String>,
 }
 
 impl Notifications {
+    pub fn restore(&mut self, state: &InboxState) {
+        self.known
+            .extend(state.unread.iter().map(|event| event.id.clone()));
+        self.sync(state);
+    }
+
+    pub fn sync(&mut self, state: &InboxState) {
+        self.unread.clear();
+        self.sequence = 0;
+        for event in &state.unread {
+            if let Some(task) = &event.task {
+                self.receive(task.clone(), None);
+                if !self.known.insert(event.id.clone()) {
+                    self.queue.pop_back();
+                }
+            }
+        }
+    }
+
     pub fn receive(&mut self, event: Completion, viewed: Option<(&str, &Path)>) {
         if viewed.is_some_and(|(project, path)| project == event.project && path == event.path) {
             return;
@@ -110,6 +134,7 @@ impl Notifications {
         }
     }
 
+    #[cfg(test)]
     pub fn read(&mut self, project: &str, path: &Path) {
         self.unread.remove(&(project.to_owned(), path.to_owned()));
     }
@@ -282,12 +307,54 @@ mod visibility_tests {
 /// 与采集线程共享，按事件发生时所在页面决定是否提醒。
 #[derive(Default)]
 pub struct ChatNotifications {
+    inbox: Option<Inbox>,
+    known: std::collections::HashSet<String>,
     viewing: bool,
     unread: bool,
     pending: bool,
     since: Option<Instant>,
 }
 impl ChatNotifications {
+    pub fn persisted(inbox: Inbox, state: &InboxState) -> Self {
+        Self {
+            unread: state.unread.iter().any(|event| event.task.is_none()),
+            known: state
+                .unread
+                .iter()
+                .filter(|event| event.task.is_none())
+                .map(|event| event.id.clone())
+                .collect(),
+            inbox: Some(inbox),
+            ..Default::default()
+        }
+    }
+
+    pub fn sync(&mut self, state: &InboxState) {
+        self.unread = false;
+        for event in state.unread.iter().filter(|event| event.task.is_none()) {
+            self.unread = true;
+            if self.known.insert(event.id.clone()) {
+                self.receive();
+            }
+        }
+        if !self.unread {
+            self.pending = false;
+            self.since = None;
+        }
+    }
+
+    pub fn record(&mut self, event: Event) -> Result<()> {
+        self.inbox.as_ref().unwrap().record(event, self.viewing)
+    }
+
+    pub fn set_viewing(&mut self, viewing: bool) -> Result<()> {
+        if viewing {
+            self.inbox.as_ref().unwrap().read_controller()?;
+        }
+        self.viewing(viewing);
+        Ok(())
+    }
+
     pub fn viewing(&mut self, viewing: bool) {
         self.viewing = viewing;
         if viewing {
@@ -353,7 +420,7 @@ mod delivery_tests {
         let mut recipients = Vec::new();
         assert!(
             deliveries
-                .observe(state, |binding| {
+                .observe(state, |binding, _| {
                     recipients.push(binding.clone());
                     Ok(())
                 })
@@ -507,7 +574,7 @@ mod delivery_tests {
             message("success", "controller", "sent"),
         ];
         let mut received = Vec::new();
-        let errors = deliveries.observe(&state, |binding| {
+        let errors = deliveries.observe(&state, |binding, _| {
             if binding.thread == "task" {
                 anyhow::bail!("Git 查询超时");
             }

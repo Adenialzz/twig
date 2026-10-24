@@ -1,7 +1,7 @@
 //! 已存在的本机 app-server，只读查询；不启动 daemon、不恢复线程。
 use crate::{console::query, git::checked};
 use anyhow::{Context, Result, bail, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
@@ -96,7 +96,7 @@ pub struct Page {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Turn {
     pub id: String,
     pub status: String,

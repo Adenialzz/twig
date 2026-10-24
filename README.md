@@ -92,7 +92,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 | Agent | `Enter` / `Alt-Enter` | 发送 / 换行 |
 | Agent | `Ctrl-C` | 有输入时清空，无输入时退出 Twig |
 
-通知未读仅保留在当前 Twig 进程中，进入对应任务或 Agent 后清除。工作台中的 `Ctrl-C` 发送给 Pane 内程序；Console 的表单、搜索和帮助有各自的键位规则。完整操作见 [Console](docs/console.md) 和 [主控指南](docs/agent.md)。
+通知未读会持久化，退出重进仍保留，进入对应任务或 Agent 后清除。默认保存在 `~/.twig/notifications.json`，不修改配置文件；重启后补查已建立采集基线的新事件。工作台中的 `Ctrl-C` 发送给 Pane 内程序；Console 的表单、搜索和帮助有各自的键位规则。完整操作见 [Console](docs/console.md) 和 [主控指南](docs/agent.md)。
 
 项目和任务列表按最近成功创建任务或进入工作台的时间排序，重启后保留；仅浏览不更新，重排保留当前选择。
 
