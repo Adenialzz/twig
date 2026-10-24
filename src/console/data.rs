@@ -1,5 +1,5 @@
 use super::{
-    notifications::{ChatNotifications, Completion},
+    notifications::{ChatNotifications, Completion, Deliveries},
     query,
 };
 use crate::{
@@ -465,6 +465,7 @@ fn collect(
     let mut client: Option<Client> = None;
     let mut watched: BTreeMap<String, (PathBuf, Option<Turn>)> = BTreeMap::new();
     let mut announced = HashSet::new();
+    let mut deliveries = Deliveries::default();
     let mut registry_at = None;
     let mut activity_at = None;
     let mut retry_at = None;
@@ -531,14 +532,38 @@ fn collect(
             }
             refresh_windows(&mut snapshot.repos);
             updates.publish(&snapshot);
+            // 本地投递记录不依赖 daemon 连接或重试退避；采集本身不投递消息。
+            let state = crate::agent::Store::new(&registry).and_then(|store| {
+                let state = store.load()?;
+                for binding in deliveries.observe(&state) {
+                    if let (Some(project), Some(task)) = (&binding.project, &binding.task) {
+                        // 旧绑定不能给已删除或同名重建的任务制造未读。
+                        if store.validate(binding).is_ok() {
+                            let _ = completions.send(Completion {
+                                message: true,
+                                project: project.clone(),
+                                task: task.clone(),
+                                path: binding.cwd.clone(),
+                            });
+                        }
+                    } else if state
+                        .bindings
+                        .get("controller")
+                        .is_some_and(|b| b.thread == binding.thread)
+                    {
+                        chat.lock().unwrap().receive();
+                    }
+                }
+                Ok(state)
+            });
             if force || retry_at.is_none_or(|at: Instant| Instant::now() >= at) {
                 let result = (|| -> Result<Vec<Thread>> {
+                    let state = state?;
                     if client.is_none() {
                         client = Some(Client::discover()?);
                     }
                     let client = client.as_mut().unwrap();
                     let threads = client.loaded()?;
-                    let state = crate::agent::Store::new(&registry)?.load()?;
                     let controller = state.bindings.get("controller");
                     let mut owners = Owners::new(&snapshot.repos);
                     let mut paths: BTreeMap<_, _> = threads
@@ -589,6 +614,7 @@ fn collect(
                                     .find(|t| t.path == task_path)
                                     .unwrap();
                                 let _ = completions.send(Completion {
+                                    message: false,
                                     project: project.to_owned(),
                                     path: task_path.to_owned(),
                                     task: task.name.clone(),
@@ -824,6 +850,7 @@ mod tests {
                 ..Default::default()
             });
             out.send(Completion {
+                message: false,
                 project: "repo".into(),
                 path: "/repo".into(),
                 task: index.to_string(),

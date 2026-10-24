@@ -658,7 +658,7 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], status: &str, selection: Opt
         Rect::new(0, area.height.saturating_sub(1), area.width, 1),
     );
     if let Some(pane) = active
-        && !selection.is_some_and(|selection| selection.pane == pane.id)
+        && selection.is_none_or(|selection| selection.pane != pane.id)
         && let Some((x, y)) = pane.cursor
         && pane.rect.x + x < area.width
         && pane.rect.y + y < area.height.saturating_sub(1)

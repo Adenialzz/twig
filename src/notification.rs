@@ -9,6 +9,7 @@ use ratatui::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionNotice {
+    pub message: bool,
     pub project: String,
     pub task: String,
 }
@@ -23,7 +24,11 @@ pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
     };
     draw_card(
         frame,
-        " ✓ Codex 本轮已完成 ",
+        if notice.message {
+            " Agent 收到新消息 "
+        } else {
+            " ✓ Codex 本轮已完成 "
+        },
         vec![
             Line::from(format!("项目：{}", safe(&notice.project))),
             Line::from(format!("任务：{}", safe(&notice.task))),
@@ -38,7 +43,7 @@ pub fn draw_chat(frame: &mut Frame) {
         frame,
         " 主控有新消息 ",
         vec![
-            Line::from("主控已完成回复"),
+            Line::from("主控收到消息或完成回复"),
             Line::from(""),
             Line::from("Ctrl-W f 查看 Agent"),
         ],
@@ -89,6 +94,7 @@ mod tests {
                     draw(
                         frame,
                         &CompletionNotice {
+                            message: false,
                             project: "demo".into(),
                             task: "notify".into(),
                         },
@@ -250,6 +256,7 @@ mod picker_tests {
     fn task(name: &str) -> UnreadTask {
         UnreadTask {
             notice: CompletionNotice {
+                message: false,
                 project: "demo".into(),
                 task: name.into(),
             },

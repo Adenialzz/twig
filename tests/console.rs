@@ -211,7 +211,7 @@ struct Pty {
 impl Pty {
     fn spawn(mut command: Command) -> Self {
         let (mut master, mut slave) = (0, 0);
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: 36,
             ws_col: 140,
             ws_xpixel: 0,
@@ -224,7 +224,7 @@ impl Pty {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &size,
+                    &mut size,
                 )
             },
             0
@@ -2446,4 +2446,59 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
+fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
+    let mut f = Fixture::new();
+    f.registry = f.temp.path().join("config.toml");
+    f.init();
+    let project_state = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let mut tasks: serde_json::Value =
+        serde_json::from_slice(&fs::read(&project_state).unwrap()).unwrap();
+    let task_path = tasks["auth"]["path"].clone();
+    tasks["auth"]["agent_thread"] = serde_json::json!("task-thread");
+    fs::write(&project_state, serde_json::to_vec(&tasks).unwrap()).unwrap();
+    let dir = f.temp.path().join("controller");
+    fs::create_dir(&dir).unwrap();
+    let mut state = serde_json::json!({
+        "bindings": {
+            "controller": {"thread":"controller-thread", "cwd":dir, "project":null, "task":null, "stopped":false},
+            "task-thread": {"thread":"task-thread", "cwd":task_path, "project":"demo", "task":"auth", "stopped":false}
+        },
+        "messages": [{"id":"old", "thread":"task-thread", "text":"历史", "status":"sent", "turn":null, "error":null}],
+        "seen":[], "socket":null
+    });
+    let save = |state: &serde_json::Value| {
+        let temp = dir.join("next.json");
+        fs::write(&temp, serde_json::to_vec(state).unwrap()).unwrap();
+        fs::rename(temp, dir.join("runtime.json")).unwrap();
+    };
+    save(&state);
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    thread::sleep(Duration::from_secs(3));
+    p.send(b"\x17u");
+    p.wait("暂无未读任务");
+    p.send(b"\x17u");
+    state["messages"].as_array_mut().unwrap().push(serde_json::json!({"id":"new", "thread":"task-thread", "text":"新派活", "status":"sent", "turn":null, "error":null}));
+    save(&state);
+    p.wait("Agent 收到新消息");
+    p.send(b"\x17f");
+    p.wait(" · 全局 Codex ");
+    p.send(b"\x17u");
+    p.wait("暂无未读任务");
+    p.send(b"\x17u\x17d");
+    p.wait("任务 / ");
+    state["messages"].as_array_mut().unwrap().push(serde_json::json!({"id":"feedback", "thread":"controller-thread", "text":"子任务反馈", "status":"sent", "turn":null, "error":null}));
+    save(&state);
+    p.wait("主控有新消息");
+    p.wait("Agent*");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(dir.join("runtime.json")).unwrap())
+            .unwrap(),
+        state
+    );
 }

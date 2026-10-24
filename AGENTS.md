@@ -89,3 +89,5 @@
 - 变更主控后构建正式 binary，执行 `uv run examples/check_agent.py`，使用独立 CODEX_HOME、app-server、tmux socket、本地固定模型与模拟飞书。禁止连接真实用户会话或向真实 webhook 发消息来验收。协议实验为 `uv run examples/check_controller.py`。
 
 - Agent 通信线程惰性创建并随 Console 保留，切 Tab 不销毁；最新快照与拒收结果分别保存，正常退出处理完已接受的发送命令。单会话补查和投递错误不可阻断其他绑定；不得重发结果未知的消息。主控不提供通用审批快捷键，其他交互请求交给原生 Codex。
+
+- Agent 消息未读只读采集当前配置的投递记录，仅 sent 按消息 ID 去重；首次读取历史建立基线，排队、失败和未知投递不提醒。接收方为任务时实时核对绑定，避免同名重建误标；主控与任务沿用查看静默和进入清除，原轮次完成提醒保留。

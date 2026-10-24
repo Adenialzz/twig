@@ -5,7 +5,33 @@ use std::{
 };
 use twig_cli::notification::{CompletionNotice, UnreadTask};
 
+/// 首次成功读取只建立基线；待发消息确认送达后才消耗其 ID。
+#[derive(Default)]
+pub struct Deliveries {
+    initialized: bool,
+    seen: std::collections::HashSet<String>,
+}
+impl Deliveries {
+    pub fn observe<'a>(
+        &mut self,
+        state: &'a crate::agent::State,
+    ) -> Vec<&'a crate::agent::Binding> {
+        let mut recipients = Vec::new();
+        for message in state.messages.iter().filter(|m| m.status == "sent") {
+            if self.seen.insert(message.id.clone())
+                && self.initialized
+                && let Some(binding) = state.bindings.values().find(|b| b.thread == message.thread)
+            {
+                recipients.push(binding);
+            }
+        }
+        self.initialized = true;
+        recipients
+    }
+}
+
 pub struct Completion {
+    pub message: bool,
     pub project: String,
     pub path: PathBuf,
     pub task: String,
@@ -31,6 +57,7 @@ impl Notifications {
         }
         self.sequence += 1;
         let notice = CompletionNotice {
+            message: event.message,
             project: event.project.clone(),
             task: event.task,
         };
@@ -102,6 +129,7 @@ mod tests {
         for (project, task) in [("a", "one"), ("a", "two"), ("b", "one")] {
             notices.receive(
                 Completion {
+                    message: false,
                     project: project.into(),
                     path: format!("/{project}/{task}").into(),
                     task: task.into(),
@@ -136,6 +164,7 @@ mod tests {
         for (project, task) in [("a", "one"), ("b", "two"), ("a", "one")] {
             notices.receive(
                 Completion {
+                    message: false,
                     project: project.into(),
                     path: format!("/{project}/{task}").into(),
                     task: task.into(),
@@ -162,6 +191,7 @@ mod tests {
         for task in ["one", "two"] {
             notices.receive(
                 Completion {
+                    message: false,
                     project: "demo".into(),
                     path: format!("/{task}").into(),
                     task: task.into(),
@@ -198,6 +228,7 @@ mod visibility_tests {
             let mut notices = Notifications::default();
             notices.receive(
                 Completion {
+                    message: false,
                     project: "demo".into(),
                     path: "/task".into(),
                     task: "task".into(),
@@ -273,5 +304,134 @@ mod chat_tests {
         assert_eq!(chat.status(shown, true), (false, false));
         chat.viewing(false);
         assert_eq!(chat.status(shown, true), (false, false));
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use crate::agent::{Binding, Delivery, State};
+
+    fn message(id: &str, thread: &str, status: &str) -> Delivery {
+        Delivery {
+            id: id.into(),
+            thread: thread.into(),
+            text: "相同正文".into(),
+            status: status.into(),
+            turn: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn delivery_baseline_transitions_and_recipient_visibility() {
+        let mut state = State::default();
+        for (key, thread, project, task) in [
+            ("controller", "controller-id", None, None),
+            (
+                "task-id",
+                "task-id",
+                Some("demo".into()),
+                Some("work".into()),
+            ),
+        ] {
+            state.bindings.insert(
+                key.into(),
+                Binding {
+                    thread: thread.into(),
+                    cwd: "/work".into(),
+                    project,
+                    task,
+                    stopped: false,
+                },
+            );
+        }
+        state.messages = vec![
+            message("history", "controller-id", "sent"),
+            message("pending", "task-id", "queued"),
+        ];
+        let mut deliveries = Deliveries::default();
+        assert!(deliveries.observe(&state).is_empty());
+        state.messages.extend([
+            message("unknown", "controller-id", "sending"),
+            message("failed", "task-id", "failed"),
+            message("cancelled", "task-id", "cancelled"),
+        ]);
+        assert!(deliveries.observe(&state).is_empty());
+        state.messages[1].status = "sent".into();
+        state.messages[2].status = "sent".into();
+        let recipients = deliveries.observe(&state);
+        assert_eq!(
+            recipients
+                .iter()
+                .map(|b| b.thread.as_str())
+                .collect::<Vec<_>>(),
+            ["task-id", "controller-id"]
+        );
+        let mut tasks = Notifications::default();
+        let mut chat = ChatNotifications::default();
+        chat.viewing(true);
+        for binding in recipients {
+            if let (Some(project), Some(task)) = (&binding.project, &binding.task) {
+                tasks.receive(
+                    Completion {
+                        message: true,
+                        project: project.clone(),
+                        task: task.clone(),
+                        path: binding.cwd.clone(),
+                    },
+                    None,
+                );
+            } else {
+                chat.receive();
+            }
+        }
+        tasks.tick(Instant::now());
+        assert!(tasks.current().unwrap().message);
+        assert_eq!(tasks.count("demo", None), 1);
+        assert_eq!(chat.status(Instant::now(), true), (false, false));
+        assert!(deliveries.observe(&state).is_empty());
+        tasks.read("demo", Path::new("/work"));
+        tasks.receive(
+            Completion {
+                message: true,
+                project: "demo".into(),
+                task: "work".into(),
+                path: "/work".into(),
+            },
+            Some(("demo", Path::new("/work"))),
+        );
+        assert_eq!(tasks.count("demo", None), 0);
+        state
+            .messages
+            .push(message("same-text-new-id", "controller-id", "sent"));
+        chat.viewing(false);
+        for _ in deliveries.observe(&state) {
+            chat.receive();
+        }
+        assert_eq!(chat.status(Instant::now(), true), (true, true));
+        chat.viewing(true);
+        assert_eq!(chat.status(Instant::now(), true), (false, false));
+    }
+
+    #[test]
+    fn empty_baseline_and_replaced_bindings_do_not_replay_old_messages() {
+        let mut state = State::default();
+        let mut deliveries = Deliveries::default();
+        assert!(deliveries.observe(&state).is_empty());
+        state.bindings.insert(
+            "controller".into(),
+            Binding {
+                thread: "new".into(),
+                cwd: "/work".into(),
+                project: None,
+                task: None,
+                stopped: false,
+            },
+        );
+        state.messages.push(message("old", "old", "sent"));
+        state.messages.push(message("new", "new", "sent"));
+        assert_eq!(deliveries.observe(&state).len(), 1);
+        assert!(deliveries.observe(&state).is_empty());
     }
 }
