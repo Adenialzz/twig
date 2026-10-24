@@ -53,6 +53,19 @@ jobs:
       - name: 安装 macOS 测试依赖
         if: runner.os == 'macOS'
         run: brew install tmux zsh
+      - name: 检查并修正 Linux Zsh 补全目录权限
+        if: runner.os == 'Linux'
+        shell: zsh {0}
+        run: |
+          autoload -Uz compaudit
+          insecure=("${(@f)$(compaudit)}")
+          set -e
+          for directory in "${insecure[@]}"; do
+            [[ -n "$directory" ]] || continue
+            print -r -- "修正补全路径权限：$directory"
+            sudo chmod go-w -- "$directory"
+          done
+          compaudit
       - name: 记录环境版本
         run: |
           rustc --version

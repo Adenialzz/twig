@@ -8,7 +8,7 @@ use std::{
         unix::{fs::PermissionsExt, process::CommandExt},
     },
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -284,6 +284,37 @@ impl Pty {
     fn send(&mut self, text: &[u8]) {
         self.master.write_all(text).unwrap();
     }
+    fn read_output(&mut self) {
+        let mut bytes = [0; 16384];
+        // 每轮限制读取次数，让持续输出也不能阻止超时和退出检查。
+        for _ in 0..16 {
+            match self.master.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(n) => self.bytes.extend_from_slice(&bytes[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                // Linux 在 PTY 的 slave 关闭后返回 EIO，macOS 返回 EOF。
+                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                Err(error) => panic!("读取 PTY 输出失败：{error}"),
+            }
+        }
+        self.text = strip_terminal_codes(&self.bytes);
+    }
+    fn wait_exit(&mut self) -> ExitStatus {
+        let start = Instant::now();
+        loop {
+            self.read_output();
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(12),
+                "等待 PTY 子进程 {} 退出超时，输出：{}",
+                self.child.id(),
+                self.text
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     fn wait(&mut self, needle: &str) {
         self.wait_for(needle, false);
     }
@@ -327,14 +358,7 @@ impl Pty {
     fn wait_for(&mut self, needle: &str, screen: bool) {
         let start = Instant::now();
         loop {
-            let mut bytes = [0; 16384];
-            while let Ok(n) = self.master.read(&mut bytes) {
-                if n == 0 {
-                    break;
-                }
-                self.bytes.extend_from_slice(&bytes[..n]);
-                self.text = strip_terminal_codes(&self.bytes);
-            }
+            self.read_output();
             if if screen {
                 self.screen_text().contains(needle)
             } else {
@@ -386,6 +410,19 @@ impl Drop for Pty {
 }
 
 #[test]
+fn pty_exit_drains_output_larger_than_the_terminal_buffer() {
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        "head -c 262144 /dev/zero | tr '\\000' x; printf '\\nEXIT_DRAINED\\n'",
+    ]);
+    let mut p = Pty::spawn(command);
+    assert!(p.wait_exit().success());
+    p.wait("EXIT_DRAINED");
+    assert!(p.bytes.len() >= 262144);
+}
+
+#[test]
 fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
     let f = Fixture::new();
     f.init();
@@ -424,7 +461,7 @@ fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
     p.send(&[127; 9]);
     p.wait_screen("feature/demo");
     p.send(b"\x03q");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -492,7 +529,7 @@ fn navigation_batches_worktree_and_window_queries() {
     );
     assert!(!queries.contains("git branch --show-current"));
     p.send(b"q");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -663,14 +700,14 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
     p.wait_screen("任务 / ");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
     let visited = fs::read(&f.registry).unwrap();
     let mut p = f.terminal(false);
     p.wait_screen("主工作目录");
     order(&p, &["主工作目录", "second", "auth"]);
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
     assert_eq!(fs::read(&f.registry).unwrap(), visited);
 }
 
@@ -735,7 +772,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait("任务 / ");
         p.send(b"q");
         p.wait("TERMINAL_RESTORED:0");
-        assert!(p.child.wait().unwrap().success());
+        assert!(p.wait_exit().success());
     }
 }
 
@@ -1595,7 +1632,7 @@ fn forms_register_create_retry_and_enter_task() {
     );
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2031,7 +2068,7 @@ fn existing_branch_cli_requires_confirmation_and_preserves_commit() {
         p.wait("[y/N]");
         assert_eq!(fs::read(&state_path).unwrap(), before);
         p.send(answer.as_bytes());
-        let status = p.child.wait().unwrap();
+        let status = p.wait_exit();
         assert_eq!(status.success(), answer == "y\n");
     }
     let state: serde_json::Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
@@ -2110,7 +2147,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     let mut p = Pty::spawn(command());
     p.wait("分支编号：");
     p.send(b"\n");
-    assert!(!p.child.wait().unwrap().success());
+    assert!(!p.wait_exit().success());
     assert_eq!(fs::read(&state_path).unwrap(), before);
     let mut p = Pty::spawn(command());
     p.wait("分支编号：");
@@ -2119,7 +2156,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     f.git(&["update-ref", "refs/remotes/upstream/feat/remote", "main"]);
     p.send(b"y\n");
     p.wait("分支已变化");
-    assert!(!p.child.wait().unwrap().success());
+    assert!(!p.wait_exit().success());
     assert_eq!(fs::read(&state_path).unwrap(), before);
     f.git(&[
         "update-ref",
@@ -2131,7 +2168,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     p.send(b"2\n");
     p.wait("[y/N]");
     p.send(b"y\n");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
     let head = Command::new("git")
         .current_dir(&f.repo)
         .args(["rev-parse", "feat/remote"])
@@ -2185,7 +2222,7 @@ fn remote_branch_single_source_and_local_precedence() {
         assert!(!p.text.contains("分支编号"));
         assert_eq!(p.text.contains("upstream/feat/remote"), !local);
         p.send(b"y\n");
-        assert!(p.child.wait().unwrap().success());
+        assert!(p.wait_exit().success());
         let output = Command::new("git")
             .current_dir(&f.repo)
             .args(["rev-parse", "feat/remote"])
@@ -2341,7 +2378,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     p.send(b"\x03");
     p.send(b"\x03");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2373,7 +2410,7 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
     assert!(registry.contains("[projects.repo]"));
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2412,7 +2449,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     p.wait("不能删除主工作目录");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2473,7 +2510,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     assert!(!output.status.success());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
@@ -2509,7 +2546,7 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     assert!(!path.exists());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
-    assert!(p.child.wait().unwrap().success());
+    assert!(p.wait_exit().success());
 }
 
 #[test]
