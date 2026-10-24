@@ -512,13 +512,13 @@ fn open_terminal(
     worker.requests.send(background)?;
     let mut usage_error = None;
     let result = loop {
-        let mut recorded = false;
+        let mut recorded = None;
         let initial_task = app.task.clone();
         let result =
             twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
-                if !recorded {
-                    recorded = true;
-                    usage_error = crate::registry::record_use(registry, &target.project)
+                if recorded.as_deref() != Some(task) {
+                    recorded = Some(task.to_owned());
+                    usage_error = crate::registry::record_use(registry, &target.project, task)
                         .err()
                         .map(|error| format!("{error:#}"));
                 }

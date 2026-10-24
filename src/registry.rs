@@ -22,6 +22,8 @@ pub struct Entry {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub task_last_used: BTreeMap<String, u64>,
 }
 
 pub fn expand(path: &Path) -> Result<PathBuf> {
@@ -73,20 +75,20 @@ pub fn entry(path: &Path, name: &str) -> Result<Entry> {
 }
 
 /// 仅成功创建任务或进入工作台时记录使用时间，读取操作不写入。
-pub fn record_use(path: &Path, name: &str) -> Result<()> {
+pub fn record_use(path: &Path, name: &str, task: &str) -> Result<()> {
     let _lock = config::Lock::acquire(path.with_extension("lock"))?;
     let mut registry = load(path)?;
     let entry = registry
         .projects
         .get_mut(name)
         .context("使用记录对应的项目已取消登记")?;
-    entry.last_used = Some(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-            .try_into()?,
-    );
-    save(path, &registry).context("任务操作已成功，但保存项目使用时间失败")
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
+    entry.last_used = Some(now);
+    entry.task_last_used.insert(task.to_owned(), now);
+    save(path, &registry).context("任务操作已成功，但保存项目和任务使用时间失败")
 }
 
 pub fn recent_projects(path: &Path) -> Result<Vec<(String, Entry)>> {
@@ -185,6 +187,7 @@ fn initialize(
             Entry {
                 path: main,
                 last_used: None,
+                task_last_used: BTreeMap::new(),
             },
         );
         save(path, &registry).context("项目已初始化，但全局登记保存失败；请重试 twig add")?;
@@ -229,17 +232,21 @@ last_used = 1
         };
         assert_eq!(names(), ["beta", "gamma", "alpha"]);
         assert_eq!(fs::read(&path).unwrap(), before);
-        record_use(&path, "alpha").unwrap();
+        record_use(&path, "alpha", "feat/auth").unwrap();
         assert_eq!(names(), ["alpha", "beta", "gamma"]);
         let registry = load(&path).unwrap();
         assert_eq!(registry.projects["alpha"].path, Path::new("/alpha"));
         assert!(registry.projects["alpha"].last_used.unwrap() > 1);
         assert_eq!(
+            registry.projects["alpha"].task_last_used["feat/auth"],
+            registry.projects["alpha"].last_used.unwrap()
+        );
+        assert_eq!(
             registry.tmux.unwrap().panes[0].command.as_deref().unwrap(),
             ["echo", "hello"]
         );
         let saved = fs::read(&path).unwrap();
-        assert!(record_use(&path, "missing").is_err());
+        assert!(record_use(&path, "missing", "main").is_err());
         assert_eq!(fs::read(&path).unwrap(), saved);
     }
 }

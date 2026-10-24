@@ -284,7 +284,7 @@ fn execute(cli: Cli) -> Result<()> {
                 },
             )?;
             drop(lock); // 工作台交互期间不能持有项目锁。
-            registry::record_use(&registry_path, &alias)?;
+            registry::record_use(&registry_path, &alias, &name)?;
             if no_open {
                 Ok(())
             } else {

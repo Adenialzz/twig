@@ -245,6 +245,9 @@ pub fn repositories(registry_path: &Path) -> Result<Vec<Repo>> {
                         checked: None,
                     });
                 }
+                repo.tasks.sort_by_key(|task| {
+                    std::cmp::Reverse(entry.task_last_used.get(&task.name).copied())
+                });
                 repo.context = Some((project, config));
                 Ok(())
             })();

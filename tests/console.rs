@@ -611,10 +611,74 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
     );
 }
 #[test]
+fn task_visit_order_persists_and_browsing_is_readonly() {
+    let f = Fixture::new();
+    f.init();
+    thread::sleep(Duration::from_millis(2));
+    f.twig(&["new", "demo", "second", "--no-open"]);
+    let created = fs::read(&f.registry).unwrap();
+    let order = |p: &Pty, names: &[&str]| {
+        let screen = p.screen_text();
+        let positions: Vec<_> = names
+            .iter()
+            .map(|name| screen.find(name).unwrap())
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{screen}"
+        );
+    };
+    let mut p = f.terminal(false);
+    p.wait_screen("主工作目录");
+    order(&p, &["second", "auth", "主工作目录"]);
+    p.send(b"2/main\r");
+    p.wait_screen("任务 / main");
+    assert_eq!(fs::read(&f.registry).unwrap(), created);
+    p.send(b"\r");
+    p.wait(" · 全局 Codex ");
+    p.send(b"printf 'VISITED_%s\\n' MAIN\r");
+    p.wait("VISITED_MAIN");
+    p.send(b"\x17d");
+    p.wait_screen("任务 / main");
+    p.send(b"2/\r");
+    p.wait_screen("second");
+    // 等待返回导航后的最新快照；浏览不会刷新访问时间。
+    let start = Instant::now();
+    loop {
+        p.wait_screen("主工作目录");
+        let screen = p.screen_text();
+        if screen.find("主工作目录") < screen.find("second") {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(50));
+    }
+    order(&p, &["主工作目录", "second", "auth"]);
+    // 清空筛选和重排后，Enter 仍进入先前选中的主工作目录。
+    p.send(b"\r");
+    p.wait(" · 全局 Codex ");
+    p.send(b"printf 'VISIT_DIR:%s\\n' \"$PWD\"\r");
+    p.wait(&format!("VISIT_DIR:{}", f.repo.display()));
+    p.send(b"\x17d");
+    p.wait_screen("任务 / ");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.child.wait().unwrap().success());
+    let visited = fs::read(&f.registry).unwrap();
+    let mut p = f.terminal(false);
+    p.wait_screen("主工作目录");
+    order(&p, &["主工作目录", "second", "auth"]);
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.child.wait().unwrap().success());
+    assert_eq!(fs::read(&f.registry).unwrap(), visited);
+}
+
+#[test]
 fn enter_main_and_task_releases_lock_and_restores_terminal() {
     let f = Fixture::new();
     f.init();
-    for keys in [b"Ggg\r".as_slice(), b"G\r".as_slice()] {
+    for keys in [b"/main\r\r".as_slice(), b"/auth\r\r".as_slice()] {
         let mut p = f.terminal(false);
         p.wait("auth");
         let before_entry = fs::read(&f.registry).unwrap();
@@ -623,7 +687,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.send(b"/auth");
         p.wait("搜索：");
         p.send(b"\r");
-        // 返回项目后重新 Enter，应清除任务筛选并选中主工作目录。
+        // 返回项目后重新 Enter，应清除任务筛选，再按名称定位目标。
         p.send(b"1\r");
         assert_eq!(fs::read(&f.registry).unwrap(), before_entry);
         p.send(keys);
@@ -640,7 +704,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
                 > 0
         );
         p.send(b"printf 'SELECTED_DIR:%s\n' \"$PWD\"\r");
-        let expected = if keys == b"Ggg\r" {
+        let expected = if keys == b"/main\r\r" {
             f.repo.canonicalize().unwrap()
         } else {
             f.repo
@@ -694,7 +758,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     };
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"2G\r");
+    p.send(b"2/auth\r\r");
     p.wait(" · 全局 Codex ");
     p.send(b"printf 'FIRST_%s\\n' PANE\r");
     p.wait("FIRST_PANE");
@@ -763,7 +827,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("任务 / ");
     p.text.clear();
     p.bytes.clear();
-    p.send(b"/demo\r\rG\r");
+    p.send(b"/demo\r\r/auth\r\r");
     p.wait(" · 全局 Codex ");
     p.send(b"printf 'TASK_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
@@ -805,7 +869,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     ]);
     let mut p = Pty::spawn(command);
     p.wait("auth");
-    p.send(b"2G\r");
+    p.send(b"2/auth\r\r");
     p.wait("终端已返回导航：不能在当前");
     p.text.clear();
     p.bytes.clear();
@@ -901,7 +965,7 @@ fn custom_prefix_directions_alt_resize_and_mouse_work_in_terminal() {
     };
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"2G\r");
+    p.send(b"2/auth\r\r");
     p.wait(" · 全局 Codex ");
     p.send(b"\x17s");
     p.send(b"printf 'SPLIT_%s\\n' READY\r");
@@ -1110,7 +1174,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     let guard = Stop(stop);
     let mut p = f.terminal(false);
     p.wait("LIVE_THR");
-    p.send(b"h");
+    p.send(b"2/main\r\x17jh");
     p.wait("HISTORY_");
     // 按协议日志等待实际分页完成，而非仅凭屏幕中历史提示。
     let start = Instant::now();
@@ -2321,9 +2385,9 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\r/delete\r");
+    p.send(b"\r/main\r/delete\r");
     p.wait("不能删除主工作目录");
-    p.send(b"G/delete\r");
+    p.send(b"/auth\r/delete\r");
     p.wait("确认删除");
     // 默认取消，Enter 不产生写操作。
     p.send(b"\r");
@@ -2377,7 +2441,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     ]);
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\rGd");
+    p.send(b"\r/auth\rd");
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     p.send(b"d");
     p.wait("确认删除");
@@ -2426,7 +2490,7 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     fs::write(path.join(".venv/data"), "ignored").unwrap();
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\rGdd");
+    p.send(b"\r/auth\rdd");
     p.wait("同时删除被忽略文件");
     p.send(b"\x1b[6~");
     p.wait(".venv/");
