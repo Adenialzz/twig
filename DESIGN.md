@@ -806,21 +806,17 @@ README 按项目定位、核心能力、安装、普通/主控两种快速开始
 
 ### GitHub Actions 持续集成（2026-10-24）
 
-新增 `.github/workflows/ci.yml`，PR、main 推送及手动触发均运行检查，不排除文档改动。使用 Rust stable 和 Cargo 缓存：check 在 Ubuntu 24.04 和 macOS Tahoe 26（macos-26，Apple Silicon）矩阵上复用 make check，关闭矩阵 fail-fast，保留两平台检查结果；terminal 在 Ubuntu 24.04 构建 control_mode example 并通过 uv 执行隔离 PTY 验收。Linux 显式安装 Git、tmux、Zsh，macOS 使用自带 Git 并通过 Homebrew 安装 tmux、Zsh，终端验收另装 Vim，记录工具版本；不需要 Codex 认证或真实模型服务。只授予 contents 读取权限，每个 Job 限时 20 分钟，同 PR/分支新运行取消旧运行，失败不豁免。
+`.github/workflows/ci.yml` 在 PR、main 推送和手动触发时运行，不排除文档改动。check 与 terminal 均使用 Ubuntu 24.04 / macOS Tahoe 26（Apple Silicon）矩阵，共四项检查：check 分步执行 make check 的格式、Clippy、Rust 测试；terminal 构建 control_mode example，通过 uv 执行真实 Vim/Zsh、重连、输入和复制的隔离 PTY 验收。使用 Rust stable、Cargo 缓存、contents 只读权限和每项 20 分钟超时；同 PR/分支新运行取消旧运行，单个平台失败不取消其他检查，也不豁免失败。Agent 真实 app-server 验收与 tag 发布暂未接入，合并必需检查须在仓库设置中单独配置。
 
-macOS 独立 Control Mode 脚本验收、固定 Codex 版本的 Agent 独立验收和 tag 发布留待后续配置。现有 PTY 挂起记录仍保留，新增流水线不代表 GitHub runner 已验收通过；仓库合并必需检查须在 CI 首次运行后另行设置。
+tmux 3.8 为当前支持基线，Linux 从官方发布源码构建，macOS 使用 Homebrew 安装；终端验收另需 Vim、Zsh。3.4 已确认返回空光标信息而不兼容，3.5–3.7 未完整验收，不把 3.8 宣称为已证明的技术最低版本。文档说明可执行文件与存量 server 版本可能不同。Linux check 使用 compaudit 找出补全路径的组/其他用户写权限问题，修正后必须再次审核通过。
 
-首次 CI 暴露两处问题：setup-uv 的 v10 主版本标签不存在，改为经 GitHub API 核验的 v10.3.2；Ubuntu 24.04 的 tmux 3.4 返回空光标样式，导致 9 项工作台库测试失败。两个 Linux Job 改为从官方发布源码构建 tmux 3.8，安装到 runner 临时目录并优先加入 PATH。check 将 make check 的三个命令拆成独立步骤以便定位耗时和失败阶段，检查范围不变。此次调整不宣称修复 macOS 的历史 PTY 挂起。
+CI 揭示并修复的测试问题保留以下约定：
 
-后续 CI 中 Linux 独立终端验收通过，Rust 测试在 Zsh compinit 的不安全目录确认处超时。Linux check 增加 compaudit，打印并移除列出路径的组/其他用户写权限，再次审核必须通过。macOS 旧日志显示 Console 多个测试等待退出不返回；测试退出等待改为持续排空 PTY、轮询退出状态并在 12 秒后报告 PID 和输出，避免无限 wait 或输出缓冲区阻塞。共用读取循环每轮限量，防止持续输出绕过超时；增加超过 PTY 缓冲区的输出回归测试。
+- PTY 使用非阻塞读取，等待退出时持续消费输出并设置超时；每轮读取限量，防止持续输出绕过超时。终端属性通过主端校验，排除内核瞬时 PENDIN 标志。Python 短输入必须校验完整写入，tmux 子命令与清理均有超时。
+- Console fixture 使用规范化临时根目录，避免 macOS 的 /var 与 /private/var 路径误判。屏幕记录独立于当前阶段捕获，clear_output 只清当前阶段输出；有新数据时才重新解析文本。弹窗开关、分支查询均等待实际状态；长路径断言给详情栏足够宽度。
+- 模拟 WebSocket 连接显式使用阻塞模式，握手超时与消息轮询超时分开。保留大量输出退出回归、CI nocapture 和 Python 阶段日志，便于定位失败，不依赖盲目重跑。
 
-macOS 随后不再挂起，日志确认剩余多项失败来自测试将 /var 临时路径与实际 /private/var 路径直接比较，以及清空捕获后将差量刷新当完整画面。Console fixture 在规范化临时根目录创建资源，屏幕解析保留完整输出记录，弹窗等待改为检查当前画面及关闭状态。PTY 读取前检查 poll 就绪并校验非阻塞设置，CI 使用 nocapture 即时输出断言诊断。
-
-README、安装指南及故障排查明确 tmux 3.8 为当前支持基线。Linux 和 macOS 26 的完整 Rust 检查及 Linux 独立 PTY 验收已在 PR #20 的 f43b438 上通过；3.4 已知不兼容，3.5–3.7 未完整验收，不将 3.8 表述为已证明的技术最低版本。不新增运行时版本拦截，文档说明可执行文件与存量 server 的版本可能不同。
-
-按用户要求，terminal 也扩展为 Ubuntu 24.04 / macOS Tahoe 26 矩阵，两平台执行同一份 check_control_mode.py，覆盖真实 Vim/Zsh、重连、输入与复制。macOS 通过 Homebrew 安装 tmux、Zsh、Vim；Linux 继续构建 tmux 3.8。CI 共四项检查，新增 macOS 独立终端验收取代此前延期决定，结果以最新 CI 为准。
-
-新增 macOS terminal 后，Rust 检查暴露嵌套工作台用例在分支查询完成前提交的竞争，改为等待候选查询结果再提交。Python 独立验收采用非阻塞 PTY 读取，退出期间继续消费输出；tmux 子命令及清理设超时，并打印阶段标记，避免脚本异常表现为无限等待。
+PR #20 的 71cfde8 已通过四项托管检查；本地完整 Rust 测试共 147 项。该结果是当时快照，后续修改以对应提交的检查为准，不据此宣称真实 SSH、真实模型或所有 macOS 版本均已验收。
 
 ### 任务最近访问排序（2026-10-23）
 

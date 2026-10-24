@@ -278,8 +278,7 @@ impl Pty {
             .as_bytes(),
         );
         self.wait("CREATED_OK");
-        self.text.clear();
-        self.bytes.clear();
+        self.clear_output();
         self.send(b"\x17d");
         self.wait("任务 / ");
         self.wait(&format!("› {task}"));
@@ -287,7 +286,13 @@ impl Pty {
     fn send(&mut self, text: &[u8]) {
         self.master.write_all(text).unwrap();
     }
+    fn clear_output(&mut self) {
+        // 只清空当前阶段的捕获，保留屏幕记录以解析后续差量刷新。
+        self.bytes.clear();
+        self.text.clear();
+    }
     fn read_output(&mut self) {
+        let previous_len = self.bytes.len();
         let mut bytes = [0; 16384];
         // 每轮限制读取次数，让持续输出也不能阻止超时和退出检查。
         for _ in 0..16 {
@@ -318,7 +323,9 @@ impl Pty {
                 Err(error) => panic!("读取 PTY 输出失败：{error}"),
             }
         }
-        self.text = strip_terminal_codes(&self.bytes);
+        if self.bytes.len() != previous_len {
+            self.text = strip_terminal_codes(&self.bytes);
+        }
     }
     fn wait_exit(&mut self) -> ExitStatus {
         let start = Instant::now();
@@ -446,9 +453,7 @@ fn pty_exit_drains_output_larger_than_the_terminal_buffer() {
         "head -c 65536 /dev/zero | tr '\\000' x; printf '\\nEXIT_DRAINED\\n'",
     ]);
     let mut p = Pty::spawn(command);
-    eprintln!("PTY 输出回归：子进程 {} 已启动", p.child.id());
     assert!(p.wait_exit().success());
-    eprintln!("PTY 输出回归：子进程已退出，已读取 {} 字节", p.bytes.len());
     p.wait("EXIT_DRAINED");
     assert!(p.bytes.len() >= 65536);
 }
@@ -590,8 +595,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     assert_eq!(STANDARD.decode(&p.bytes[start..end]).unwrap(), b"demo");
     // 缩放清除旧坐标的选区；窄屏仍可拖选，Esc 只清除选区。
     p.resize(80, 24);
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.wait("demo");
     p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
     p.wait_screen("已请求复制 4 chars");
@@ -788,8 +792,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
                 .join("lock")
                 .exists()
         );
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("任务 / ");
         // 返回后聚焦项目区，按 2 保留任务选择，可以再次进入同一 Shell。
@@ -797,8 +800,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("任务 / ");
         p.send(b"q");
@@ -848,8 +850,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
             .lines()
             .all(|pid| pids.lines().any(|after| after == pid))
     );
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
@@ -860,8 +861,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     for client in clients.lines() {
         mux(&["detach-client", "-t", client]);
     }
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
     p.send(b"q");
@@ -893,8 +893,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait(&format!("PROJECT_DIR:{}", other.display()));
     p.send(b"\x17d");
     p.wait("任务 / ");
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"/demo\r\r/auth\r\r");
     p.wait(" · 全局 Codex ");
     p.send(b"printf 'TASK_DIR:%s\\n' \"$PWD\"\r");
@@ -939,8 +938,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("auth");
     p.send(b"2/auth\r\r");
     p.wait("终端已返回导航：不能在当前");
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"2n");
     p.wait("新建任务");
     p.send(b"feat/nested");
@@ -999,25 +997,21 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
             assert_eq!(previous, &pids);
         }
         previous_pids = Some(pids);
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("工作目录");
         p.wait(&target.display().to_string());
         p.send(b"i");
         p.wait("收起");
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"i");
         p.wait("更多");
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"2\r");
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("REENTER_DIR:{}", target.display()));
-        p.text.clear();
-        p.bytes.clear();
+        p.clear_output();
         p.send(b"\x17d");
         p.wait("任务 / ");
         p.send(b"q");
@@ -1102,8 +1096,7 @@ fn custom_prefix_directions_alt_resize_and_mouse_work_in_terminal() {
         mux(&["display-message", "-p", "-t", id, "#{pane_width}"]).trim(),
         (width + 6).to_string()
     );
-    p.text.clear();
-    p.bytes.clear();
+    p.clear_output();
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert!(
@@ -1485,8 +1478,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
         p.send(b"\x17d");
         p.wait("任务 / ");
     }
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     if use_picker {
         // 卡片到期后仍能选择未读；取消不会清除记录。
         thread::sleep(Duration::from_secs(9));
@@ -1494,8 +1486,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
         p.wait_screen("demo / auth / 未读 1");
         p.send(b"\x1b");
         p.wait_screen_absent("demo / auth / 未读 1");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(b"\x17u");
         p.wait_screen("demo / auth / 未读 1");
         p.send(b"jk\x1b[B\x1b[A\r");
@@ -1512,8 +1503,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
             .join("auth")
             .display()
     ));
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.resize(138, 36);
     p.send(b"printf 'DISMISSED_%s\\n' OK\r");
     p.wait("DISMISSED_OK");
@@ -1523,14 +1513,12 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
     // 当前实际打开的是 auth：第二轮应静默，不排入下一张卡片。
     // 强制重绘，确认成功跳转后旧提示已关闭，静默轮次也没有提示。
     thread::sleep(Duration::from_secs(9));
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.resize(139, 36);
     p.send(b"printf 'SILENT_TURN_%s\\n' OK\r");
     p.wait("SILENT_TURN_OK");
     assert!(!p.text.contains("Codex 本轮已完成"), "{}", p.text);
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert!(!p.text.contains("[未读"), "{}", p.text);
@@ -1610,8 +1598,7 @@ fn forms_register_create_retry_and_enter_task() {
     p.wait("尚未登记项目");
     p.send(b"n");
     p.wait("登记已有仓库");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x1b");
     // 弹窗外空列表未变化，检查被弹窗遮挡的详情区恢复。
     p.wait("任务详情");
@@ -1639,8 +1626,7 @@ fn forms_register_create_retry_and_enter_task() {
             .join("config.json")
             .exists()
     );
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     // 创建项目后焦点已在任务区；通过候选补全打开任务表单。
     p.send(b"/ne\t\r");
     p.wait("新建任务");
@@ -1653,8 +1639,7 @@ fn forms_register_create_retry_and_enter_task() {
             .join("state.json")
             .exists()
     );
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7fmain\r");
     p.created_task(&f, "feat/fresh");
     let state: serde_json::Value = serde_json::from_slice(
@@ -1756,8 +1741,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     p.wait("使用已有分支");
     // 默认取消，候选选择本身不创建资源。
     p.send(b"\r");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.wait("新建任务");
     assert_eq!(fs::read(&state_path).unwrap(), state_before);
     assert_eq!(refs(), before);
@@ -1794,8 +1778,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         // 默认取消后再次提交，仍须保持同一远端候选。
         p.send(b"\r");
         p.wait("新建任务");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(b"\r");
         p.wait("使用已有分支");
         p.send(b"\t\r");
@@ -1932,8 +1915,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         p.wait("新建任务");
         p.send(b"km");
         p.wait("upstream/feat/km_story");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         // 不按 Tab，直接使用高亮候选。
         p.send(b"\x1b[B\r");
         if stale {
@@ -1952,8 +1934,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         p.wait("分支 upstream/feat/km_story 已存在");
         assert!(!p.text.contains("选择来源"));
         p.send(b"\r");
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.wait("新建任务");
         assert_eq!(fs::read(&state_path).unwrap(), before);
         p.send(b"\r");
@@ -2139,8 +2120,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.send(b"existing\r");
     p.wait("使用已有分支");
     p.send(b"\r");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\r");
     p.wait("使用已有分支");
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
@@ -2154,8 +2134,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.wait("occupied");
     assert_eq!(fs::read(&state_path).unwrap(), before);
     f.git(&["worktree", "remove", occupied.to_str().unwrap()]);
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\r");
     p.wait("使用已有分支");
     p.send(b"\t\r");
@@ -2296,8 +2275,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     p.send(b"\t");
     // 切换来源重置为取消，Enter 返回表单。
     p.send(b"j\r");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\r");
     p.wait("origin/feat/remote");
     p.send(b"j");
@@ -2387,8 +2365,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
         (b"2".as_slice(), "任务 /"),
         (b"1".as_slice(), "› demo"),
     ] {
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(keys);
         p.wait(expected);
     }
@@ -2396,8 +2373,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     p.send(b"2/auth12\r");
     // 切走再切回以读取完整标题，避免把终端差量更新当成完整文本。
     for (keys, expected) in [(b"1", "› demo"), (b"2", "任务 / auth12")] {
-        p.bytes.clear();
-        p.text.clear();
+        p.clear_output();
         p.send(keys);
         p.wait(expected);
     }
@@ -2414,8 +2390,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     p.wait_screen("项目 /");
     // 前缀取消后 n 仍打开项目表单；表单内 Ctrl-W 不改变焦点。
     p.send(b"\x17");
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\x1b");
     // 等待独立 Esc 被解析，避免与后续 n 合并为 Alt-n。
     thread::sleep(Duration::from_millis(200));
@@ -2484,8 +2459,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
     fs::remove_file(path.join("unsaved")).unwrap();
     // 失败后回到取消，取消勾选删除分支，再明确选择确认。
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b" \t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
@@ -2537,16 +2511,14 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     state["auth"]["branch"] = "auth".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     fs::write(path.join("unsaved"), "keep me").unwrap();
     p.send(b"\t\r");
     p.wait("未提交、未跟踪");
     assert!(path.is_dir());
     f.git(&["show-ref", "--verify", "refs/heads/auth"]);
     fs::remove_file(path.join("unsaved")).unwrap();
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"\t\r");
     p.wait("已选中 demo / main");
     let output = Command::new("git")
@@ -2586,8 +2558,7 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     p.send(b"\x1b[B \r");
     p.wait("主工作目录");
     assert!(path.join(".venv/data").exists());
-    p.bytes.clear();
-    p.text.clear();
+    p.clear_output();
     p.send(b"dd\t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());

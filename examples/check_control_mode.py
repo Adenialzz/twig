@@ -51,7 +51,8 @@ class Frontend:
         )
 
     def send(self, text):
-        os.write(self.master, text)
+        written = os.write(self.master, text)
+        assert written == len(text), f"PTY 输入未完整写入：{written}/{len(text)} 字节"
 
     def read_output(self, timeout):
         if not select.select([self.master], [], [], timeout)[0]:
