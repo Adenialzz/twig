@@ -36,6 +36,12 @@ pub enum Action {
         target: Target,
         #[arg(long)]
         message: String,
+        /// 回报消息的来源项目；与 --from-task 一起使用，仅用于来源展示
+        #[arg(long, requires = "from_task")]
+        from_project: Option<String>,
+        /// 回报消息的来源任务（不是接收方）
+        #[arg(long, requires = "from_project")]
+        from_task: Option<String>,
     },
     /// 读取主控或指定受管任务的 Codex 历史（JSON）
     #[command(
@@ -77,10 +83,19 @@ pub struct Binding {
     pub stopped: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageSource {
+    User,
+    Task { project: String, task: String },
+    Completion { project: String, task: String },
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Delivery {
     pub id: String,
     pub thread: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<MessageSource>,
     pub status: String,
     pub turn: Option<String>,
     pub error: Option<String>,
@@ -302,10 +317,13 @@ impl Store {
         self.save(&state)?;
         Ok(thread)
     }
-    pub fn enqueue(&self, binding: &Binding, text: String) -> Result<String> {
-        self.enqueue_with_id(binding, text, message_id())
-    }
-    fn enqueue_with_id(&self, binding: &Binding, text: String, id: String) -> Result<String> {
+    fn enqueue_with_id(
+        &self,
+        binding: &Binding,
+        text: String,
+        id: String,
+        source: Option<MessageSource>,
+    ) -> Result<String> {
         ensure!(!text.trim().is_empty(), "消息不能为空");
         self.validate(binding)?;
         let _lock = self.lock()?;
@@ -325,6 +343,7 @@ impl Store {
             id: id.clone(),
             thread: binding.thread.clone(),
             text,
+            source,
             status: "queued".into(),
             turn: None,
             error: None,
@@ -637,7 +656,7 @@ fn record_completion(state: &mut State, binding: &Binding, turn: &str) -> Result
     }
     if let Some(project) = &binding.project {
         let controller = state.bindings.get("controller").context("主控绑定缺失")?;
-        state.messages.push(Delivery { id: message_id(), thread: controller.thread.clone(), text: format!("任务反馈：项目 {project}，任务 {}，会话 {}，轮次 {turn} 已完成。请读取任务 .twig/state.md 并用 twig agent read --project {project} --task {} 查询反馈，对照目标决定下一步；不要仅凭轮次完成宣布任务完成。", binding.task.as_deref().unwrap_or_default(), binding.thread, binding.task.as_deref().unwrap_or_default()), status: "queued".into(), turn: None, error: None });
+        state.messages.push(Delivery { id: message_id(), thread: controller.thread.clone(), text: format!("任务反馈：项目 {project}，任务 {}，会话 {}，轮次 {turn} 已完成。请读取任务 .twig/state.md 并用 twig agent read --project {project} --task {} 查询反馈，对照目标决定下一步；不要仅凭轮次完成宣布任务完成。", binding.task.as_deref().unwrap_or_default(), binding.thread, binding.task.as_deref().unwrap_or_default()), source: Some(MessageSource::Completion { project: project.clone(), task: binding.task.clone().context("任务绑定缺少任务名")? }), status: "queued".into(), turn: None, error: None });
     }
     state.seen.push(key);
     Ok(())
@@ -749,9 +768,20 @@ pub fn execute(registry: &Path, action: Action) -> Result<()> {
     match action {
         Action::Init => println!("{}", serde_json::to_string(&store.initialize()?)?),
         Action::Status => println!("{}", serde_json::to_string_pretty(&store.load()?)?),
-        Action::Send { target, message } => {
+        Action::Send {
+            target,
+            message,
+            from_project,
+            from_task,
+        } => {
             let binding = store.binding(&target)?;
-            println!("{}", store.enqueue(&binding, message)?);
+            let source = from_project
+                .zip(from_task)
+                .map(|(project, task)| MessageSource::Task { project, task });
+            println!(
+                "{}",
+                store.enqueue_with_id(&binding, message, message_id(), source)?
+            );
         }
         Action::Read { target } => println!(
             "{}",
@@ -833,6 +863,7 @@ mod tests {
             id: "unknown".into(),
             thread: "thread".into(),
             text: "work".into(),
+            source: None,
             status: "sending".into(),
             turn: None,
             error: None,

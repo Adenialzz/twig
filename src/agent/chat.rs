@@ -1,5 +1,5 @@
 //! 原生 Chat；后台线程只负责本客户端通信，退出不停止 Codex。
-use super::{Binding, Store, rpc};
+use super::{Binding, MessageSource, Store, rpc};
 mod view;
 use crate::console::selection::Selection;
 use anyhow::Result;
@@ -168,7 +168,12 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
             view.connected = true;
             let result = (|| -> Result<()> {
                 if let Some(Command::Send(id, text)) = command
-                    && let Err(error) = store.enqueue_with_id(binding, text.clone(), id.clone())
+                    && let Err(error) = store.enqueue_with_id(
+                        binding,
+                        text.clone(),
+                        id.clone(),
+                        Some(MessageSource::User),
+                    )
                 {
                     view.rejected = Some((id, text));
                     last_error = Some(format!("{error:#}"));
@@ -189,6 +194,7 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
                     .as_str()
                     .map(str::to_owned);
                 let state = store.load()?;
+                view::apply_sources(&mut view.entries, &state.messages, &binding.thread);
                 let pending = state
                     .messages
                     .iter()
@@ -218,12 +224,8 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
                     if !ids.insert(message.id.clone()) {
                         continue;
                     }
-                    let kind = if message.text.starts_with("任务反馈：") {
-                        Kind::Workflow
-                    } else {
-                        Kind::User
-                    };
-                    let mut entry = Entry::new(kind, &message.text);
+                    let mut entry = Entry::new(Kind::Unknown, &message.text);
+                    entry.apply_source(message);
                     entry.id = Some(message.id.clone());
                     entry.detail = format!("消息 ID：{}", message.id);
                     view.entries.push(entry);

@@ -35,8 +35,8 @@ description: 使用 Twig CLI 担任多项目主控，发现任务及 Codex 会�
 > 项目 PROJECT，任务 TASK，Worktree PATH。目标：……；验收：……。
 > 授权范围：……；提交/推送/合并要求：……。遵循任务仓库约定。
 > 受管任务更新 `.twig/state.md`；普通任务有现有状态记录则维护，不为本次通信自动迁移任务。
-> 完成阶段目标、发生阻塞或需要用户决策时，主动回报主控，不能只结束轮次。使用下列命令；不带 `--project/--task` 表示发送给此配置的主控：
-> `TWIG_BIN --config CONFIG agent send --message '任务回报：项目 PROJECT；任务 TASK；thread THREAD_ID；阶段 STAGE；结果……；修改/提交……；验证……；未完成/风险……；需主控处理……'`
+> 完成阶段目标、发生阻塞或需要用户决策时，主动回报主控，不能只结束轮次。使用下列命令；不带 `--project/--task` 表示发送给此配置的主控；`--from-project/--from-task` 声明发送方，供 Agent 页面区分角色：
+> `TWIG_BIN --config CONFIG agent send --from-project PROJECT --from-task TASK --message '任务回报：项目 PROJECT；任务 TASK；thread THREAD_ID；阶段 STAGE；结果……；修改/提交……；验证……；未完成/风险……；需主控处理……'`
 > TWIG_BIN 和 CONFIG 使用主控给出的绝对路径，正确引用 Shell 参数。若无法执行回报命令，保留结果和报错，在当前会话最终回复明确指出回报失败，不假称已通知。
 > 本次派活授权上述结果回报，不额外授权推送、合并、删除或向其他人/平台发消息。
 
