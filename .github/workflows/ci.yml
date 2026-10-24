@@ -78,7 +78,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Rust 测试
-        run: cargo test --locked
+        run: cargo test --locked -- --nocapture
 
   terminal:
     runs-on: ubuntu-24.04

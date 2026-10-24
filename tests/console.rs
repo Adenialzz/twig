@@ -248,9 +248,10 @@ impl Pty {
         }
         let original = terminal_attributes(master.as_raw_fd());
         let child = command.spawn().unwrap();
-        unsafe {
-            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
-        }
+        assert_ne!(
+            unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+            -1
+        );
         Self {
             child,
             master,
@@ -288,6 +289,21 @@ impl Pty {
         let mut bytes = [0; 16384];
         // 每轮限制读取次数，让持续输出也不能阻止超时和退出检查。
         for _ in 0..16 {
+            let mut ready = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let result = unsafe { libc::poll(&mut ready, 1, 0) };
+            assert_ne!(
+                result,
+                -1,
+                "PTY poll 失败：{}",
+                std::io::Error::last_os_error()
+            );
+            if result == 0 || ready.revents & libc::POLLIN == 0 {
+                break;
+            }
             match self.master.read(&mut bytes) {
                 Ok(0) => break,
                 Ok(n) => self.bytes.extend_from_slice(&bytes[..n]),
@@ -417,7 +433,9 @@ fn pty_exit_drains_output_larger_than_the_terminal_buffer() {
         "head -c 262144 /dev/zero | tr '\\000' x; printf '\\nEXIT_DRAINED\\n'",
     ]);
     let mut p = Pty::spawn(command);
+    eprintln!("PTY 输出回归：子进程 {} 已启动", p.child.id());
     assert!(p.wait_exit().success());
+    eprintln!("PTY 输出回归：子进程已退出，已读取 {} 字节", p.bytes.len());
     p.wait("EXIT_DRAINED");
     assert!(p.bytes.len() >= 262144);
 }
