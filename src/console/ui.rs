@@ -261,25 +261,39 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
     let items = repos
         .iter()
         .map(|repo| {
-            let summary = data::summary(app.snapshot.threads.iter().filter(|t| {
-                app.snapshot
-                    .associations
-                    .get(&t.id)
-                    .is_some_and(|(name, _)| name == &repo.name)
-            }));
-            Line::from(vec![
+            let mut spans = vec![
                 Span::raw(safe(&repo.name)),
                 unread(app.notifications.count(&repo.name, None)),
-                Span::raw(safe(&format!(
-                    "  [{}]  {}",
-                    repo.tasks.len().saturating_sub(1),
-                    if repo.error.is_some() {
-                        "异常".into()
-                    } else {
-                        summary
+                Span::raw(format!("  [{}]  ", repo.tasks.len().saturating_sub(1))),
+            ];
+            if repo.error.is_some() {
+                spans.push(Span::styled("异常", Style::default().fg(Color::Red)));
+            } else {
+                let stale =
+                    app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked);
+                let mut counts = std::collections::BTreeMap::new();
+                for thread in app.snapshot.threads.iter().filter(|t| {
+                    app.snapshot
+                        .associations
+                        .get(&t.id)
+                        .is_some_and(|(name, _)| name == &repo.name)
+                }) {
+                    let entry = counts
+                        .entry(thread.label())
+                        .or_insert((0, status_style(thread, stale)));
+                    entry.0 += 1;
+                }
+                if counts.is_empty() {
+                    spans.push(Span::raw("—"));
+                }
+                for (index, (label, (count, style))) in counts.into_iter().enumerate() {
+                    if index > 0 {
+                        spans.push(Span::raw(" · "));
                     }
-                ))),
-            ])
+                    spans.push(Span::styled(safe(&format!("{label} {count}")), style));
+                }
+            }
+            Line::from(spans)
         })
         .collect();
     list(

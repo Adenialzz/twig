@@ -94,6 +94,8 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 
 通知未读仅保留在当前 Twig 进程中，进入对应任务或 Agent 后清除。工作台中的 `Ctrl-C` 发送给 Pane 内程序；Console 的表单、搜索和帮助有各自的键位规则。完整操作见 [Console](docs/console.md) 和 [主控指南](docs/agent.md)。
 
+项目和任务列表按最近成功创建任务或进入工作台的时间排序，重启后保留；仅浏览不更新，重排保留当前选择。
+
 ## 行为边界
 
 - Twig 不运行自有后台服务，也不启动、重启或停止共享 Codex daemon；服务不可用时提示用户启动。
