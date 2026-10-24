@@ -804,6 +804,12 @@ Agent 通信线程在首次进入后随 Console 保留，避免切页销毁接�
 
 README 按项目定位、核心能力、安装、普通/主控两种快速开始、常用交互、行为边界、手册与开发入口重新组织。主推包含 skill 的 make install，保留主控 YOLO 和服务边界说明，详细规则链接到专题手册。主控指南纳入手册主题表，同步修正快速开始中过时的 Tab 切区与不支持 Agent 编排表述。仅更新文档。
 
+### GitHub Actions 持续集成（2026-10-24）
+
+新增 `.github/workflows/ci.yml`，PR、main 推送及手动触发均运行检查，不排除文档改动。使用 Rust stable 和 Cargo 缓存：check 在 Ubuntu 24.04 和 macOS Tahoe 26（macos-26，Apple Silicon）矩阵上复用 make check，关闭矩阵 fail-fast，保留两平台检查结果；terminal 在 Ubuntu 24.04 构建 control_mode example 并通过 uv 执行隔离 PTY 验收。Linux 显式安装 Git、tmux、Zsh，macOS 使用自带 Git 并通过 Homebrew 安装 tmux、Zsh，终端验收另装 Vim，记录工具版本；不需要 Codex 认证或真实模型服务。只授予 contents 读取权限，每个 Job 限时 20 分钟，同 PR/分支新运行取消旧运行，失败不豁免。
+
+macOS 独立 Control Mode 脚本验收、固定 Codex 版本的 Agent 独立验收和 tag 发布留待后续配置。现有 PTY 挂起记录仍保留，新增流水线不代表 GitHub runner 已验收通过；仓库合并必需检查须在 CI 首次运行后另行设置。
+
 ### 任务最近访问排序（2026-10-23）
 
 右侧任务列表与项目列表一样，按最近成功创建（含 --no-open）或进入工作台的时间排序，主工作目录也参与。登记表每个项目的 task_last_used 保存任务名到访问时间的映射，与项目 last_used 在同一次加锁写入中更新；工作台切换到不同任务时记录一次，持续查看不重复写入。仅浏览、筛选不写入，重排保留任务路径选择；未访问及同时间任务保持原顺序。全局监控排序不变。

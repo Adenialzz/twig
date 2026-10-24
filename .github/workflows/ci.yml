@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  TERM: xterm-256color
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: 安装 Linux 测试依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git tmux zsh
+      - name: 安装 macOS 测试依赖
+        if: runner.os == 'macOS'
+        run: brew install tmux zsh
+      - name: 记录环境版本
+        run: |
+          rustc --version
+          cargo --version
+          git --version
+          tmux -V
+          zsh --version
+      - name: 格式、Clippy 和 Rust 测试
+        run: make check
+
+  terminal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: false
+      - name: 安装终端验收依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git tmux zsh vim
+      - name: 记录环境版本
+        run: |
+          rustc --version
+          cargo --version
+          git --version
+          tmux -V
+          zsh --version
+          vim --version
+          uv --version
+      - name: 构建工作台验收入口
+        run: cargo build --locked --example control_mode
+      - name: 终端 PTY 验收
+        run: uv run examples/check_control_mode.py
