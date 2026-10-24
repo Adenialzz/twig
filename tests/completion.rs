@@ -107,13 +107,13 @@ fn dynamic_values_follow_config_repo_and_shared_worktree_state() {
     )
     .unwrap();
     let cfg = config.to_str().unwrap();
-    for action in ["ls", "new", "open", "stop", "rm", "pr"] {
+    for action in ["ls", "new", "open", "stop", "rm"] {
         assert_eq!(
             values(temp.path(), &["--config", cfg, action, "de"]),
             "demo"
         );
     }
-    for action in ["new", "open", "stop", "rm", "pr"] {
+    for action in ["new", "open", "stop", "rm"] {
         assert_eq!(
             values(temp.path(), &["--config", cfg, action, "demo", "a"]),
             "auth"
@@ -154,14 +154,6 @@ fn dynamic_values_follow_config_repo_and_shared_worktree_state() {
             &["--config", cfg, "new", "demo", "next", "--base", "remote"]
         ),
         ""
-    );
-    git(&repo, &["remote", "add", "upstream", "local-origin"]);
-    assert_eq!(
-        values(
-            temp.path(),
-            &["--config", cfg, "pr", "demo", "auth", "--remote", "up"]
-        ),
-        "upstream"
     );
     assert_eq!(
         values(

@@ -22,7 +22,7 @@ make install
 twig --help
 ```
 
-`make install` 安装或更新 twig，并复制更新主控 skill 到 `~/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md`；已有 skill 副本会被覆盖，自定义约定请另存。它不检查或安装 `gh`、`glab`，也不依赖 Homebrew。成功后打印 Zsh 补全和平台工具安装、登录提示，不修改 Shell 配置、不自动登录。使用 PR/MR 前按需自行安装 `gh` 或 `glab`，再运行 `gh auth login` / `glab auth login`。
+`make install` 安装或更新 twig，并复制更新主控 skill 到 `~/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md`；已有 skill 副本会被覆盖，自定义约定请另存。成功后打印 Zsh 补全提示，不修改 Shell 配置。
 
 不使用 Make 时，可以直接执行 `cargo install --path . --locked`。该命令不复制主控 skill，使用主控时需自行将 `skills/twig-controller/SKILL.md` 复制到上述路径；自定义 `--config` 则复制到对应主控工作区的 `.agents/skills/twig-controller/SKILL.md`。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
 
@@ -35,6 +35,6 @@ make build
 
 直接运行 `make` 也会构建 release 版本，等价于 `cargo build --release --locked`。
 
-Rust/Cargo 只用于源码构建和安装，CI 使用 Rust stable。普通任务管理不需要 Codex、gh 或 glab。Console 的 Codex 观察功能需要本机已有服务；PR/MR 按平台需要 gh 或 glab。
+Rust/Cargo 只用于源码构建和安装，CI 使用 Rust stable。普通任务管理不需要 Codex。Console 的 Codex 观察功能需要本机已有服务。
 
 首次使用见 [快速开始](quickstart.md)（`twig guide quickstart`）。安装后可直接执行 `twig guide` 阅读离线文档；当前没有单独安装的 man 页面，也不会自动启动分页器。需要分页时用 `twig guide --all | less`。

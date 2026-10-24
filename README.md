@@ -27,7 +27,6 @@ make install
 | --- | --- |
 | 主控与受管 Codex 任务 | 支持 app-server daemon 的 Codex，且服务已启动 |
 | 飞书通知 | curl、`TWIG_FEISHU_WEBHOOK_URL` |
-| GitHub / GitLab PR | 已安装并登录的 gh / glab |
 
 也可用 `cargo install --path . --locked` 只安装二进制；使用主控时需另行复制 skill。完整说明及平台验证范围见 [安装指南](docs/installation.md)。
 
@@ -101,7 +100,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 - Twig 不运行自有后台服务，也不启动、重启或停止共享 Codex daemon；服务不可用时提示用户启动。
 - 受管任务通过 `new --agent` 新建，不自动迁移或接管旧任务。普通任务的已有 Codex session 是否可通信，需核对当前 daemon 中的会话并取得用户授权。
 - 消息送达和一轮回复完成都不代表任务通过验收。投递结果未知时按消息 ID 核对，不自动重发。
-- 普通任务命令不隐式 fetch、pull 或 push。`pr --push` 是显式推送入口；不自动合并，清理仍执行文件、进程和归属检查。
+- 任务管理不隐式 fetch、pull 或 push；不自动合并，清理仍执行文件、进程和归属检查。
 
 ## 完整文档
 
@@ -115,7 +114,7 @@ twig guide agent
 twig guide --all
 ```
 
-常用主题：[配置](docs/configuration.md) · [任务窗口与启动命令](docs/windows.md) · [PR/MR](docs/pr.md) · [Shell 补全](docs/completion.md) · [Agent 与脚本](docs/automation.md) · [故障排查](docs/troubleshooting.md)。
+常用主题：[配置](docs/configuration.md) · [任务窗口与启动命令](docs/windows.md) · [Shell 补全](docs/completion.md) · [Agent 与脚本](docs/automation.md) · [故障排查](docs/troubleshooting.md)。
 
 ## 开发
 

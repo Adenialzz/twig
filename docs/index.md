@@ -28,7 +28,6 @@ twig guide --all          # 输出完整手册
 | [Console](console.md) | 面板操作、快捷键、Codex 状态和历史 | twig guide console |
 | [主控 Agent](agent.md) | 主控对话、受管任务、消息队列与飞书通知 | twig guide agent |
 | [安全清理](cleanup.md) | stop/rm、文件保护和部分失败 | twig guide cleanup |
-| [PR/MR](pr.md) | 平台认证、显式推送和草稿请求 | twig guide pr |
 | [Shell 补全](completion.md) | 安装 Zsh 补全及候选规则 | twig guide completion |
 | [Agent 与脚本](automation.md) | 非交互调用、结果判断和重试 | twig guide automation |
 | [故障排查](troubleshooting.md) | 诊断错误、恢复资源和支持边界 | twig guide troubleshooting |
@@ -37,6 +36,6 @@ twig guide --all          # 输出完整手册
 
 - 项目是登记别名；任务操作显式指定项目和任务，不按当前目录猜测。
 - 创建窗口可能启动用户配置的程序，--no-open 只是不进入窗口。
-- 普通任务命令不隐式 fetch/pull/push；pr 是显式联网操作，--push 才允许推送。用户启动程序的联网行为由程序决定。
+- 任务管理不隐式 fetch/pull/push。用户启动程序的联网行为由程序决定。
 
 源码贡献者另见仓库根目录的 DESIGN.md、AGENTS.md 与 CONTRIBUTING.md；这些开发记录不是用户操作手册。

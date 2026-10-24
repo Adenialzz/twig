@@ -5,7 +5,6 @@ mod config;
 mod console;
 mod git;
 mod guide;
-mod pr;
 mod registry;
 mod startup;
 mod tabs;
@@ -118,8 +117,6 @@ enum Action {
         #[arg(add = ArgValueCompleter::new(completion::projects))]
         project: Option<String>,
     },
-    /// 查找或创建草稿 PR/MR；仅 --push 才推送提交
-    Pr(pr::Args),
     /// 进入任务窗口；窗口丢失时重建 Shell
     #[command(
         after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n打开内置终端工作台，Ctrl-W d 返回 Console 并选中任务。普通任务不恢复原进程或对话；--agent 任务连接原 Codex session。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
@@ -248,7 +245,6 @@ fn execute(cli: Cli) -> Result<()> {
         Action::Ls {
             project: Some(project),
         } => project,
-        Action::Pr(args) => &args.project,
         _ => unreachable!(),
     };
     let entry = registry::entry(&registry_path, project_name)?;
@@ -301,7 +297,6 @@ fn execute(cli: Cli) -> Result<()> {
             }
         }
         Action::Ls { .. } => list(&project, &config, &state),
-        Action::Pr(args) => pr::execute(&config, &state, &invocation_dir, args),
         Action::Open {
             name,
             project: alias,

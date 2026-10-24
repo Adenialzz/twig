@@ -48,9 +48,7 @@ fn offline_manual_covers_every_document_without_accessing_resources() {
 
 #[test]
 fn help_discovers_manual_and_guide_rejects_invalid_arguments() {
-    for command in [
-        "add", "new", "open", "ls", "stop", "rm", "pr", "console", "guide",
-    ] {
+    for command in ["add", "new", "open", "ls", "stop", "rm", "console", "guide"] {
         let output = read(&[command, "--help"]);
         assert!(output.status.success(), "{command}");
         assert!(String::from_utf8_lossy(&output.stdout).contains("twig guide"));
@@ -58,7 +56,12 @@ fn help_discovers_manual_and_guide_rejects_invalid_arguments() {
     let output = read(&["--help"]);
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("twig guide"));
-    for args in [vec!["guide", "unknown"], vec!["guide", "windows", "--all"]] {
+    for args in [
+        vec!["guide", "unknown"],
+        vec!["guide", "windows", "--all"],
+        vec!["pr", "demo", "task"],
+        vec!["guide", "pr"],
+    ] {
         let output = read(&args);
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());

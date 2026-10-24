@@ -33,11 +33,10 @@
 - Console 任务名候选中 Enter 使用高亮分支并锁定确认来源，不再二次选择；手动输入且未选择候选的多远端来源仍可在确认框选择；无候选时才按输入名称创建。Console 和 CLI 的 new 均拒绝已登记同名任务，包括部分失败与资源缺失的记录；已有任务使用 open 或任务列表进入，缺失 Worktree 须另行核对恢复。
 - `new` 对未登记的同名本地分支或本机远端跟踪分支先询问，CLI/Console 默认取消；本地优先，多个 remote 同名时选择来源，远端来源创建本地分支并建立 upstream，不自动 fetch；确认后忽略起点参数并保留提交，执行前复查分支快照与 Worktree 占用。非交互 CLI 拒绝，已有登记任务直接报错，不通过 new 接续。
 - `new` 默认创建并进入内置终端工作台，`--no-open` 仍创建 Pane 并执行配置的命令，但不进入；`open` 复用窗口，缺失时按启动配置重建，再进入相同工作台；两者 Ctrl-W d 均返回 Console 并选中显式指定的项目/任务，不依赖启动目录，不切换外层 tmux 客户端。普通任务默认 Shell，允许显式配置启动程序，不恢复对话。显式 new --agent 创建受管 Codex session 和 .twig/state.md，专用窗口替代普通启动配置，open 连接原 session；stop 中断轮次并取消待发消息。所有入口均不依赖 Codex Desktop，不启动/重启/停止共享 daemon。
-- CLI 使用顶层 add/ls/new/open/stop/rm/pr；任务操作显式指定项目别名和任务名，不按当前目录推断。ls 不带项目列项目，带项目列任务；rm PROJECT 仅取消登记，rm PROJECT TASK 才删除任务。任务删除选项必须指定任务名。
+- CLI 使用顶层 add/ls/new/open/stop/rm；任务操作显式指定项目别名和任务名，不按当前目录推断。ls 不带项目列项目，带项目列任务；rm PROJECT 仅取消登记，rm PROJECT TASK 才删除任务。任务删除选项必须指定任务名。
 - 用户配置默认在 `~/.twig/config.toml`，`[projects]` 保存项目别名与路径，`[tmux]` 保存默认任务窗口启动配置；登记变更必须保留启动配置。add 同时初始化并登记已有仓库，同路径复用、别名冲突不覆盖；已有配置可补登记，冲突初始化参数拒绝。不提供 init/config/clone/--repo 或旧登记字段兼容，克隆与 remote 管理由 Git 负责。
 - 项目配置、任务状态和锁存于登记表同目录的 `projects/<仓库 ID>/`，ID 为规范化共享 Git 目录路径的稳定哈希；所有入口遵循 `--config`，不读取或迁移旧 `.git/twig/` 数据。
-- 登记与普通任务命令不联网，不隐式 fetch、pull 或 push。PR/MR 是显式联网操作。
-- `pr` 是显式联网命令，GitHub/GitLab 分别通过 `gh`/`glab` 操作。只有 `--push` 才允许推送，明确指定仓库与分支，不让平台 CLI 隐式推送或创建 Fork；不自动合并或清理。
+- 登记与普通任务命令不联网，不隐式 fetch、pull 或 push。PR/MR 交由 Codex 或用户直接使用平台 CLI 处理，Twig 不提供封装。
 - Shell 补全必须只读，不创建配置/锁、不调用 tmux；复用 CLI 定义解析参数，不执行正在补全的命令。
 - 任务启动配置优先读取主仓库 `.twig/config.toml` 的 `[tmux]`，否则读取 `--config` 所选用户配置；整体覆盖、不合并 Pane。只创建任务窗口时执行，main 窗口不应用。配置错误直接报错，部分失败保留资源并标记，禁止重试时重复启动命令。Pane 的 mode 默认 shell，command 经参数引用后作为登录 Shell 的第一条输入；完成或 Ctrl-C 后回到提示符，Shell 退出关闭 Pane。process 模式必须提供 command，直接运行程序并按 Pane 保留退出输出/状态；允许混用，不把保留设置应用到同窗 Shell。交互测试须验证命令成功/失败、Ctrl-C 后可输入和 Ctrl-D 关闭。Console、new/open 的工作台快捷键与外观统一由 Twig 定义，不加载 tmux 状态栏或键绑定。用户配置命令的联网行为不属于 twig 隐式 Git 联网。
 - remote URL 以 Git 为准，不在 twig 登记表复制或管理。
@@ -56,7 +55,6 @@
 - Console 浏览不得修改项目、配置或窗口，通知状态及通知锁是明确的本地持久化例外；测试使用临时登记表、模拟 Codex CLI/Unix WebSocket 服务和 PTY，不向真实会话发送提示词或审批。创建表单使用临时仓库与登记表验证取消、失败重试、同路径复用和冲突保护；执行写操作期间不强杀或套用浏览查询超时。Codex 状态来自所连接服务，不把 notLoaded、idle 或窗口存在解释为任务完成。
 - 涉及生命周期或清理时，在临时仓库和独立 tmux socket 上测试，禁止使用真实项目测试删除。
 - 登记表测试使用 `--config` 指向临时文件，不读写真实用户配置。远程相关测试优先使用本地临时 Git remote。
-- PR/MR 测试使用模拟平台 CLI 和本地临时 bare remote，禁止为验证功能而向真实平台推送或创建请求；检查查询失败不创建、推送失败不强制覆盖、部分成功保留提交。
 - 补全测试需要 Zsh（含 `zpty`、`zselect` 模块）；升级 `clap_complete` 后验证动态协议和生成的 Zsh 接入脚本。展示或排序变更须用真实 Tab/ZLE 验证，不能只检查候选输出顺序。
 - 验证范围应与改动匹配；纯文档更新检查一致性和链接，不必重复运行完整代码测试。
 - 代码变更提交前执行 `cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked`。

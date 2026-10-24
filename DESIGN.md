@@ -32,28 +32,26 @@ remote 名称和 URL 由 Git 管理；用户配置的 `[projects]` 保存别名�
 - `add PROJECT --path PATH` 登记并初始化已有仓库，可指定首次初始化的 base、target、root。相对路径在切换目录前解析；不联网。
 - 同路径复用别名，别名冲突不覆盖；初始化成功后保存登记。已存在项目配置时复用并补登记，冲突初始化选项报错，不重建窗口。
 - `ls` 列项目，`ls PROJECT` 列任务；`rm PROJECT` 只取消登记，`rm PROJECT TASK` 安全删除任务。任务删除选项必须指定任务名。
-- `new/open/stop/pr` 均要求 PROJECT 和 TASK，不依赖当前目录推断。控制台仍可按调用目录定位初始选择。
+- `new/open/stop` 均要求 PROJECT 和 TASK，不依赖当前目录推断。控制台仍可按调用目录定位初始选择。
 - 移除 init、config、clone、--repo 及旧登记表字段，不提供兼容接口。Git clone/remote 由用户直接调用。
 
 ## 架构与事实来源
 
-一个 Cargo 包，依赖 `clap`、`clap_complete`、`serde`、`serde_json`、`toml`、`anyhow` 和 `tempfile`；`tempfile` 用于测试隔离与 PR/MR 正文临时文件。通过 `std::process::Command` 调用 Git、tmux、ps、gh、glab，参数分别传入。错误补充操作上下文，失败不静默降级。
+一个 Cargo 包，依赖 `clap`、`clap_complete`、`serde`、`serde_json`、`toml`、`anyhow` 和 `tempfile`；`tempfile` 用于测试隔离、Console 查询输出与 Agent 临时文件。通过 `std::process::Command` 调用 Git、tmux、ps，参数分别传入。错误补充操作上下文，失败不静默降级。
 
-Makefile 中 `make build`（默认目标）构建 release，`make install` 只安装或更新 twig 并打印 Zsh 补全和平台工具安装、登录提示，不检查或安装 gh/glab，不依赖 Homebrew。平台 CLI 由用户按需自行安装；也可用 `cargo install --path . --locked` 安装 twig。不自动登录平台或修改用户 Shell 配置。`make check` 依次执行格式检查、Clippy 和测试。
+Makefile 中 `make build`（默认目标）构建 release，`make install` 安装或更新 twig 和主控 skill，并打印 Zsh 补全提示；也可用 `cargo install --path . --locked` 安装 twig。不修改用户 Shell 配置。`make check` 依次执行格式检查、Clippy 和测试。
 
 | 文件 | 职责 |
 | --- | --- |
 | `src/main.rs` | CLI 路由、项目初始化、任务创建/进入/停止/清理流程 |
-| `src/completion.rs` | 复用 CLI 定义解析补全上下文，只读查询项目、任务、分支和 remote 候选 |
+| `src/completion.rs` | 复用 CLI 定义解析补全上下文，只读查询项目、任务和分支候选 |
 | `src/completion.zsh` | Zsh 候选展示：普通值与选项分别分组，普通值优先 |
 | `src/registry.rs` | 用户级 TOML 登记表、路径解析、项目登记与取消登记 |
-| `src/pr.rs` | 任务识别、remote/平台选择、显式推送及草稿 PR/MR 查找与创建 |
 | `src/config.rs` | 全局数据目录中的项目配置、任务记录、锁、名称和 Session 标识 |
 | `src/git.rs` | 外部命令执行及 Git 分支、合并关系、Worktree 查询 |
 | `src/tmux.rs` | Session/Window 归属、窗口恢复、进程检查、进入和切换 |
 | `tests/workflow.rs` | 临时仓库及独立 tmux server 上的集成测试 |
 | `tests/completion.rs` | 临时登记表与仓库中的补全协议测试，以及 Zsh 脚本加载验证 |
-| `tests/pr.rs` | 模拟 gh/glab 与真实本地 bare remote 上的 PR/MR 流程测试 |
 
 配置与状态分为两层：
 
@@ -83,15 +81,11 @@ Session 名由仓库共享 Git 目录的绝对路径哈希生成，并使用 `@t
 
 ## 已完成与未承诺的功能
 
-已完成：`add`、`new`、`ls`、`open`、`stop`、`rm`、`pr`、全局 Console、`--config` 和 Zsh 动态补全。具体参数与限制见 README。
+已完成：`add`、`new`、`ls`、`open`、`stop`、`rm`、全局 Console、`--config` 和 Zsh 动态补全。具体参数与限制见 README。
 
-`pr PROJECT TASK` 是显式联网命令，统一封装 GitHub PR 与 GitLab MR。项目与任务均必填；正文文件的相对路径仍以命令调用目录解析。remote 优先级为显式参数、分支 upstream、唯一 remote；平台按公共域名判断，自建域名通过 `--provider` 指定。不新增项目配置项。
+PR/MR 由 Codex 或用户直接调用 gh/glab 完成，Twig 不再提供命令或平台依赖。
 
-只复用同仓库、同源/目标分支的开放请求；否则创建草稿。upstream remote 对应的源分支尊重其 `branch.*.merge` 映射。目标默认项目 `target`。没有 `--push` 时已有请求只返回链接；创建前以 `ls-remote` 验证目标存在及源分支提交与本地一致，不依赖陈旧的 remote-tracking 引用。`--push` 使用显式单分支 refspec 并设置 upstream，不强推、不附带 tag。fetch/push 仓库不一致或存在多个 URL 时拒绝操作，跨 Fork 暂不支持。
-
-GitHub 创建显式传 `--head` 禁止 CLI 自动推送/创建 Fork；GitLab 显式指定同一个 `--repo`/`--head` 并使用 `--push=false`。标题默认最新提交标题，正文默认最新完整提交说明，允许标题和正文文件覆盖。多行正文通过临时文件传递，避免 Shell 插值。外部 CLI 失败不按“无请求”处理；推送或创建部分成功不回滚远端提交。创建与查询期间沿用项目锁，避免其他 twig 命令同时清理正在操作的 Worktree。平台认证沿用官方 CLI，Git 推送沿用 Git 认证。
-
-补全采用 `clap_complete` 的 `unstable-dynamic` 接口，复用现有命令定义，在普通命令解析与执行之前分流。Zsh 通过 `source <(COMPLETE=zsh twig)` 加载；因上游协议尚未稳定，Shell 每次启动时重新生成接入脚本，不保存长期静态副本。上下文只解析光标前的完整参数，支持全局参数位于子命令前后以及等号写法。项目名和 remote 来自登记表，任务来自共享状态，本地分支通过 Git 查询。补全不获取锁、不写状态、不联网、不调用 tmux；查询失败输出 stderr 诊断并返回空候选，生成的 Zsh 脚本隐藏诊断以免打断输入。当前文档与验收范围为 Zsh，其他 Shell 尚未验证。
+补全采用 `clap_complete` 的 `unstable-dynamic` 接口，复用现有命令定义，在普通命令解析与执行之前分流。Zsh 通过 `source <(COMPLETE=zsh twig)` 加载；因上游协议尚未稳定，Shell 每次启动时重新生成接入脚本，不保存长期静态副本。上下文只解析光标前的完整参数，支持全局参数位于子命令前后以及等号写法。项目名来自登记表，任务来自共享状态，本地分支通过 Git 查询。补全不获取锁、不写状态、不联网、不调用 tmux；查询失败输出 stderr 诊断并返回空候选，生成的 Zsh 脚本隐藏诊断以免打断输入。当前文档与验收范围为 Zsh，其他 Shell 尚未验证。
 
 Zsh 展示通过自定义 `EnvCompleter` 注册脚本，候选生成与转义继续委托 Clap。普通值、目录和选项分组注册，确保任务先展示、先选中，避免 Zsh 将带说明的选项移到无说明的任务之前。无需设置全局 Zsh 样式。回归测试通过 Zsh `zpty` 驱动真实 Tab 和 ZLE，检查显示顺序及最终选中的输入，不能仅凭候选协议输出顺序判断菜单顺序。
 
@@ -101,7 +95,7 @@ Zsh 展示通过自定义 `EnvCompleter` 注册脚本，候选生成与转义继
 
 - `status`：详细提交、文件变化、ahead/behind 等信息。
 - `doctor`：诊断配置、Worktree 与 tmux 状态不一致。
-- fzf、PR 状态展示、跨 Fork PR/MR；全局 TUI 已于 2026-10-19 确认为本轮实现。
+- fzf；全局 TUI 已于 2026-10-19 确认为本轮实现。
 - 允许 `--base origin/main`，以及显式 `--fetch`。当前均未实现，后续需先讨论语义。
 
 原始需求中的 Codex `resume` 和 Turn 完成通知属于早期想法。由于最终不管理 Codex 生命周期，它们不在当前范围内，不能直接当作“第二阶段必做功能”。
@@ -319,7 +313,7 @@ twig Console
 | twig Console | 统一导航、终端渲染、焦点、快捷键、分屏操作、历史浏览和通知展示 |
 | Control Mode 客户端 | 持续连接、命令与应答、Pane 输出、资源变化事件、断开处理 |
 | tmux server | Session/Window/Pane、PTY 和进程托管、实际分屏布局、客户端断开后的运行存续 |
-| 现有任务与 Git 层 | 登记、Worktree、分支、PR/MR、资源归属与安全清理 |
+| 现有任务与 Git 层 | 登记、Worktree、分支、资源归属与安全清理 |
 
 优先沿用「项目对应 Session、任务对应 Window、终端对应 Pane」模型。分屏界面以 tmux 实际布局为依据，避免两边分别维护互相冲突的资源状态。
 
@@ -843,3 +837,7 @@ PR #22 更新主分支后，macOS 终端验收首次在中断负载后的输入�
 重启使用保存的消息基线补查新 sent 记录，并补查已观察会话（含已卸载会话）的新 completed 轮次；单会话失败不阻止处理其他会话。首次使用或首次发现会话仍只建立历史基线，不恢复升级前已丢失的未读，也不承诺发现从未观察且已经卸载的会话。Console 浏览不修改项目资源，独立通知状态和通知锁是本地写入例外；Shell 补全和 guide 保持无副作用。
 
 验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 通过（152 项测试）。新增状态恢复、已读去重、离线投递基线、并发合并、配置隔离与损坏保护测试；真实 PTY 覆盖任务/主控未读重启恢复、进入清除、离线消息补查及已卸载会话轮次补查。构建正式 binary 和 Control Mode example 后，check_agent.py 与 check_control_mode.py 隔离验收均通过（Codex 0.164.0；debug 构建，有限输出输入延迟单样本 0.187 秒），不使用真实用户会话或 webhook。文档链接检查通过；未安装、提交或推送。
+
+## 2026-10-24：移除 PR/MR 封装
+
+按用户确认完整移除 twig pr、对应补全、guide 主题、专属测试及平台工具安装提示。PR/MR 交由 Codex 或用户直接调用 gh/glab。tempfile 仍用于 Console、Agent 和测试，保留生产依赖；其余 Cargo 依赖也由其他功能使用。本文早期交接中的 PR/MR 实现及测试记录仅表示当时状态。
