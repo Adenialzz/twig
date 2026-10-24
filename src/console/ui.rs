@@ -175,6 +175,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let message = app
         .message
         .as_deref()
+        .or(app.notification_error.as_deref())
         .or(app.snapshot.registry_error.as_deref())
         .or(app.snapshot.delivery_error.as_deref())
         .or(app.snapshot.codex_error.as_deref());

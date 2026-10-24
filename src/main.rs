@@ -52,7 +52,7 @@ enum Action {
     },
     /// 全局项目、任务与 Codex 会话控制台
     #[command(
-        after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-W d 返回导航并保留进程。\n浏览只读；提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
+        after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-W d 返回导航并保留进程。\n浏览不改项目资源；未读状态独立持久化，退出重进仍保留，进入对应任务或 Agent 后清除。提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
     )]
     Console,
     /// 与主控 Codex 对话；Tab 切换 Console，退出不停止会话

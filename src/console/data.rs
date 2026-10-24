@@ -1,9 +1,10 @@
 use super::{
-    notifications::{ChatNotifications, Completion, Deliveries},
+    inbox::{Event as InboxEvent, Inbox},
+    notifications::{ChatNotifications, Completion},
     query,
 };
 use crate::{
-    codex::{Client, Thread, Turn},
+    codex::{Client, Thread},
     config::{Config, Feature, Project},
     git::git,
     registry, tmux,
@@ -85,33 +86,38 @@ impl Updates {
 pub struct Worker {
     pub requests: Sender<Request>,
     pub updates: Updates,
-    pub completions: Receiver<Completion>,
+    pub inbox: Inbox,
     pub chat: Arc<Mutex<ChatNotifications>>,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 impl Worker {
-    pub fn start(registry: PathBuf) -> Self {
+    pub fn start(registry: PathBuf) -> Result<Self> {
+        let inbox = Inbox::new(&registry)?;
+        let saved = inbox.load()?;
         let (tx, rx) = mpsc::channel();
         let updates = Updates::default();
         let out = updates.clone();
-        let (completed, completions) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
-        let chat = Arc::new(Mutex::new(ChatNotifications::default()));
+        let chat = Arc::new(Mutex::new(ChatNotifications::persisted(
+            inbox.clone(),
+            &saved,
+        )));
+        let inbox_out = inbox.clone();
         let chat_out = chat.clone();
         let handle = thread::spawn(move || {
             query::install(stop.clone());
-            collect(registry, rx, out, completed, stop, chat_out);
+            collect(registry, rx, out, inbox_out, saved, stop, chat_out);
         });
-        Self {
+        Ok(Self {
             requests: tx,
             updates,
-            completions,
+            inbox,
             chat,
             cancel,
             handle: Some(handle),
-        }
+        })
     }
 }
 impl Drop for Worker {
@@ -486,7 +492,8 @@ fn collect(
     registry: PathBuf,
     requests: Receiver<Request>,
     updates: Updates,
-    completions: Sender<Completion>,
+    inbox: Inbox,
+    saved: super::inbox::State,
     cancel: Arc<AtomicBool>,
     chat: Arc<Mutex<ChatNotifications>>,
 ) {
@@ -496,9 +503,9 @@ fn collect(
     };
     let mut request = Request::default();
     let mut client: Option<Client> = None;
-    let mut watched: BTreeMap<String, (PathBuf, Option<Turn>)> = BTreeMap::new();
-    let mut announced = HashSet::new();
-    let mut deliveries = Deliveries::default();
+    let mut watched = saved.watched;
+    let mut catchup: HashSet<_> = watched.keys().cloned().collect();
+    let mut deliveries = saved.deliveries;
     let mut registry_at = None;
     let mut activity_at = None;
     let mut retry_at = None;
@@ -568,25 +575,63 @@ fn collect(
             // 本地投递记录不依赖 daemon 连接或重试退避；采集本身不投递消息。
             let state = crate::agent::Store::new(&registry).and_then(|store| {
                 let state = store.load()?;
-                let errors = deliveries.observe(&state, |binding| {
+                inbox.controller(
+                    state
+                        .bindings
+                        .get("controller")
+                        .map(|binding| binding.thread.as_str()),
+                )?;
+                let mut errors = Vec::new();
+                let mut obsolete = HashSet::new();
+                for event in inbox.load()?.unread {
+                    let Some(task) = &event.task else { continue };
+                    let binding = state
+                        .bindings
+                        .values()
+                        .find(|binding| binding.thread == event.thread);
+                    if let Some(binding) = binding.filter(|binding| binding.project.is_some()) {
+                        match message_task_current(&store, binding, &task.project, &task.task) {
+                            Ok(false) => {
+                                obsolete.insert(event.id);
+                            }
+                            Err(error) => errors.push(format!("未读归属检查失败：{error:#}")),
+                            Ok(true) => {}
+                        }
+                    } else if task.message {
+                        obsolete.insert(event.id);
+                    }
+                }
+                inbox.discard(&obsolete)?;
+                errors.extend(deliveries.observe(&state, |binding, id| {
                     if let (Some(project), Some(task)) = (&binding.project, &binding.task) {
                         if message_task_current(&store, binding, project, task)? {
-                            completions.send(Completion {
-                                message: true,
-                                project: project.clone(),
-                                task: task.clone(),
-                                path: binding.cwd.clone(),
-                            })?;
+                            inbox.record(
+                                InboxEvent {
+                                    id: format!("message:{id}"),
+                                    thread: binding.thread.clone(),
+                                    task: Some(Completion {
+                                        message: true,
+                                        project: project.clone(),
+                                        task: task.clone(),
+                                        path: binding.cwd.clone(),
+                                    }),
+                                },
+                                false,
+                            )?;
                         }
                     } else if state
                         .bindings
                         .get("controller")
                         .is_some_and(|b| b.thread == binding.thread)
                     {
-                        chat.lock().unwrap().receive();
+                        chat.lock().unwrap().record(InboxEvent {
+                            id: format!("message:{id}"),
+                            thread: binding.thread.clone(),
+                            task: None,
+                        })?;
                     }
                     Ok(())
-                });
+                }));
                 snapshot.delivery_error = (!errors.is_empty()).then(|| errors.join("\n"));
                 Ok(state)
             });
@@ -611,36 +656,60 @@ fn collect(
                         })
                         .map(|t| (t.id.clone(), t.cwd.clone()))
                         .collect();
-                    // 轮次结束后会话可能立即卸载，仍需读取已观察到的进行中轮次。
+                    // 重启期间会话可能已完成并卸载；继续补查所有已观察会话。
                     for (id, (path, turn)) in &watched {
-                        if turn.as_ref().is_some_and(|t| t.status == "inProgress") {
+                        if catchup.contains(id)
+                            || turn
+                                .as_ref()
+                                .is_some_and(|turn| turn.status == "inProgress")
+                        {
                             paths.entry(id.clone()).or_insert_with(|| path.clone());
                         }
                     }
+                    let mut errors = Vec::new();
                     for (id, path) in paths {
-                        if controller.is_some_and(|c| c.thread == id) {
-                            // 空会话还没有 rollout；建立空基线，避免查询不存在的轮次存储。
-                            if threads.iter().any(|t| t.id == id && t.preview.is_empty()) {
-                                watched.entry(id).or_insert((path, None));
-                                continue;
+                        let result = (|| -> Result<()> {
+                            if controller.is_some_and(|c| c.thread == id) {
+                                // 空会话还没有 rollout；建立空基线，避免查询不存在的轮次存储。
+                                if !watched.contains_key(&id)
+                                    && threads.iter().any(|t| t.id == id && t.preview.is_empty())
+                                {
+                                    watched.entry(id.clone()).or_insert((path, None));
+                                    catchup.remove(&id);
+                                    return Ok(());
+                                }
+                                let (latest, turns) = client
+                                    .completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
+                                for turn in turns {
+                                    chat.lock().unwrap().record(InboxEvent {
+                                        id: format!("turn:{id}:{}", turn.id),
+                                        thread: id.clone(),
+                                        task: None,
+                                    })?;
+                                }
+                                watched.insert(id.clone(), (path, latest));
+                                catchup.remove(&id);
+                                return Ok(());
                             }
+                            if let Some(binding) =
+                                state.bindings.values().find(|binding| binding.thread == id)
+                                && let (Some(project), Some(task)) =
+                                    (&binding.project, &binding.task)
+                                && !message_task_current(
+                                    &crate::agent::Store::new(&registry)?,
+                                    binding,
+                                    project,
+                                    task,
+                                )?
+                            {
+                                return Ok(());
+                            }
+                            let Some((project, task_path)) = owners.get(&path) else {
+                                return Ok(());
+                            };
                             let (latest, turns) = client
                                 .completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
                             for turn in turns {
-                                if announced.insert((id.clone(), turn.id)) {
-                                    chat.lock().unwrap().receive();
-                                }
-                            }
-                            watched.insert(id, (path, latest));
-                            continue;
-                        }
-                        let Some((project, task_path)) = owners.get(&path) else {
-                            continue;
-                        };
-                        let (latest, turns) =
-                            client.completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
-                        for turn in turns {
-                            if announced.insert((id.clone(), turn.id)) {
                                 let task = snapshot
                                     .repos
                                     .iter()
@@ -650,16 +719,29 @@ fn collect(
                                     .iter()
                                     .find(|t| t.path == task_path)
                                     .unwrap();
-                                let _ = completions.send(Completion {
-                                    message: false,
-                                    project: project.to_owned(),
-                                    path: task_path.to_owned(),
-                                    task: task.name.clone(),
-                                });
+                                inbox.record(
+                                    InboxEvent {
+                                        id: format!("turn:{id}:{}", turn.id),
+                                        thread: id.clone(),
+                                        task: Some(Completion {
+                                            message: false,
+                                            project: project.to_owned(),
+                                            path: task_path.to_owned(),
+                                            task: task.name.clone(),
+                                        }),
+                                    },
+                                    false,
+                                )?;
                             }
+                            watched.insert(id.clone(), (path, latest));
+                            catchup.remove(&id);
+                            Ok(())
+                        })();
+                        if let Err(error) = result {
+                            errors.push(format!("会话 {id}：{error:#}"));
                         }
-                        watched.insert(id, (path, latest));
                     }
+                    ensure!(errors.is_empty(), "{}", errors.join("\n"));
                     Ok(threads)
                 })();
                 match result {
@@ -687,6 +769,9 @@ fn collect(
                         retry_delay = (retry_delay * 2).min(30);
                     }
                 }
+            }
+            if let Err(error) = inbox.checkpoint(&deliveries, &watched) {
+                snapshot.delivery_error = Some(format!("未读进度保存失败：{error:#}"));
             }
             activity_at = Some(Instant::now());
             dirty = true;

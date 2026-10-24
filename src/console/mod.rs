@@ -1,6 +1,7 @@
 use twig_cli::notification::{PickerAction, UnreadPicker};
 mod data;
 pub(crate) mod form;
+mod inbox;
 mod notifications;
 pub(crate) mod query;
 pub(crate) mod selection;
@@ -27,6 +28,7 @@ pub(super) struct App {
     snapshot: Snapshot,
     notifications: notifications::Notifications,
     chat_status: (bool, bool),
+    notification_error: Option<String>,
     open_agent: bool,
     project: Option<String>,
     task: Option<PathBuf>,
@@ -70,6 +72,7 @@ impl App {
         Self {
             notifications: Default::default(),
             chat_status: (false, false),
+            notification_error: None,
             open_agent: false,
             snapshot: Snapshot {
                 codex_error: Some("正在连接 Codex…".into()),
@@ -109,18 +112,37 @@ impl App {
         viewed: Option<(&str, &std::path::Path)>,
     ) -> bool {
         let before = self.notifications.current().cloned();
-        let mut changed = false;
-        for completion in worker.completions.try_iter() {
-            changed = true;
-            self.notifications.receive(completion, viewed);
-        }
+        let tasks = self.notifications.tasks();
+        let previous_error = self.notification_error.clone();
+        let result = (|| -> Result<()> {
+            if let Some((project, path)) = viewed {
+                worker.inbox.read_task(project, path)?;
+            }
+            let mut state = worker.inbox.load()?;
+            if let Some((project, path)) = viewed {
+                state.unread.retain(|event| {
+                    !event
+                        .task
+                        .as_ref()
+                        .is_some_and(|task| task.project == project && task.path == path)
+                });
+            }
+            self.notifications.sync(&state);
+            worker.chat.lock().unwrap().sync(&state);
+            Ok(())
+        })();
+        self.notification_error = result
+            .err()
+            .map(|error| format!("未读状态保存或读取失败：{error:#}"));
         self.notifications.tick(Instant::now());
         let chat_status = worker
             .chat
             .lock()
             .unwrap()
             .status(Instant::now(), self.notifications.current().is_none());
-        changed |= self.chat_status != chat_status;
+        let changed = self.chat_status != chat_status
+            || tasks != self.notifications.tasks()
+            || previous_error != self.notification_error;
         self.chat_status = chat_status;
         changed || before.as_ref() != self.notifications.current()
     }
@@ -546,9 +568,6 @@ fn open_terminal(
                         .as_deref()
                         .map(|path| (target.project.as_str(), path)),
                 );
-                if let Some(path) = viewed {
-                    app.notifications.read(&target.project, &path);
-                }
                 let summary = data::summary(app.snapshot.threads.iter());
                 let text = format!(
                     "{}{} · 全局 Codex {}",
@@ -571,7 +590,7 @@ fn open_terminal(
                     }
                 );
                 twig_cli::workbench::Status {
-                    text: match &usage_error {
+                    text: match app.notification_error.as_ref().or(usage_error.as_ref()) {
                         Some(error) => format!("{text} · {error}"),
                         None => text,
                     },
@@ -649,9 +668,9 @@ fn open_chat(
     draft: &mut crate::agent::chat::Draft,
     worker: &Worker,
 ) -> Result<bool> {
-    worker.chat.lock().unwrap().viewing(true);
+    worker.chat.lock().unwrap().set_viewing(true)?;
     let result = crate::agent::chat::run(terminal, registry.to_owned(), draft);
-    worker.chat.lock().unwrap().viewing(false);
+    worker.chat.lock().unwrap().set_viewing(false)?;
     result
 }
 
@@ -663,8 +682,9 @@ fn run_inner(
 ) -> Result<()> {
     let mut screen = Screen::start()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let worker = Worker::start(registry.clone());
+    let worker = Worker::start(registry.clone())?;
     let mut app = App::new(cwd);
+    app.notifications.restore(&worker.inbox.load()?);
     let mut chat_draft = crate::agent::chat::Draft::default();
     if chat && open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
         return Ok(());

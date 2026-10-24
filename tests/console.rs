@@ -1302,25 +1302,30 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
 
 #[test]
 fn codex_completion_shortcut_from_workbench() {
-    completion_shortcut(false, false);
+    completion_shortcut(false, false, false);
 }
 
 #[test]
 fn codex_completion_shortcut_from_navigation() {
-    completion_shortcut(true, false);
+    completion_shortcut(true, false, false);
 }
 
 #[test]
 fn unread_picker_from_workbench() {
-    completion_shortcut(false, true);
+    completion_shortcut(false, true, false);
 }
 
 #[test]
 fn unread_picker_from_navigation() {
-    completion_shortcut(true, true);
+    completion_shortcut(true, true, false);
 }
 
-fn completion_shortcut(from_navigation: bool, use_picker: bool) {
+#[test]
+fn completed_turns_are_caught_up_after_restart() {
+    completion_shortcut(false, false, true);
+}
+
+fn completion_shortcut(from_navigation: bool, use_picker: bool, restart: bool) {
     use serde_json::{Value, json};
     use std::{
         os::unix::net::UnixListener,
@@ -1405,6 +1410,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
                 let result = match v["method"].as_str().unwrap() {
                     "initialize" => json!({}),
                     "initialized" => continue,
+                    "thread/loaded/list" if restart && current == 2 => json!({"data":[]}),
                     "thread/loaded/list" => json!({"data":["notify-thread"]}),
                     "thread/read" => {
                         json!({"thread":{"id":"notify-thread","cwd":cwd,"status":{"type":"idle"},"name":"NOTIFY_THREAD"}})
@@ -1467,7 +1473,19 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
     }
     phase.store(1, Ordering::Relaxed);
     wait_phase(1);
-    phase.store(2, Ordering::Relaxed);
+    if restart {
+        // 退出时仍在运行；完成发生在 Twig 不在线期间。
+        p.send(b"\x17dq");
+        p.wait("TERMINAL_RESTORED:0");
+        assert!(p.wait_exit().success());
+        phase.store(2, Ordering::Relaxed);
+        p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"/other\r\r\r");
+        p.wait(" · 全局 Codex ");
+    } else {
+        phase.store(2, Ordering::Relaxed);
+    }
     p.wait("Codex 本轮已完成");
     p.wait("Ctrl-W f 跳转");
     p.resize(80, 30);
@@ -2606,7 +2624,15 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
     p.wait("未读检查失败");
     fs::write(&project_state, serde_json::to_vec(&tasks).unwrap()).unwrap();
     p.wait("Agent 收到新消息");
-    p.send(b"\x17f");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
+    p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"\x17u");
+    p.wait_screen("demo / auth / 未读 1");
+    // 重启恢复未读，但不重播旧卡片；通过未读列表进入。
+    p.send(b"\r");
     p.wait(" · 全局 Codex ");
     p.send(b"\x17u");
     p.wait("暂无未读任务");
@@ -2618,6 +2644,28 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
     p.wait("Agent*");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
+    state["messages"].as_array_mut().unwrap().push(serde_json::json!({"id":"offline", "thread":"task-thread", "text":"退出期间送达", "status":"sent", "turn":null, "error":null}));
+    save(&state);
+    p = f.terminal(false);
+    p.wait("Agent*");
+    p.wait("Agent 收到新消息");
+    p.send(b"\x17u");
+    p.wait_screen("demo / auth / 未读 1");
+    p.send(b"\x17u");
+    p.wait_screen_absent("demo / auth / 未读 1");
+    p.send(b"\t");
+    p.wait("YOLO");
+    p.send(b"\t");
+    p.wait_screen_absent("Agent*");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(f.temp.path().join("notifications.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["unread"].as_array().unwrap().len(), 1);
+    assert_eq!(saved["unread"][0]["id"], "message:offline");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&fs::read(dir.join("runtime.json")).unwrap())
             .unwrap(),
