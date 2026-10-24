@@ -967,6 +967,11 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         command.args(["-c", "\"$TWIG_TEST_BIN\" --config \"$TWIG_TEST_CONFIG\" \"$@\"; printf '\\nTERMINAL_RESTORED:%s\\n' $?",
             "test", action, "demo", "feat/unified"]);
         let mut p = Pty::spawn(command);
+        // macOS 临时目录较长，详情栏需能完整显示路径，避免按换行片段匹配。
+        p.resize(
+            u16::try_from(target.as_os_str().len() * 2 + 20).unwrap(),
+            36,
+        );
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'DIRECT_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("DIRECT_DIR:{}", target.display()));
