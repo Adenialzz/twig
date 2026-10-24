@@ -211,7 +211,7 @@ struct Pty {
 impl Pty {
     fn spawn(mut command: Command) -> Self {
         let (mut master, mut slave) = (0, 0);
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: 36,
             ws_col: 140,
             ws_xpixel: 0,
@@ -224,7 +224,7 @@ impl Pty {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &size,
+                    &raw mut size,
                 )
             },
             0
@@ -509,7 +509,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     ]);
     let mut p = Pty::spawn(command);
     p.wait("demo");
-    p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
+    p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
     p.wait_screen("已请求复制 4 chars");
     let prefix = b"\x1b]52;c;";
     let start = p
@@ -525,7 +525,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     p.text.clear();
     p.bytes.clear();
     p.wait("demo");
-    p.send(b"\x1b[<0;4;4M\x1b[<32;7;4M\x1b[<0;7;4m");
+    p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
     p.wait_screen("已请求复制 4 chars");
     p.send(b"\x1bq");
     p.wait("TERMINAL_RESTORED:0");
@@ -591,11 +591,11 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
     let state = fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
     let mut p = f.terminal(true);
     p.wait("demo");
-    p.send(b"\t/auth\r");
+    p.send(b"2/auth\r");
     p.resize(65, 22);
     thread::sleep(Duration::from_millis(100));
-    p.send(b"\t?");
-    p.wait("Shift+Tab");
+    p.send(b"\x17j?");
+    p.wait_screen("切换 Console 与 Agent");
     let start = Instant::now();
     p.send(b"\x03");
     p.wait("TERMINAL_RESTORED:0");
@@ -624,7 +624,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait("搜索：");
         p.send(b"\r");
         // 返回项目后重新 Enter，应清除任务筛选并选中主工作目录。
-        p.send(b"\x1b[Z\r");
+        p.send(b"1\r");
         assert_eq!(fs::read(&f.registry).unwrap(), before_entry);
         p.send(keys);
         p.wait(" · 全局 Codex ");
@@ -660,8 +660,8 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.text.clear();
         p.send(b"\x17d");
         p.wait("任务 / ");
-        // 返回后聚焦项目区，Tab 保留任务选择，可以再次进入同一 Shell。
-        p.send(b"\t\r");
+        // 返回后聚焦项目区，按 2 保留任务选择，可以再次进入同一 Shell。
+        p.send(b"2\r");
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'RETURNED_%s\\n' SHELL\r");
         p.wait("RETURNED_SHELL");
@@ -694,7 +694,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     };
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\tG\r");
+    p.send(b"2G\r");
     p.wait(" · 全局 Codex ");
     p.send(b"printf 'FIRST_%s\\n' PANE\r");
     p.wait("FIRST_PANE");
@@ -721,7 +721,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
     p.send(b"\x17d");
     p.wait("任务 / ");
     assert_eq!(pids, mux(&["list-panes", "-a", "-F", "#{pane_pid}"]));
-    p.send(b"\t\r");
+    p.send(b"2\r");
     p.wait(" · 全局 Codex ");
     // 仅断开专用测试 server 的 Control Mode 客户端；Pane 仍在。
     let clients = mux(&["list-clients", "-F", "#{client_name}"]);
@@ -805,7 +805,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     ]);
     let mut p = Pty::spawn(command);
     p.wait("auth");
-    p.send(b"\tG\r");
+    p.send(b"2G\r");
     p.wait("终端已返回导航：不能在当前");
     p.text.clear();
     p.bytes.clear();
@@ -873,7 +873,7 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
         p.wait("更多");
         p.text.clear();
         p.bytes.clear();
-        p.send(b"\t\r");
+        p.send(b"2\r");
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'REENTER_DIR:%s\\n' \"$PWD\"\r");
         p.wait(&format!("REENTER_DIR:{}", target.display()));
@@ -901,7 +901,7 @@ fn custom_prefix_directions_alt_resize_and_mouse_work_in_terminal() {
     };
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\tG\r");
+    p.send(b"2G\r");
     p.wait(" · 全局 Codex ");
     p.send(b"\x17s");
     p.send(b"printf 'SPLIT_%s\\n' READY\r");
@@ -1988,7 +1988,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     f.git(&["branch", "existing"]);
     let mut p = f.terminal(false);
     p.wait("主工作目录");
-    p.send(b"\t/new\r");
+    p.send(b"2/new\r");
     p.wait("新建任务");
     p.send(b"existing\r");
     p.wait("使用已有分支");
@@ -2142,7 +2142,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
     let mut p = f.terminal(false);
     p.wait("主工作目录");
-    p.send(b"\t/new\r");
+    p.send(b"2/new\r");
     p.wait("新建任务");
     // 手动输入后切到起点字段提交，不接受候选，仍允许选择来源。
     p.send(b"feat/remote\x1b[Z\r");
@@ -2446,4 +2446,62 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.child.wait().unwrap().success());
+}
+
+#[test]
+fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
+    let mut f = Fixture::new();
+    f.registry = f.temp.path().join("config.toml");
+    f.init();
+    let project_state = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let mut tasks: serde_json::Value =
+        serde_json::from_slice(&fs::read(&project_state).unwrap()).unwrap();
+    let task_path = tasks["auth"]["path"].clone();
+    tasks["auth"]["agent_thread"] = serde_json::json!("task-thread");
+    fs::write(&project_state, serde_json::to_vec(&tasks).unwrap()).unwrap();
+    let dir = f.temp.path().join("controller");
+    fs::create_dir(&dir).unwrap();
+    let mut state = serde_json::json!({
+        "bindings": {
+            "controller": {"thread":"controller-thread", "cwd":dir, "project":null, "task":null, "stopped":false},
+            "task-thread": {"thread":"task-thread", "cwd":task_path, "project":"demo", "task":"auth", "stopped":false}
+        },
+        "messages": [{"id":"old", "thread":"task-thread", "text":"历史", "status":"sent", "turn":null, "error":null}],
+        "seen":[], "socket":null
+    });
+    let save = |state: &serde_json::Value| {
+        let temp = dir.join("next.json");
+        fs::write(&temp, serde_json::to_vec(state).unwrap()).unwrap();
+        fs::rename(temp, dir.join("runtime.json")).unwrap();
+    };
+    save(&state);
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    thread::sleep(Duration::from_secs(3));
+    p.send(b"\x17u");
+    p.wait("暂无未读任务");
+    p.send(b"\x17u");
+    state["messages"].as_array_mut().unwrap().push(serde_json::json!({"id":"new", "thread":"task-thread", "text":"新派活", "status":"sent", "turn":null, "error":null}));
+    fs::write(&project_state, b"temporarily incomplete JSON").unwrap();
+    save(&state);
+    p.wait("未读检查失败");
+    fs::write(&project_state, serde_json::to_vec(&tasks).unwrap()).unwrap();
+    p.wait("Agent 收到新消息");
+    p.send(b"\x17f");
+    p.wait(" · 全局 Codex ");
+    p.send(b"\x17u");
+    p.wait("暂无未读任务");
+    p.send(b"\x17u\x17d");
+    p.wait("任务 / ");
+    state["messages"].as_array_mut().unwrap().push(serde_json::json!({"id":"feedback", "thread":"controller-thread", "text":"子任务反馈", "status":"sent", "turn":null, "error":null}));
+    save(&state);
+    p.wait("主控有新消息");
+    p.wait("Agent*");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(dir.join("runtime.json")).unwrap())
+            .unwrap(),
+        state
+    );
 }

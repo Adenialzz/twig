@@ -61,3 +61,7 @@ panes = [
 异常锁和资源不一致见 [故障排查](troubleshooting.md)（`twig guide troubleshooting`）。
 
 项目条目的可选 `last_used` 由 Twig 自动记录，为 Unix 毫秒时间戳，用于 Console 最近使用排序。成功创建任务（含 `new --no-open`）或进入工作台时更新，遵循 `--config`；保存时保留项目路径和启动配置，并重新序列化 TOML。
+
+## 可选主控数据
+
+主控默认保存于 `~/.twig/controller/`，包含 workspace 和 runtime.json；遵循 `--config` 隔离，详情见 [主控 Agent](agent.md)。受管任务登记记录增加 `agent_thread`，工作树创建 `.twig/state.md`，由共享 Git `info/exclude` 精确忽略。普通任务不创建这些资源，不迁移旧任务。飞书地址通过 `TWIG_FEISHU_WEBHOOK_URL` 传入，不写入配置。

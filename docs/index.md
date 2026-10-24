@@ -1,6 +1,6 @@
 # twig 用户手册
 
-twig 用 Git Worktree 和 tmux 管理独立任务环境。人和 Agent 使用同一份文档，按问题逐步深入即可。
+twig 用 Git Worktree 和 tmux 管理并行任务环境，并可通过主控 Codex Agent 派活和跟进。人和 Agent 使用同一份文档，按问题逐步深入即可。
 
 ## 从哪里开始
 
@@ -26,6 +26,7 @@ twig guide --all          # 输出完整手册
 | [配置与存储](configuration.md) | --config、登记表、覆盖规则和状态文件 | twig guide configuration |
 | [任务窗口](windows.md) | 分屏、启动命令、shell/process 模式 | twig guide windows |
 | [Console](console.md) | 面板操作、快捷键、Codex 状态和历史 | twig guide console |
+| [主控 Agent](agent.md) | 主控对话、受管任务、消息队列与飞书通知 | twig guide agent |
 | [安全清理](cleanup.md) | stop/rm、文件保护和部分失败 | twig guide cleanup |
 | [PR/MR](pr.md) | 平台认证、显式推送和草稿请求 | twig guide pr |
 | [Shell 补全](completion.md) | 安装 Zsh 补全及候选规则 | twig guide completion |

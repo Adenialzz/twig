@@ -24,6 +24,8 @@ pub struct Feature {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_start: Option<BranchStart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_thread: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]

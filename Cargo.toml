@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
 tempfile = "3"
-ratatui = "0.29"
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 # 使用同步 poll 后端，避免 macOS 同时收到缩放和输入时丢失边沿通知。
 crossterm = { version = "0.28", features = ["use-dev-tty"] }
 tungstenite = "0.26"

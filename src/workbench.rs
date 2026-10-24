@@ -658,7 +658,7 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], status: &str, selection: Opt
         Rect::new(0, area.height.saturating_sub(1), area.width, 1),
     );
     if let Some(pane) = active
-        && !selection.is_some_and(|selection| selection.pane == pane.id)
+        && selection.is_none_or(|selection| selection.pane != pane.id)
         && let Some((x, y)) = pane.cursor
         && pane.rect.x + x < area.width
         && pane.rect.y + y < area.height.saturating_sub(1)
@@ -774,6 +774,7 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
         &mut |_, _| Status {
             text: "twig 实验工作台".into(),
             notification: None,
+            chat_notification: false,
             unread: Vec::new(),
         },
     )
@@ -784,7 +785,13 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
 pub struct Status {
     pub text: String,
     pub notification: Option<crate::notification::CompletionNotice>,
+    pub chat_notification: bool,
     pub unread: Vec<UnreadTask>,
+}
+
+pub enum Destination {
+    Task(crate::notification::CompletionNotice),
+    Agent,
 }
 
 /// 借用 Console 的终端，不退出 alternate screen，不启动原生 tmux 界面。
@@ -793,7 +800,7 @@ pub fn run(
     session: String,
     window: &str,
     mut status: impl FnMut(&str, &str) -> Status,
-) -> Result<Option<crate::notification::CompletionNotice>> {
+) -> Result<Option<Destination>> {
     // 防止把正在运行本前端的 Pane 捕获回来，形成递归显示和输入。
     if let Ok(pane) = std::env::var("TMUX_PANE") {
         let output = Command::new("tmux")
@@ -826,7 +833,7 @@ fn run_inner(
     args: Args,
     window: Option<&str>,
     status: &mut impl FnMut(&str, &str) -> Status,
-) -> Result<Option<crate::notification::CompletionNotice>> {
+) -> Result<Option<Destination>> {
     let _cursor_style = CursorStyleGuard;
     let mut client = Client::connect(&args)?;
     if let Some(window) = window {
@@ -956,6 +963,8 @@ fn run_inner(
                 );
                 if let Some(notification) = &label.notification {
                     crate::notification::draw(frame, notification);
+                } else if label.chat_notification {
+                    crate::notification::draw_chat(frame);
                 }
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
@@ -999,7 +1008,7 @@ fn run_inner(
                 match picker.key(key, &label.unread) {
                     PickerAction::Stay => {}
                     PickerAction::Close => unread_picker = None,
-                    PickerAction::Open(notice) => return Ok(Some(notice)),
+                    PickerAction::Open(notice) => return Ok(Some(Destination::Task(notice))),
                 }
             }
             if !matches!(input, Event::Resize(..)) {
@@ -1106,7 +1115,10 @@ fn run_inner(
                             None
                         }
                         KeyCode::Char('f') if label.notification.is_some() => {
-                            return Ok(label.notification);
+                            return Ok(label.notification.map(Destination::Task));
+                        }
+                        KeyCode::Char('f') if label.chat_notification => {
+                            return Ok(Some(Destination::Agent));
                         }
                         KeyCode::Char('?') => {
                             prefix = true;

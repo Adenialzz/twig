@@ -6,7 +6,7 @@
 
 twig 用 Git Worktree 和 tmux 管理本地任务环境。一个项目对应一个 tmux Session；一个任务对应一个分支、Worktree 和窗口，窗口可分成多个 Pane。
 
-项目通过登记别名定位，任务命令始终显式指定项目与任务，不根据当前目录猜测。twig 不负责 Agent 编排、提交、合并、部署或自动恢复对话。
+项目通过登记别名定位，任务命令始终显式指定项目与任务，不根据当前目录猜测。普通任务由用户自行开发或运行 Agent；可选主控支持受管 Codex 任务的派活与跟进，见 [主控 Agent](agent.md)。Twig 不自动提交、合并或部署。
 
 ## 登记已有仓库
 
@@ -36,7 +36,7 @@ twig ls myapp
 twig open myapp fix/bug
 ```
 
-`--no-open` 仍创建窗口并执行配置的启动命令，不是 dry-run。重复 new 对已登记同名任务直接报错，请使用 open 或 Console 任务列表进入。open 在窗口缺失时重建，但不恢复原进程或对话。
+`--no-open` 仍创建窗口并执行配置的启动命令，不是 dry-run。重复 new 对已登记同名任务直接报错，请使用 open 或 Console 任务列表进入。普通任务的 open 在窗口缺失时按启动配置重建，不恢复原进程或对话；受管任务则连接绑定的 Codex session。
 
 Console、new 和 open 使用相同的 Twig 终端工作台。按 `Ctrl-W d` 返回 Console 导航并保留进程，再按 q 退出；不需要使用 tmux 前缀。输入 exit 会退出当前 Shell，可能关闭 Pane。
 
@@ -46,7 +46,7 @@ Console、new 和 open 使用相同的 Twig 终端工作台。按 `Ctrl-W d` 返
 twig
 ```
 
-裸 twig 与 twig console 都进入交互面板。Tab 切区，方向键选择，任务区 Enter 进入窗口，? 查看帮助，q 退出。浏览不会创建资源；提交表单、确认删除及进入缺失窗口会执行相应操作。完整说明见 [Console](console.md)（`twig guide console`）。
+裸 twig 与 twig console 都进入交互面板。Tab 切换 Console / Agent，1 / 2 聚焦项目 / 任务，方向键选择，任务区 Enter 进入窗口，? 查看帮助，q 退出。浏览不会创建资源；提交表单、确认删除及进入缺失窗口会执行相应操作。完整说明见 [Console](console.md)（`twig guide console`）。
 
 ## 完成与清理
 

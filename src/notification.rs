@@ -9,12 +9,54 @@ use ratatui::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionNotice {
+    pub message: bool,
     pub project: String,
     pub task: String,
 }
 
+impl CompletionNotice {
+    pub fn same_task(&self, other: &Self) -> bool {
+        self.project == other.project && self.task == other.task
+    }
+}
+
 /// 仅绘制覆盖层，不改变输入焦点或底层终端尺寸。
 pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
+    let safe = |value: &str| {
+        value
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+    };
+    draw_card(
+        frame,
+        if notice.message {
+            " Agent 收到新消息 "
+        } else {
+            " ✓ Codex 本轮已完成 "
+        },
+        vec![
+            Line::from(format!("项目：{}", safe(&notice.project))),
+            Line::from(format!("任务：{}", safe(&notice.task))),
+            Line::from(""),
+            Line::from("Ctrl-W f 跳转"),
+        ],
+    );
+}
+
+pub fn draw_chat(frame: &mut Frame) {
+    draw_card(
+        frame,
+        " 主控有新消息 ",
+        vec![
+            Line::from("主控收到消息或完成回复"),
+            Line::from(""),
+            Line::from("Ctrl-W f 查看 Agent"),
+        ],
+    );
+}
+
+fn draw_card(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>) {
     let screen = frame.area();
     let width = screen.width.saturating_sub(2).min(48);
     let height = screen.height.saturating_sub(2).min(8);
@@ -24,31 +66,20 @@ pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
         width,
         height,
     );
-    let safe = |value: &str| {
-        value
-            .chars()
-            .filter(|c| !c.is_control())
-            .collect::<String>()
-    };
-    let card = Paragraph::new(vec![
-        Line::from(format!("项目：{}", safe(&notice.project))),
-        Line::from(format!("任务：{}", safe(&notice.task))),
-        Line::from(""),
-        Line::from("Ctrl-W f 跳转"),
-    ])
-    .wrap(Wrap { trim: false })
-    .style(Style::default().fg(Color::White).bg(Color::Indexed(24)))
-    .block(
-        Block::default()
-            .title(" ✓ Codex 本轮已完成 ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-    );
+    let card = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::White).bg(Color::Indexed(24)))
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        );
     frame.render_widget(Clear, area);
     frame.render_widget(card, area);
 }
@@ -69,6 +100,7 @@ mod tests {
                     draw(
                         frame,
                         &CompletionNotice {
+                            message: false,
                             project: "demo".into(),
                             task: "notify".into(),
                         },
@@ -123,10 +155,11 @@ pub enum PickerAction {
 
 impl UnreadPicker {
     pub fn sync(&mut self, tasks: &[UnreadTask]) {
-        if !tasks
-            .iter()
-            .any(|task| Some(&task.notice) == self.selected.as_ref())
-        {
+        if !tasks.iter().any(|task| {
+            self.selected
+                .as_ref()
+                .is_some_and(|selected| selected.same_task(&task.notice))
+        }) {
             self.selected = tasks.first().map(|task| task.notice.clone());
         }
     }
@@ -150,10 +183,11 @@ impl UnreadPicker {
             self.prefix = true;
             return PickerAction::Stay;
         }
-        let Some(index) = tasks
-            .iter()
-            .position(|task| Some(&task.notice) == self.selected.as_ref())
-        else {
+        let Some(index) = tasks.iter().position(|task| {
+            self.selected
+                .as_ref()
+                .is_some_and(|selected| selected.same_task(&task.notice))
+        }) else {
             return PickerAction::Stay;
         };
         let next = match key.code {
@@ -201,11 +235,11 @@ impl UnreadPicker {
                 )
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(
-            tasks
-                .iter()
-                .position(|task| Some(&task.notice) == self.selected.as_ref()),
-        );
+        let mut state = ListState::default().with_selected(tasks.iter().position(|task| {
+            self.selected
+                .as_ref()
+                .is_some_and(|selected| selected.same_task(&task.notice))
+        }));
         frame.render_stateful_widget(
             List::new(items)
                 .block(block)
@@ -227,9 +261,23 @@ mod picker_tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
 
+    #[test]
+    fn picker_keeps_task_selected_when_notice_type_changes() {
+        let mut tasks = vec![task("first"), task("selected")];
+        let mut picker = UnreadPicker::default();
+        picker.sync(&tasks);
+        picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tasks);
+        tasks[1].notice.message = true;
+        picker.sync(&tasks);
+        assert!(
+            matches!(picker.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tasks), PickerAction::Open(notice) if notice.task == "selected" && notice.message)
+        );
+    }
+
     fn task(name: &str) -> UnreadTask {
         UnreadTask {
             notice: CompletionNotice {
+                message: false,
                 project: "demo".into(),
                 task: name.into(),
             },

@@ -1,4 +1,7 @@
-use super::{notifications::Completion, query};
+use super::{
+    notifications::{ChatNotifications, Completion, Deliveries},
+    query,
+};
 use crate::{
     codex::{Client, Thread, Turn},
     config::{Config, Feature, Project},
@@ -43,6 +46,7 @@ pub struct Snapshot {
     pub registry_checked: Option<Instant>,
     pub threads: Vec<Thread>,
     pub codex_error: Option<String>,
+    pub delivery_error: Option<String>,
     pub codex_checked: Option<Instant>,
     pub history: Vec<Thread>,
     pub history_key: Option<(PathBuf, bool)>,
@@ -82,6 +86,7 @@ pub struct Worker {
     pub requests: Sender<Request>,
     pub updates: Updates,
     pub completions: Receiver<Completion>,
+    pub chat: Arc<Mutex<ChatNotifications>>,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -93,14 +98,17 @@ impl Worker {
         let (completed, completions) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
+        let chat = Arc::new(Mutex::new(ChatNotifications::default()));
+        let chat_out = chat.clone();
         let handle = thread::spawn(move || {
             query::install(stop.clone());
-            collect(registry, rx, out, completed, stop);
+            collect(registry, rx, out, completed, stop, chat_out);
         });
         Self {
             requests: tx,
             updates,
             completions,
+            chat,
             cancel,
             handle: Some(handle),
         }
@@ -286,6 +294,7 @@ impl GitScan {
                             branch: task.branch.clone(),
                             base: String::new(),
                             remote_start: None,
+                            agent_thread: None,
                         }
                     )?,
                     "Worktree 尚未创建"
@@ -441,12 +450,42 @@ fn refresh_windows(repos: &mut [Repo]) {
     }
 }
 
+// 只有成功读取后确认取消登记或实例变化才终止处理；读失败不能当作已失效。
+fn message_task_current(
+    store: &crate::agent::Store,
+    binding: &crate::agent::Binding,
+    alias: &str,
+    name: &str,
+) -> Result<bool> {
+    std::fs::metadata(&store.registry).context("无法读取项目登记表")?;
+    let registry = registry::load(&store.registry)?;
+    let Some(entry) = registry.projects.get(alias) else {
+        return Ok(false);
+    };
+    let project = Project::discover_at(&registry::expand(&entry.path)?, &store.registry)?;
+    let state: crate::config::State = serde_json::from_slice(
+        &std::fs::read(project.dir.join("state.json")).context("无法读取任务记录")?,
+    )?;
+    let Some(task) = state.get(name) else {
+        return Ok(false);
+    };
+    if task.agent_thread.as_deref() != Some(&binding.thread) || task.path != binding.cwd {
+        return Ok(false);
+    }
+    ensure!(
+        crate::check_worktree(&project.config()?, task)?,
+        "任务 Worktree 不存在"
+    );
+    Ok(true)
+}
+
 fn collect(
     registry: PathBuf,
     requests: Receiver<Request>,
     updates: Updates,
     completions: Sender<Completion>,
     cancel: Arc<AtomicBool>,
+    chat: Arc<Mutex<ChatNotifications>>,
 ) {
     let mut snapshot = Snapshot {
         codex_error: Some("尚未连接".into()),
@@ -456,6 +495,7 @@ fn collect(
     let mut client: Option<Client> = None;
     let mut watched: BTreeMap<String, (PathBuf, Option<Turn>)> = BTreeMap::new();
     let mut announced = HashSet::new();
+    let mut deliveries = Deliveries::default();
     let mut registry_at = None;
     let mut activity_at = None;
     let mut retry_at = None;
@@ -522,17 +562,50 @@ fn collect(
             }
             refresh_windows(&mut snapshot.repos);
             updates.publish(&snapshot);
+            // 本地投递记录不依赖 daemon 连接或重试退避；采集本身不投递消息。
+            let state = crate::agent::Store::new(&registry).and_then(|store| {
+                let state = store.load()?;
+                let errors = deliveries.observe(&state, |binding| {
+                    if let (Some(project), Some(task)) = (&binding.project, &binding.task) {
+                        if message_task_current(&store, binding, project, task)? {
+                            completions.send(Completion {
+                                message: true,
+                                project: project.clone(),
+                                task: task.clone(),
+                                path: binding.cwd.clone(),
+                            })?;
+                        }
+                    } else if state
+                        .bindings
+                        .get("controller")
+                        .is_some_and(|b| b.thread == binding.thread)
+                    {
+                        chat.lock().unwrap().receive();
+                    }
+                    Ok(())
+                });
+                snapshot.delivery_error = (!errors.is_empty()).then(|| errors.join("\n"));
+                Ok(state)
+            });
+            if let Err(error) = &state {
+                snapshot.delivery_error = Some(format!("消息记录读取失败：{error:#}"));
+            }
             if force || retry_at.is_none_or(|at: Instant| Instant::now() >= at) {
                 let result = (|| -> Result<Vec<Thread>> {
+                    let state = state?;
                     if client.is_none() {
                         client = Some(Client::discover()?);
                     }
                     let client = client.as_mut().unwrap();
                     let threads = client.loaded()?;
+                    let controller = state.bindings.get("controller");
                     let mut owners = Owners::new(&snapshot.repos);
                     let mut paths: BTreeMap<_, _> = threads
                         .iter()
-                        .filter(|t| owners.get(&t.cwd).is_some())
+                        .filter(|t| {
+                            owners.get(&t.cwd).is_some()
+                                || controller.is_some_and(|c| c.thread == t.id)
+                        })
                         .map(|t| (t.id.clone(), t.cwd.clone()))
                         .collect();
                     // 轮次结束后会话可能立即卸载，仍需读取已观察到的进行中轮次。
@@ -542,6 +615,22 @@ fn collect(
                         }
                     }
                     for (id, path) in paths {
+                        if controller.is_some_and(|c| c.thread == id) {
+                            // 空会话还没有 rollout；建立空基线，避免查询不存在的轮次存储。
+                            if threads.iter().any(|t| t.id == id && t.preview.is_empty()) {
+                                watched.entry(id).or_insert((path, None));
+                                continue;
+                            }
+                            let (latest, turns) = client
+                                .completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
+                            for turn in turns {
+                                if announced.insert((id.clone(), turn.id)) {
+                                    chat.lock().unwrap().receive();
+                                }
+                            }
+                            watched.insert(id, (path, latest));
+                            continue;
+                        }
                         let Some((project, task_path)) = owners.get(&path) else {
                             continue;
                         };
@@ -559,6 +648,7 @@ fn collect(
                                     .find(|t| t.path == task_path)
                                     .unwrap();
                                 let _ = completions.send(Completion {
+                                    message: false,
                                     project: project.to_owned(),
                                     path: task_path.to_owned(),
                                     task: task.name.clone(),
@@ -794,6 +884,7 @@ mod tests {
                 ..Default::default()
             });
             out.send(Completion {
+                message: false,
                 project: "repo".into(),
                 path: "/repo".into(),
                 task: index.to_string(),

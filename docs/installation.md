@@ -10,9 +10,9 @@ make install
 twig --help
 ```
 
-`make install` 只安装或更新 twig，不检查或安装 `gh`、`glab`，也不依赖 Homebrew。成功后打印 Zsh 补全和平台工具安装、登录提示，不修改 Shell 配置、不自动登录。使用 PR/MR 前按需自行安装 `gh` 或 `glab`，再运行 `gh auth login` / `glab auth login`。
+`make install` 安装或更新 twig，并复制更新主控 skill 到 `~/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md`；已有 skill 副本会被覆盖，自定义约定请另存。它不检查或安装 `gh`、`glab`，也不依赖 Homebrew。成功后打印 Zsh 补全和平台工具安装、登录提示，不修改 Shell 配置、不自动登录。使用 PR/MR 前按需自行安装 `gh` 或 `glab`，再运行 `gh auth login` / `glab auth login`。
 
-不使用 Make 时，可以直接执行 `cargo install --path . --locked`。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
+不使用 Make 时，可以直接执行 `cargo install --path . --locked`。该命令不复制主控 skill，使用主控时需自行将 `skills/twig-controller/SKILL.md` 复制到上述路径；自定义 `--config` 则复制到对应主控工作区的 `.agents/skills/twig-controller/SKILL.md`。确保 `~/.cargo/bin` 在 PATH 中。支持从 Bash、Zsh 调用；普通命令无需修改 Shell 配置，Tab 补全按下节启用。
 
 仅构建而不安装：
 

@@ -3,7 +3,7 @@ mod data;
 pub(crate) mod form;
 mod notifications;
 pub(crate) mod query;
-mod selection;
+pub(crate) mod selection;
 mod ui;
 
 use anyhow::{Context, Result, ensure};
@@ -26,6 +26,8 @@ use std::{
 pub(super) struct App {
     snapshot: Snapshot,
     notifications: notifications::Notifications,
+    chat_status: (bool, bool),
+    open_agent: bool,
     project: Option<String>,
     task: Option<PathBuf>,
     thread: Option<String>,
@@ -67,6 +69,8 @@ impl App {
     fn new(cwd: PathBuf) -> Self {
         Self {
             notifications: Default::default(),
+            chat_status: (false, false),
+            open_agent: false,
             snapshot: Snapshot {
                 codex_error: Some("正在连接 Codex…".into()),
                 ..Default::default()
@@ -111,6 +115,13 @@ impl App {
             self.notifications.receive(completion, viewed);
         }
         self.notifications.tick(Instant::now());
+        let chat_status = worker
+            .chat
+            .lock()
+            .unwrap()
+            .status(Instant::now(), self.notifications.current().is_none());
+        changed |= self.chat_status != chat_status;
+        self.chat_status = chat_status;
         changed || before.as_ref() != self.notifications.current()
     }
 
@@ -540,8 +551,13 @@ fn open_terminal(
                 }
                 let summary = data::summary(app.snapshot.threads.iter());
                 let text = format!(
-                    "{} · 全局 Codex {}",
+                    "{}{} · 全局 Codex {}",
                     target.project,
+                    if app.chat_status.0 {
+                        " · Agent 有新消息"
+                    } else {
+                        ""
+                    },
                     if app.snapshot.codex_error.is_some() {
                         "连接异常"
                     } else if app
@@ -559,18 +575,25 @@ fn open_terminal(
                         Some(error) => format!("{text} · {error}"),
                         None => text,
                     },
+                    chat_notification: app.chat_status.1,
                     notification: app.notifications.current().cloned(),
                     unread: app.notifications.tasks(),
                 }
             });
         match result {
-            Ok(Some(notice)) => match notification_target(app, registry, &notice) {
-                Ok(next) => {
-                    target = next;
-                    jump = Some(notice);
+            Ok(Some(twig_cli::workbench::Destination::Task(notice))) => {
+                match notification_target(app, registry, &notice) {
+                    Ok(next) => {
+                        target = next;
+                        jump = Some(notice);
+                    }
+                    Err(error) => break Err(error),
                 }
-                Err(error) => break Err(error),
-            },
+            }
+            Ok(Some(twig_cli::workbench::Destination::Agent)) => {
+                app.open_agent = true;
+                break Ok(());
+            }
             Ok(None) => break Ok(()),
             Err(error) => break Err(error),
         }
@@ -588,6 +611,17 @@ fn open_terminal(
 }
 
 pub fn run(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> Result<()> {
+    run_mode(registry, cwd, initial, false)
+}
+pub fn run_chat(registry: PathBuf, cwd: PathBuf) -> Result<()> {
+    run_mode(registry, cwd, None, true)
+}
+fn run_mode(
+    registry: PathBuf,
+    cwd: PathBuf,
+    initial: Option<TerminalTarget>,
+    chat: bool,
+) -> Result<()> {
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "Console 工作台需要交互式终端；已准备的环境保留，脚本创建请用 new --no-open，查询请用 twig ls"
@@ -605,15 +639,36 @@ pub fn run(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> 
         );
         eprintln!("Console 异常：{info}");
     }));
-    let result = run_inner(registry, cwd, initial);
+    let result = run_inner(registry, cwd, initial, chat);
     std::panic::set_hook(previous);
     result
 }
-fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -> Result<()> {
+fn open_chat(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    registry: &std::path::Path,
+    draft: &mut crate::agent::chat::Draft,
+    worker: &Worker,
+) -> Result<bool> {
+    worker.chat.lock().unwrap().viewing(true);
+    let result = crate::agent::chat::run(terminal, registry.to_owned(), draft);
+    worker.chat.lock().unwrap().viewing(false);
+    result
+}
+
+fn run_inner(
+    registry: PathBuf,
+    cwd: PathBuf,
+    initial: Option<TerminalTarget>,
+    chat: bool,
+) -> Result<()> {
     let mut screen = Screen::start()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let worker = Worker::start(registry.clone());
     let mut app = App::new(cwd);
+    let mut chat_draft = crate::agent::chat::Draft::default();
+    if chat && open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
+        return Ok(());
+    }
     if let Some(target) = &initial {
         app.project = Some(target.project.clone());
         app.task = Some(app.initial_cwd.clone());
@@ -690,6 +745,16 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             worker.requests.send(app.request())?;
             dirty = true;
         }
+        if std::mem::take(&mut app.open_agent) {
+            selection = None;
+            app.pane_prefix = false;
+            app.top_prefix = false;
+            app.delete_prefix = false;
+            if open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
+                break;
+            }
+            dirty = true;
+        }
         dirty |= app.receive_notifications(&worker, None);
         let unread_tasks = app.notifications.tasks();
         if let Some(picker) = &mut unread_picker {
@@ -737,6 +802,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                 }
                 if let Some(notice) = app.notifications.current() {
                     twig_cli::notification::draw(frame, notice);
+                } else if app.chat_status.1 {
+                    twig_cli::notification::draw_chat(frame);
                 }
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
@@ -776,6 +843,20 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             }
             continue;
         }
+        let event = match event {
+            Event::Mouse(mouse)
+                if app.form.is_none()
+                    && !app.help
+                    && !app.searching
+                    && terminal.size()?.width >= 38
+                    && terminal.size()?.height >= 12
+                    && crate::tabs::clicked(mouse, terminal.get_frame().area())
+                        == Some(crate::tabs::Tab::Agent) =>
+            {
+                Event::Key(event::KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            }
+            event => event,
+        };
         match event {
             Event::Resize(_, _) => {
                 selection = None;
@@ -962,6 +1043,16 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             worker.requests.send(app.request())?;
             continue;
         }
+        if matches!(key.code, KeyCode::Tab) {
+            selection = None;
+            if open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
+                break;
+            }
+            app.pane_prefix = false;
+            app.top_prefix = false;
+            app.delete_prefix = false;
+            continue;
+        }
         if app.pane_prefix {
             app.pane_prefix = false;
             if key.code == KeyCode::Char('u') {
@@ -980,6 +1071,8 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
                         )?,
                         Err(error) => app.message = Some(format!("跳转失败：{error:#}")),
                     }
+                } else if app.chat_status.1 {
+                    app.open_agent = true;
                 }
             } else if let KeyCode::Char(direction) = key.code {
                 app.focus = match (app.focus, direction.to_ascii_lowercase()) {
@@ -1034,8 +1127,6 @@ fn run_inner(registry: PathBuf, cwd: PathBuf, initial: Option<TerminalTarget>) -
             KeyCode::PageUp => app.scroll = app.scroll.saturating_sub(4),
             KeyCode::Char('1') if key.modifiers.is_empty() => app.focus = 0,
             KeyCode::Char('2') if key.modifiers.is_empty() => app.focus = 1,
-            KeyCode::Tab => app.focus = (app.focus + 1) % 3,
-            KeyCode::BackTab => app.focus = (app.focus + 2) % 3,
             KeyCode::Down | KeyCode::Char('j') => app.step(1),
             KeyCode::Up | KeyCode::Char('k') => app.step(-1),
             KeyCode::Char('g') if !key.modifiers.contains(KeyModifiers::CONTROL) => {

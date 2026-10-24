@@ -44,3 +44,7 @@ twig rm myapp auth --delete-ignored
 Console 的 `/delete` 或 `dd` 提供相同清理能力，默认取消；「删除本地分支」默认勾选（取消勾选则保留分支），勾选后跳过合并和推送检查，以 `git branch -D` 删除本地分支，文件和活动进程保护仍生效，「同时删除被忽略文件」默认勾选；确认前须核对清单，详见 [Console](console.md)（`twig guide console`）。
 
 清理不删除远端分支、不合并代码、不关闭 PR/MR。部分失败的处理见 [故障排查](troubleshooting.md)。
+
+## 受管 Codex 任务
+
+`new --agent` 创建的任务还受 Codex 活动状态和待发消息保护。先用 stop 中断轮次并取消尚未投递的消息，再检查文件；结果未知的 sending 记录需核对后用 `agent cancel --id ID` 取消，取消记录不撤回已发内容。`.twig/state.md` 是 ignored 文件，CLI 删除须显式 `--delete-ignored`。Twig 不关闭共享 Codex daemon。
