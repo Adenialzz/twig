@@ -121,6 +121,6 @@ twig guide --all
 
 构建用 `make build`，格式检查、Clippy 和 Rust 测试用 `make check`。终端与主控验收使用临时仓库、独立服务和模拟模型，不操作真实用户会话或 webhook。
 
-[GitHub Actions CI](.github/workflows/ci.yml) 在 PR、推送到 `main` 或手动触发时运行：`check` 在 Ubuntu 24.04 和 macOS Tahoe 26（Apple Silicon）上执行 `make check`，`terminal` 在 Ubuntu 24.04 上构建并执行 Control Mode PTY 验收。每个 Job 限时 20 分钟，同分支或 PR 的新运行取消旧运行；文档改动同样检查，一个平台失败不取消另一个平台的检查。当前 CI 不包含真实 Codex app-server 验收或自动发布。
+[GitHub Actions CI](.github/workflows/ci.yml) 在 PR、推送到 `main` 或手动触发时运行：`check` 在 Ubuntu 24.04 和 macOS Tahoe 26（Apple Silicon）上分步执行与 `make check` 相同的格式、Clippy 和 Rust 测试，`terminal` 在 Ubuntu 24.04 上构建并执行 Control Mode PTY 验收。Linux Job 从官方源码构建 tmux 3.8，macOS 通过 Homebrew 安装。每个 Job 限时 20 分钟，同分支或 PR 的新运行取消旧运行；文档改动同样检查，一个平台失败不取消另一个平台的检查。当前 CI 不包含真实 Codex app-server 验收或自动发布。
 
 开发约定见 [AGENTS.md](AGENTS.md)，贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，架构与决策记录见 [DESIGN.md](DESIGN.md)，隔离验收入口见 [examples/README.md](examples/README.md)。

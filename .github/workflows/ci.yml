@@ -39,7 +39,17 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y git tmux zsh
+          sudo apt-get install -y git zsh build-essential libevent-dev libncurses-dev bison pkg-config
+      - name: 构建并安装 tmux 3.8
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/tmux-3.8.tar.gz" https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz
+          tar -xzf "$RUNNER_TEMP/tmux-3.8.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-3.8"
+          ./configure --prefix="$RUNNER_TEMP/tmux-install"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux-install/bin" >> "$GITHUB_PATH"
       - name: 安装 macOS 测试依赖
         if: runner.os == 'macOS'
         run: brew install tmux zsh
@@ -50,8 +60,12 @@ jobs:
           git --version
           tmux -V
           zsh --version
-      - name: 格式、Clippy 和 Rust 测试
-        run: make check
+      - name: 格式检查
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Rust 测试
+        run: cargo test --locked
 
   terminal:
     runs-on: ubuntu-24.04
@@ -62,13 +76,22 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: false
       - name: 安装终端验收依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y git tmux zsh vim
+          sudo apt-get install -y git zsh vim build-essential libevent-dev libncurses-dev bison pkg-config
+      - name: 构建并安装 tmux 3.8
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/tmux-3.8.tar.gz" https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz
+          tar -xzf "$RUNNER_TEMP/tmux-3.8.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-3.8"
+          ./configure --prefix="$RUNNER_TEMP/tmux-install"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux-install/bin" >> "$GITHUB_PATH"
       - name: 记录环境版本
         run: |
           rustc --version
