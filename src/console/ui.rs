@@ -176,6 +176,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .message
         .as_deref()
         .or(app.snapshot.registry_error.as_deref())
+        .or(app.snapshot.delivery_error.as_deref())
         .or(app.snapshot.codex_error.as_deref());
     let connection = message.map(safe).unwrap_or_else(|| {
         match app.snapshot.codex_checked {

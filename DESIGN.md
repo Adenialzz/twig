@@ -791,3 +791,11 @@ Agent 通信线程在首次进入后随 Console 保留，避免切页销毁接�
 复用 Console 采集线程读取当前配置的 runtime.json，不新增线程或服务，不发送或恢复会话。本地消息采集独立于 daemon 连接重试；旧任务绑定经校验后才产生任务未读。
 
 验证：fmt、Clippy、库/主程序单元测试和 Agent CLI 测试，以及新增的 daemon 不可用时消息未读与任务跳转 PTY 测试通过。全量 Rust 测试中的部分 Console PTY 场景失败并出现退出挂起；Codex 0.164.0 上的 check_agent 在空会话退出时超时，check_control_mode 亦挂起并停止，本次不宣称完整验收通过。另修正现有 macOS openpty 测试参数的可变指针类型及一处 Clippy 布尔表达式告警。未安装、提交或推送。
+
+### 消息未读审查修正（2026-10-24）
+
+修复 openpty 测试参数的跨平台类型：使用 `&raw mut size` 同时适配 macOS 的可变指针与 Linux 的只读指针，不豁免 Clippy。通知新增显式任务身份比较，用于关闭卡片和未读列表选择，通知类型仅保留展示含义。新消息在通知成功或明确绑定失效后才消费 ID；读取或 Git 查询错误保留重试机会，各消息独立处理，诊断通过 Console 状态显示，不影响 Codex 连接退避。首次历史基线不变。
+
+测试新增双向混合通知关闭、列表类型改变后选中项保持、单条失败重试且不阻断其他消息；PTY 消息测试增加损坏任务记录后恢复验证。此前 Linux / Codex 0.163.0 的通过结果由用户提供，不能据此排除本机 macOS / 0.164.0 的历史挂起问题。
+
+本轮验证：macOS fmt、Clippy（all-targets / -D warnings）、64 项库与主程序单元测试、Agent CLI 测试及包含临时错误恢复的消息未读 PTY 测试通过。另用 macOS/Linux 两种 FFI 指针签名在本机执行 Clippy 编译检查，两者通过；未运行 Linux 全量检查。全量 Rust 测试再次出现部分 Console PTY 失败及退出挂起；Codex 0.164.0 的 Agent 隔离脚本仍在空会话退出时超时，Control Mode 脚本挂起后停止。已清理本次隔离服务和 tmux 资源，不将这些验收记为通过；未安装、提交或推送。

@@ -224,7 +224,7 @@ impl Pty {
                     &mut slave,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                    &mut size,
+                    &raw mut size,
                 )
             },
             0
@@ -2482,7 +2482,10 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
     p.wait("暂无未读任务");
     p.send(b"\x17u");
     state["messages"].as_array_mut().unwrap().push(serde_json::json!({"id":"new", "thread":"task-thread", "text":"新派活", "status":"sent", "turn":null, "error":null}));
+    fs::write(&project_state, b"temporarily incomplete JSON").unwrap();
     save(&state);
+    p.wait("未读检查失败");
+    fs::write(&project_state, serde_json::to_vec(&tasks).unwrap()).unwrap();
     p.wait("Agent 收到新消息");
     p.send(b"\x17f");
     p.wait(" · 全局 Codex ");

@@ -12,21 +12,28 @@ pub struct Deliveries {
     seen: std::collections::HashSet<String>,
 }
 impl Deliveries {
-    pub fn observe<'a>(
+    pub fn observe(
         &mut self,
-        state: &'a crate::agent::State,
-    ) -> Vec<&'a crate::agent::Binding> {
-        let mut recipients = Vec::new();
+        state: &crate::agent::State,
+        mut notify: impl FnMut(&crate::agent::Binding) -> anyhow::Result<()>,
+    ) -> Vec<String> {
+        let mut errors = Vec::new();
         for message in state.messages.iter().filter(|m| m.status == "sent") {
-            if self.seen.insert(message.id.clone())
-                && self.initialized
-                && let Some(binding) = state.bindings.values().find(|b| b.thread == message.thread)
-            {
-                recipients.push(binding);
+            if self.seen.contains(&message.id) {
+                continue;
             }
+            if self.initialized
+                && let Some(binding) = state.bindings.values().find(|b| b.thread == message.thread)
+                && let Err(error) = notify(binding)
+            {
+                errors.push(format!("消息 {} 未读检查失败：{error:#}", message.id));
+                continue;
+            }
+            // 历史、已失效绑定或成功处理的消息才完成去重；临时错误下轮重试。
+            self.seen.insert(message.id.clone());
         }
         self.initialized = true;
-        recipients
+        errors
     }
 }
 
@@ -94,7 +101,10 @@ impl Notifications {
     }
 
     pub fn dismiss(&mut self, notice: &CompletionNotice) {
-        if self.current() == Some(notice) {
+        if self
+            .current()
+            .is_some_and(|current| current.same_task(notice))
+        {
             self.current = None;
             self.tick(Instant::now());
         }
@@ -183,6 +193,33 @@ mod tests {
         assert_eq!(notices.tasks(), tasks);
         notices.read("a", Path::new("/a/one"));
         assert_eq!(notices.tasks(), tasks[1..]);
+    }
+
+    #[test]
+    fn mixed_notice_types_dismiss_by_task_identity() {
+        for first_message in [false, true] {
+            let mut notices = Notifications::default();
+            for message in [first_message, !first_message] {
+                notices.receive(
+                    Completion {
+                        message,
+                        project: "demo".into(),
+                        task: "work".into(),
+                        path: "/work".into(),
+                    },
+                    None,
+                );
+            }
+            let selected = notices.tasks()[0].notice.clone();
+            let now = Instant::now();
+            notices.tick(now);
+            notices.tick(now + Duration::from_secs(8));
+            assert_ne!(notices.current().unwrap().message, selected.message);
+            notices.read("demo", Path::new("/work"));
+            notices.dismiss(&selected);
+            assert_eq!(notices.count("demo", None), 0);
+            assert!(notices.current().is_none());
+        }
     }
 
     #[test]
@@ -312,6 +349,19 @@ mod delivery_tests {
     use super::*;
     use crate::agent::{Binding, Delivery, State};
 
+    fn observe(deliveries: &mut Deliveries, state: &State) -> Vec<Binding> {
+        let mut recipients = Vec::new();
+        assert!(
+            deliveries
+                .observe(state, |binding| {
+                    recipients.push(binding.clone());
+                    Ok(())
+                })
+                .is_empty()
+        );
+        recipients
+    }
+
     fn message(id: &str, thread: &str, status: &str) -> Delivery {
         Delivery {
             id: id.into(),
@@ -351,16 +401,16 @@ mod delivery_tests {
             message("pending", "task-id", "queued"),
         ];
         let mut deliveries = Deliveries::default();
-        assert!(deliveries.observe(&state).is_empty());
+        assert!(observe(&mut deliveries, &state).is_empty());
         state.messages.extend([
             message("unknown", "controller-id", "sending"),
             message("failed", "task-id", "failed"),
             message("cancelled", "task-id", "cancelled"),
         ]);
-        assert!(deliveries.observe(&state).is_empty());
+        assert!(observe(&mut deliveries, &state).is_empty());
         state.messages[1].status = "sent".into();
         state.messages[2].status = "sent".into();
-        let recipients = deliveries.observe(&state);
+        let recipients = observe(&mut deliveries, &state);
         assert_eq!(
             recipients
                 .iter()
@@ -390,7 +440,7 @@ mod delivery_tests {
         assert!(tasks.current().unwrap().message);
         assert_eq!(tasks.count("demo", None), 1);
         assert_eq!(chat.status(Instant::now(), true), (false, false));
-        assert!(deliveries.observe(&state).is_empty());
+        assert!(observe(&mut deliveries, &state).is_empty());
         tasks.read("demo", Path::new("/work"));
         tasks.receive(
             Completion {
@@ -406,7 +456,7 @@ mod delivery_tests {
             .messages
             .push(message("same-text-new-id", "controller-id", "sent"));
         chat.viewing(false);
-        for _ in deliveries.observe(&state) {
+        for _ in observe(&mut deliveries, &state) {
             chat.receive();
         }
         assert_eq!(chat.status(Instant::now(), true), (true, true));
@@ -418,7 +468,7 @@ mod delivery_tests {
     fn empty_baseline_and_replaced_bindings_do_not_replay_old_messages() {
         let mut state = State::default();
         let mut deliveries = Deliveries::default();
-        assert!(deliveries.observe(&state).is_empty());
+        assert!(observe(&mut deliveries, &state).is_empty());
         state.bindings.insert(
             "controller".into(),
             Binding {
@@ -431,7 +481,48 @@ mod delivery_tests {
         );
         state.messages.push(message("old", "old", "sent"));
         state.messages.push(message("new", "new", "sent"));
-        assert_eq!(deliveries.observe(&state).len(), 1);
-        assert!(deliveries.observe(&state).is_empty());
+        assert_eq!(observe(&mut deliveries, &state).len(), 1);
+        assert!(observe(&mut deliveries, &state).is_empty());
+    }
+    #[test]
+    fn transient_error_retries_only_failed_message_and_does_not_block_others() {
+        let mut state = State::default();
+        for thread in ["task", "controller"] {
+            state.bindings.insert(
+                thread.into(),
+                Binding {
+                    thread: thread.into(),
+                    cwd: "/work".into(),
+                    project: None,
+                    task: None,
+                    stopped: false,
+                },
+            );
+        }
+        let mut deliveries = Deliveries::default();
+        assert!(observe(&mut deliveries, &state).is_empty());
+        state.messages = vec![
+            message("retry", "task", "sent"),
+            message("success", "controller", "sent"),
+        ];
+        let mut received = Vec::new();
+        let errors = deliveries.observe(&state, |binding| {
+            if binding.thread == "task" {
+                anyhow::bail!("Git 查询超时");
+            }
+            received.push(binding.thread.clone());
+            Ok(())
+        });
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("retry"));
+        assert_eq!(received, ["controller"]);
+        assert_eq!(
+            observe(&mut deliveries, &state)
+                .iter()
+                .map(|b| b.thread.as_str())
+                .collect::<Vec<_>>(),
+            ["task"]
+        );
+        assert!(observe(&mut deliveries, &state).is_empty());
     }
 }

@@ -14,6 +14,12 @@ pub struct CompletionNotice {
     pub task: String,
 }
 
+impl CompletionNotice {
+    pub fn same_task(&self, other: &Self) -> bool {
+        self.project == other.project && self.task == other.task
+    }
+}
+
 /// 仅绘制覆盖层，不改变输入焦点或底层终端尺寸。
 pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
     let safe = |value: &str| {
@@ -149,10 +155,11 @@ pub enum PickerAction {
 
 impl UnreadPicker {
     pub fn sync(&mut self, tasks: &[UnreadTask]) {
-        if !tasks
-            .iter()
-            .any(|task| Some(&task.notice) == self.selected.as_ref())
-        {
+        if !tasks.iter().any(|task| {
+            self.selected
+                .as_ref()
+                .is_some_and(|selected| selected.same_task(&task.notice))
+        }) {
             self.selected = tasks.first().map(|task| task.notice.clone());
         }
     }
@@ -176,10 +183,11 @@ impl UnreadPicker {
             self.prefix = true;
             return PickerAction::Stay;
         }
-        let Some(index) = tasks
-            .iter()
-            .position(|task| Some(&task.notice) == self.selected.as_ref())
-        else {
+        let Some(index) = tasks.iter().position(|task| {
+            self.selected
+                .as_ref()
+                .is_some_and(|selected| selected.same_task(&task.notice))
+        }) else {
             return PickerAction::Stay;
         };
         let next = match key.code {
@@ -227,11 +235,11 @@ impl UnreadPicker {
                 )
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(
-            tasks
-                .iter()
-                .position(|task| Some(&task.notice) == self.selected.as_ref()),
-        );
+        let mut state = ListState::default().with_selected(tasks.iter().position(|task| {
+            self.selected
+                .as_ref()
+                .is_some_and(|selected| selected.same_task(&task.notice))
+        }));
         frame.render_stateful_widget(
             List::new(items)
                 .block(block)
@@ -252,6 +260,19 @@ impl UnreadPicker {
 mod picker_tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn picker_keeps_task_selected_when_notice_type_changes() {
+        let mut tasks = vec![task("first"), task("selected")];
+        let mut picker = UnreadPicker::default();
+        picker.sync(&tasks);
+        picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tasks);
+        tasks[1].notice.message = true;
+        picker.sync(&tasks);
+        assert!(
+            matches!(picker.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &tasks), PickerAction::Open(notice) if notice.task == "selected" && notice.message)
+        );
+    }
 
     fn task(name: &str) -> UnreadTask {
         UnreadTask {

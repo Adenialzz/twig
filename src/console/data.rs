@@ -46,6 +46,7 @@ pub struct Snapshot {
     pub registry_checked: Option<Instant>,
     pub threads: Vec<Thread>,
     pub codex_error: Option<String>,
+    pub delivery_error: Option<String>,
     pub codex_checked: Option<Instant>,
     pub history: Vec<Thread>,
     pub history_key: Option<(PathBuf, bool)>,
@@ -449,6 +450,35 @@ fn refresh_windows(repos: &mut [Repo]) {
     }
 }
 
+// 只有成功读取后确认取消登记或实例变化才终止处理；读失败不能当作已失效。
+fn message_task_current(
+    store: &crate::agent::Store,
+    binding: &crate::agent::Binding,
+    alias: &str,
+    name: &str,
+) -> Result<bool> {
+    std::fs::metadata(&store.registry).context("无法读取项目登记表")?;
+    let registry = registry::load(&store.registry)?;
+    let Some(entry) = registry.projects.get(alias) else {
+        return Ok(false);
+    };
+    let project = Project::discover_at(&registry::expand(&entry.path)?, &store.registry)?;
+    let state: crate::config::State = serde_json::from_slice(
+        &std::fs::read(project.dir.join("state.json")).context("无法读取任务记录")?,
+    )?;
+    let Some(task) = state.get(name) else {
+        return Ok(false);
+    };
+    if task.agent_thread.as_deref() != Some(&binding.thread) || task.path != binding.cwd {
+        return Ok(false);
+    }
+    ensure!(
+        crate::check_worktree(&project.config()?, task)?,
+        "任务 Worktree 不存在"
+    );
+    Ok(true)
+}
+
 fn collect(
     registry: PathBuf,
     requests: Receiver<Request>,
@@ -535,16 +565,15 @@ fn collect(
             // 本地投递记录不依赖 daemon 连接或重试退避；采集本身不投递消息。
             let state = crate::agent::Store::new(&registry).and_then(|store| {
                 let state = store.load()?;
-                for binding in deliveries.observe(&state) {
+                let errors = deliveries.observe(&state, |binding| {
                     if let (Some(project), Some(task)) = (&binding.project, &binding.task) {
-                        // 旧绑定不能给已删除或同名重建的任务制造未读。
-                        if store.validate(binding).is_ok() {
-                            let _ = completions.send(Completion {
+                        if message_task_current(&store, binding, project, task)? {
+                            completions.send(Completion {
                                 message: true,
                                 project: project.clone(),
                                 task: task.clone(),
                                 path: binding.cwd.clone(),
-                            });
+                            })?;
                         }
                     } else if state
                         .bindings
@@ -553,9 +582,14 @@ fn collect(
                     {
                         chat.lock().unwrap().receive();
                     }
-                }
+                    Ok(())
+                });
+                snapshot.delivery_error = (!errors.is_empty()).then(|| errors.join("\n"));
                 Ok(state)
             });
+            if let Err(error) = &state {
+                snapshot.delivery_error = Some(format!("消息记录读取失败：{error:#}"));
+            }
             if force || retry_at.is_none_or(|at: Instant| Instant::now() >= at) {
                 let result = (|| -> Result<Vec<Thread>> {
                     let state = state?;
