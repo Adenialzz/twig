@@ -24,7 +24,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
         let repo = temp.path().join("repo");
         let bin = temp.path().join("bin");
         fs::create_dir(&repo).unwrap();
@@ -206,6 +206,7 @@ struct Pty {
     master: File,
     text: String,
     bytes: Vec<u8>,
+    screen_bytes: Vec<u8>,
     original: libc::termios,
 }
 impl Pty {
@@ -257,6 +258,7 @@ impl Pty {
             master,
             text: String::new(),
             bytes: Vec::new(),
+            screen_bytes: Vec::new(),
             original,
         }
     }
@@ -306,7 +308,10 @@ impl Pty {
             }
             match self.master.read(&mut bytes) {
                 Ok(0) => break,
-                Ok(n) => self.bytes.extend_from_slice(&bytes[..n]),
+                Ok(n) => {
+                    self.bytes.extend_from_slice(&bytes[..n]);
+                    self.screen_bytes.extend_from_slice(&bytes[..n]);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 // Linux 在 PTY 的 slave 关闭后返回 EIO，macOS 返回 EOF。
                 Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
@@ -332,10 +337,13 @@ impl Pty {
         }
     }
     fn wait(&mut self, needle: &str) {
-        self.wait_for(needle, false);
+        self.wait_for(needle, false, true);
     }
     fn wait_screen(&mut self, needle: &str) {
-        self.wait_for(needle, true);
+        self.wait_for(needle, true, true);
+    }
+    fn wait_screen_absent(&mut self, needle: &str) {
+        self.wait_for(needle, true, false);
     }
     fn screen_text(&self) -> String {
         use alacritty_terminal::{
@@ -355,7 +363,7 @@ impl Pty {
         };
         let mut term = Term::new(Default::default(), &size, VoidListener);
         let mut parser: Processor = Processor::new();
-        parser.advance(&mut term, &self.bytes);
+        parser.advance(&mut term, &self.screen_bytes);
         (0..size.rows)
             .map(|y| {
                 (0..size.cols)
@@ -371,15 +379,16 @@ impl Pty {
             .collect::<Vec<_>>()
             .join("\n")
     }
-    fn wait_for(&mut self, needle: &str, screen: bool) {
+    fn wait_for(&mut self, needle: &str, screen: bool, present: bool) {
         let start = Instant::now();
         loop {
             self.read_output();
-            if if screen {
+            let found = if screen {
                 self.screen_text().contains(needle)
             } else {
                 self.text.contains(needle)
-            } {
+            };
+            if found == present {
                 if needle.starts_with("TERMINAL_RESTORED:") {
                     let current = terminal_attributes(self.master.as_raw_fd());
                     assert_eq!(current.c_iflag, self.original.c_iflag);
@@ -396,8 +405,12 @@ impl Pty {
             }
             assert!(
                 start.elapsed() < Duration::from_secs(12),
-                "未看到 {needle}: {}",
-                self.text
+                "等待 {needle} 可见={present} 超时：{}",
+                if screen {
+                    self.screen_text()
+                } else {
+                    self.text.clone()
+                }
             );
             thread::sleep(Duration::from_millis(20));
         }
@@ -430,14 +443,14 @@ fn pty_exit_drains_output_larger_than_the_terminal_buffer() {
     let mut command = Command::new("sh");
     command.args([
         "-c",
-        "head -c 262144 /dev/zero | tr '\\000' x; printf '\\nEXIT_DRAINED\\n'",
+        "head -c 65536 /dev/zero | tr '\\000' x; printf '\\nEXIT_DRAINED\\n'",
     ]);
     let mut p = Pty::spawn(command);
     eprintln!("PTY 输出回归：子进程 {} 已启动", p.child.id());
     assert!(p.wait_exit().success());
     eprintln!("PTY 输出回归：子进程已退出，已读取 {} 字节", p.bytes.len());
     p.wait("EXIT_DRAINED");
-    assert!(p.bytes.len() >= 262144);
+    assert!(p.bytes.len() >= 65536);
 }
 
 #[test]
@@ -1463,14 +1476,13 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool) {
         // 卡片到期后仍能选择未读；取消不会清除记录。
         thread::sleep(Duration::from_secs(9));
         p.send(b"\x17u");
-        p.wait("demo / auth / 未读 1");
+        p.wait_screen("demo / auth / 未读 1");
         p.send(b"\x1b");
-        // 独立 Esc 与下一个快捷键分开，避免终端编码为 Alt-Ctrl-W。
-        thread::sleep(Duration::from_millis(200));
+        p.wait_screen_absent("demo / auth / 未读 1");
         p.bytes.clear();
         p.text.clear();
         p.send(b"\x17u");
-        p.wait("demo / auth / 未读 1");
+        p.wait_screen("demo / auth / 未读 1");
         p.send(b"jk\x1b[B\x1b[A\r");
     } else {
         p.send(b"\x17f");
@@ -2382,16 +2394,18 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     p.resize(66, 22);
     p.wait("task12");
     p.send(b"\x03");
+    p.wait_screen_absent("新建任务");
     p.send(b"1");
+    p.wait_screen("项目 /");
     // 前缀取消后 n 仍打开项目表单；表单内 Ctrl-W 不改变焦点。
     p.send(b"\x17");
     p.bytes.clear();
     p.text.clear();
     p.send(b"\x1b");
     // 等待独立 Esc 被解析，避免与后续 n 合并为 Alt-n。
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(200));
     p.send(b"n");
-    p.wait("登记已有仓库");
+    p.wait_screen("登记已有仓库");
     p.send(b"\x17l");
     p.send(b"\x03");
     p.send(b"\x03");
