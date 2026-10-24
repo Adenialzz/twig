@@ -943,7 +943,9 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.bytes.clear();
     p.send(b"2n");
     p.wait("新建任务");
-    p.send(b"feat/nested\r");
+    p.send(b"feat/nested");
+    p.wait_screen("无匹配分支，将新建分支");
+    p.send(b"\r");
     p.wait("终端已返回导航：不能在当前");
     let state: serde_json::Value = serde_json::from_slice(
         &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
