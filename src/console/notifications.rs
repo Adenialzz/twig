@@ -367,6 +367,7 @@ mod delivery_tests {
             id: id.into(),
             thread: thread.into(),
             text: "相同正文".into(),
+            source: None,
             status: status.into(),
             turn: None,
             error: None,

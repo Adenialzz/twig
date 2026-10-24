@@ -270,6 +270,8 @@ supports_websockets = false
         print("PASS: 空主控卸载后重建绑定，保留 AGENTS.md 和全局计划", flush=True)
         frontend.send(b"first-chat-message\r")
         frontend.wait("probe complete 1")
+        frontend.wait("▎ 你")
+        assert next(m for m in state()["messages"] if m["text"] == "first-chat-message")["source"] == {"kind": "user"}
         frontend.absent_for("主控有新消息")
         with (state_file.parent / "lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -362,7 +364,8 @@ supports_websockets = false
         assert command("git", "-C", str(task_dir), "status", "--porcelain") == ""
         assert "state.md" in command("git", "-C", str(task_dir), "ls-files", "--others", "--ignored", "--exclude-standard")
         assert "已存在" in twig("new", "demo", "test", "--agent", "--no-open", success=False)
-        first = twig("agent", "send", "--message", "hold-controller").strip()
+        first = twig("agent", "send", "--from-project", "demo", "--from-task", "test", "--message", "hold-controller").strip()
+        assert next(m for m in state()["messages"] if m["id"] == first)["source"] == {"kind": "task", "project": "demo", "task": "test"}
         assert model.entered["controller"].wait(10)
         twig("agent", "send", "--project", "demo", "--task", "test", "--message", "hold-worker")
         assert model.entered["worker"].wait(10)
@@ -372,6 +375,7 @@ supports_websockets = false
         model.release["controller"].set()
         wait_for(lambda: len(state()["seen"]) >= 6, "主控未完成反馈轮次")
         assert all(m["status"] == "sent" for m in state()["messages"])
+        assert any(m.get("source") == {"kind": "completion", "project": "demo", "task": "test"} for m in state()["messages"])
         assert model.notices == [{"msg_type": "text", "content": {"text": "离线主控已收到任务反馈"}}]
         print("PASS: 未打开 UI 时主控调用真实 Twig 通知 CLI，继承环境并送达模拟飞书", flush=True)
         # 模拟接受响应丢失：历史中的 clientId 应能恢复发送结果。

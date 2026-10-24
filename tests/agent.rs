@@ -40,6 +40,8 @@ fn target_requires_both_project_and_task() {
     for args in [
         vec!["agent", "send", "--project", "demo", "--message", "x"],
         vec!["agent", "read", "--task", "demo"],
+        vec!["agent", "send", "--from-project", "demo", "--message", "x"],
+        vec!["agent", "send", "--from-task", "demo", "--message", "x"],
     ] {
         assert_eq!(run(root.path(), &args).status.code(), Some(2));
     }

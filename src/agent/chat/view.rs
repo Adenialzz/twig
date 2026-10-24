@@ -1,4 +1,5 @@
 use super::{Draft, View};
+use crate::agent::{Delivery, MessageSource};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -15,7 +16,9 @@ use serde_json::Value;
 pub(super) enum Kind {
     User,
     Assistant,
-    Workflow,
+    Task,
+    Completion,
+    Unknown,
     Tool,
     Error,
 }
@@ -25,6 +28,7 @@ pub(super) struct Entry {
     pub kind: Kind,
     pub text: String,
     pub detail: String,
+    pub source_label: Option<String>,
 }
 impl Entry {
     pub fn new(kind: Kind, text: impl Into<String>) -> Self {
@@ -33,9 +37,40 @@ impl Entry {
             kind,
             text: clean(&text.into()),
             detail: String::new(),
+            source_label: None,
+        }
+    }
+    pub fn apply_source(&mut self, message: &Delivery) {
+        let (kind, label) = match &message.source {
+            Some(MessageSource::User) => (Kind::User, None),
+            Some(MessageSource::Task { project, task }) => {
+                (Kind::Task, Some(format!("子任务 · {project}/{task}")))
+            }
+            Some(MessageSource::Completion { project, task }) => (
+                Kind::Completion,
+                Some(format!("轮次结束 · {project}/{task}")),
+            ),
+            None => (Kind::Unknown, None),
+        };
+        self.kind = kind;
+        self.source_label = label.map(|label| clean(&label));
+    }
+}
+pub(super) fn apply_sources(entries: &mut [Entry], messages: &[Delivery], thread: &str) {
+    let sources: std::collections::HashMap<_, _> = messages
+        .iter()
+        .filter(|message| message.thread == thread)
+        .map(|message| (message.id.as_str(), message))
+        .collect();
+    for entry in entries {
+        if entry.kind == Kind::Unknown
+            && let Some(message) = entry.id.as_deref().and_then(|id| sources.get(id))
+        {
+            entry.apply_source(message);
         }
     }
 }
+
 fn clean(text: &str) -> String {
     text.chars()
         .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
@@ -60,12 +95,7 @@ pub(super) fn transcript(value: &Value) -> Vec<Entry> {
                                         .join("\n")
                                 })
                                 .unwrap_or_default();
-                            let kind = if text.starts_with("任务反馈：") {
-                                Kind::Workflow
-                            } else {
-                                Kind::User
-                            };
-                            let mut entry = Entry::new(kind, text);
+                            let mut entry = Entry::new(Kind::Unknown, text);
                             entry.id = item["clientId"].as_str().map(str::to_owned);
                             entry
                         }
@@ -170,10 +200,13 @@ fn history(view: &View, draft: &Draft) -> Text<'static> {
         let (label, color) = match entry.kind {
             Kind::User => ("你", Color::Cyan),
             Kind::Assistant => ("主控", Color::Green),
-            Kind::Workflow => ("任务反馈", Color::Yellow),
+            Kind::Task => ("子任务", Color::Yellow),
+            Kind::Completion => ("轮次结束", Color::DarkGray),
+            Kind::Unknown => ("来源未知", Color::Yellow),
             Kind::Tool => ("工具", Color::DarkGray),
             Kind::Error => ("需要处理", Color::Red),
         };
+        let label = entry.source_label.as_deref().unwrap_or(label);
         lines.push(Line::styled(
             format!("▎ {label}"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -420,6 +453,69 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    #[test]
+    fn roles_follow_persisted_source_and_message_id_not_text() {
+        let mut messages = Vec::new();
+        for (id, source) in [
+            ("user", Some(MessageSource::User)),
+            (
+                "task",
+                Some(MessageSource::Task {
+                    project: "项目".into(),
+                    task: "任务".into(),
+                }),
+            ),
+            (
+                "event",
+                Some(MessageSource::Completion {
+                    project: "项目".into(),
+                    task: "任务".into(),
+                }),
+            ),
+            ("old", None),
+        ] {
+            messages.push(Delivery {
+                id: id.into(),
+                thread: "controller".into(),
+                text: "任务反馈：相同正文".into(),
+                source,
+                status: "sent".into(),
+                turn: None,
+                error: None,
+            });
+        }
+        let serialized = serde_json::to_string(&messages).unwrap();
+        let mut messages: Vec<Delivery> = serde_json::from_str(&serialized).unwrap();
+        let items: Vec<_> = messages.iter().map(|message| json!({"type":"userMessage", "clientId":message.id, "content":[{"text":message.text}]})).collect();
+        let mut entries = transcript(&json!({"thread":{"turns":[{"items":items}]}}));
+        let mut unrelated = messages[0].clone();
+        unrelated.thread = "other".into();
+        unrelated.source = messages[1].source.clone();
+        messages.push(unrelated);
+        apply_sources(&mut entries, &messages, "controller");
+        let view = View {
+            entries,
+            ..View::default()
+        };
+        let rendered = history(&view, &Draft::default()).to_string();
+        for label in [
+            "▎ 你",
+            "▎ 子任务 · 项目/任务",
+            "▎ 轮次结束 · 项目/任务",
+            "▎ 来源未知",
+        ] {
+            assert_eq!(rendered.matches(label).count(), 1, "{rendered}");
+        }
+        for (entry, message) in view.entries.iter().zip(&messages) {
+            let mut queued = Entry::new(Kind::Unknown, &message.text);
+            queued.apply_source(message);
+            assert!(queued.kind == entry.kind);
+            assert_eq!(queued.source_label, entry.source_label);
+        }
+        let legacy: Delivery = serde_json::from_value(json!({"id":"legacy", "thread":"controller", "text":"任务反馈：旧消息", "status":"sent", "turn":null, "error":null})).unwrap();
+        assert!(legacy.source.is_none());
+    }
     #[test]
     fn connecting_screen_only_shows_centered_text_and_empty_chat_has_no_welcome() {
         use ratatui::{Terminal, backend::TestBackend};
