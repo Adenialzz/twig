@@ -362,7 +362,25 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             let branch = safe(&task.branch);
             let git = safe(&format!("{}{freshness}", task.git));
             let window = safe(&task.window);
-            let codex = safe(&data::summary(sessions.into_iter()));
+            let stale = app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked);
+            let mut counts = std::collections::BTreeMap::new();
+            for thread in sessions {
+                let entry = counts
+                    .entry(thread.label())
+                    .or_insert((0, status_style(thread, stale)));
+                entry.0 += 1;
+            }
+            let mut spans = Vec::new();
+            for (label, (count, style)) in counts {
+                if !spans.is_empty() {
+                    spans.push(Span::raw(" · "));
+                }
+                spans.push(Span::styled(safe(&format!("{label} {count}")), style));
+            }
+            if spans.is_empty() {
+                spans.push(Span::raw("—"));
+            }
+            let codex = Line::from(spans);
             if compact {
                 Row::new(vec![
                     Cell::from(Text::from(vec![name, Line::from(branch)])),

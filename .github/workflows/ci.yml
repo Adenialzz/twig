@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  TERM: xterm-256color
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: 安装 Linux 测试依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zsh build-essential libevent-dev libncurses-dev bison pkg-config
+      - name: 构建并安装 tmux 3.8
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/tmux-3.8.tar.gz" https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz
+          tar -xzf "$RUNNER_TEMP/tmux-3.8.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-3.8"
+          ./configure --prefix="$RUNNER_TEMP/tmux-install"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux-install/bin" >> "$GITHUB_PATH"
+      - name: 安装 macOS 测试依赖
+        if: runner.os == 'macOS'
+        run: brew install tmux zsh
+      - name: 检查并修正 Linux Zsh 补全目录权限
+        if: runner.os == 'Linux'
+        shell: zsh {0}
+        run: |
+          autoload -Uz compaudit
+          insecure=("${(@f)$(compaudit)}")
+          set -e
+          for directory in "${insecure[@]}"; do
+            [[ -n "$directory" ]] || continue
+            print -r -- "修正补全路径权限：$directory"
+            sudo chmod go-w -- "$directory"
+          done
+          compaudit
+      - name: 记录环境版本
+        run: |
+          rustc --version
+          cargo --version
+          git --version
+          tmux -V
+          zsh --version
+      - name: 格式检查
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Rust 测试
+        run: cargo test --locked -- --nocapture
+
+  terminal:
+    name: terminal (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: false
+      - name: 安装 Linux 终端验收依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zsh vim build-essential libevent-dev libncurses-dev bison pkg-config
+      - name: 构建并安装 tmux 3.8
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/tmux-3.8.tar.gz" https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz
+          tar -xzf "$RUNNER_TEMP/tmux-3.8.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-3.8"
+          ./configure --prefix="$RUNNER_TEMP/tmux-install"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux-install/bin" >> "$GITHUB_PATH"
+      - name: 安装 macOS 终端验收依赖
+        if: runner.os == 'macOS'
+        run: brew install tmux zsh vim
+      - name: 记录环境版本
+        run: |
+          rustc --version
+          cargo --version
+          git --version
+          tmux -V
+          zsh --version
+          vim --version
+          uv --version
+      - name: 构建工作台验收入口
+        run: cargo build --locked --example control_mode
+      - name: 终端 PTY 验收
+        run: uv run examples/check_control_mode.py

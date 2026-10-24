@@ -21,6 +21,7 @@ twig ls myapp
 | 初始化部分成功 | 保留资源；修复错误后再次 add 补登记，通过 Console Enter 准备主窗口 |
 | new 的进入失败 | 非交互终端可能没有 TTY，但环境已经创建；用 ls 检查，交互终端 open；后续脚本用 --no-open |
 | Worktree 已创建，tmux 失败 | 修复 tmux/配置后使用 open PROJECT NAME，不删除已有工作 |
+| 无法识别 Pane 光标样式 | 检查 tmux 客户端和 server 版本；当前支持基线为 3.8，3.4 已确认不兼容。升级可执行文件后旧 server 仍可能运行，见 installation |
 | Worktree 创建失败 | 保留记录及现场，先核对任务记录、分支与路径，按 Git 实际状态手动恢复；重复 new 会报任务已存在。若放弃，可用 rm PROJECT NAME --keep-branch 清理，仍需通过安全检查 |
 | 窗口丢失 | open 按当前配置重建；不恢复原程序或对话 |
 | 窗口初始化未完成 | 直接用 tmux 检查部分创建的 Pane；修正配置，确认可终止进程后 stop，再 open；不会自动重复启动 |

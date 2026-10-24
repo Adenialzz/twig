@@ -15,7 +15,7 @@ Twig 提供两个可切换的页面：**Console** 管理项目、任务和终端
 
 ## 安装
 
-基础环境需要 Git、tmux 和 Unix `ps`；源码安装还需要 Rust/Cargo 和 Make。在仓库目录执行：
+基础环境需要 Git、**tmux 3.8 或更新版本**和 Unix `ps`；源码安装还需要 Rust/Cargo 和 Make。可先用 `tmux -V` 检查版本，支持范围见 [安装指南](docs/installation.md)。在仓库目录执行：
 
 ```sh
 make install
@@ -120,5 +120,7 @@ twig guide --all
 ## 开发
 
 构建用 `make build`，格式检查、Clippy 和 Rust 测试用 `make check`。终端与主控验收使用临时仓库、独立服务和模拟模型，不操作真实用户会话或 webhook。
+
+[GitHub Actions CI](.github/workflows/ci.yml) 在 PR、推送到 `main` 或手动触发时运行：`check` 和 `terminal` 均覆盖 Ubuntu 24.04 与 macOS Tahoe 26（Apple Silicon），共四个检查。`check` 分步执行与 `make check` 相同的格式、Clippy 和 Rust 测试；`terminal` 构建并执行 Control Mode PTY 验收。Linux Job 从官方源码构建 tmux 3.8，macOS 通过 Homebrew 安装。每个 Job 限时 20 分钟，同分支或 PR 的新运行取消旧运行；文档改动同样检查，一个平台失败不取消另一个平台的检查。当前 CI 不包含真实 Codex app-server 验收或自动发布。
 
 开发约定见 [AGENTS.md](AGENTS.md)，贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，架构与决策记录见 [DESIGN.md](DESIGN.md)，隔离验收入口见 [examples/README.md](examples/README.md)。

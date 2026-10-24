@@ -24,10 +24,13 @@ import pyte
 class Frontend:
     def __init__(self, binary, socket):
         self.master, self.slave = pty.openpty()
+        os.set_blocking(self.master, False)
         fcntl.ioctl(
             self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0)
         )
-        self.before = termios.tcgetattr(self.slave)
+        self.before = termios.tcgetattr(self.master)
+        # PENDIN 是内核重排待输入的瞬时标志，不属于需要还原的 raw 模式配置。
+        self.before[3] &= ~termios.PENDIN
         self.screen = pyte.Screen(100, 30)
         self.stream = pyte.ByteStream(self.screen)
         self.output = bytearray()
@@ -48,14 +51,23 @@ class Frontend:
         )
 
     def send(self, text):
-        os.write(self.master, text)
+        written = os.write(self.master, text)
+        assert written == len(text), f"PTY 输入未完整写入：{written}/{len(text)} 字节"
+
+    def read_output(self, timeout):
+        if not select.select([self.master], [], [], timeout)[0]:
+            return False
+        try:
+            data = os.read(self.master, 65536)
+        except BlockingIOError:
+            return False
+        self.output.extend(data)
+        self.stream.feed(data)
+        return bool(data)
 
     def settle(self):
         until = time.monotonic() + 2
-        while select.select([self.master], [], [], 0.15)[0]:
-            data = os.read(self.master, 65536)
-            self.output.extend(data)
-            self.stream.feed(data)
+        while self.read_output(0.15):
             assert time.monotonic() < until, "终端未停止刷新"
 
     def wait(self, needle):
@@ -64,10 +76,7 @@ class Frontend:
     def until(self, predicate, description):
         until = time.monotonic() + 5
         while time.monotonic() < until:
-            if select.select([self.master], [], [], 0.05)[0]:
-                data = os.read(self.master, 65536)
-                self.output.extend(data)
-                self.stream.feed(data)
+            self.read_output(0.05)
             if predicate():
                 return
             assert self.process.poll() is None, self.screen.display
@@ -75,9 +84,11 @@ class Frontend:
 
     def detach(self):
         self.send(b"\x17d")
-        self.process.wait(timeout=4)
+        self.until(lambda: self.process.poll() is not None, "前端退出")
         assert self.process.returncode == 0
-        assert termios.tcgetattr(self.slave) == self.before
+        restored = termios.tcgetattr(self.master)
+        restored[3] &= ~termios.PENDIN
+        assert restored == self.before, (restored, self.before)
         self.settle()
         assert re.findall(rb"\x1b\[([0-6]) q", self.output)[-1] == b"0"
 
@@ -103,14 +114,16 @@ def main():
         target.write_text("ORIGINAL_MARKER\n")
 
         def mux(*args):
-            return subprocess.check_output(["tmux", "-S", socket, *args])
+            return subprocess.check_output(["tmux", "-S", socket, *args], timeout=10)
 
+        print("阶段：启动隔离 tmux", flush=True)
         mux(
             "-f", "/dev/null", "new-session", "-d", "-s", "demo",
             "-x", "100", "-y", "29", "env PS1='READY> ' /bin/sh",
         )
         clients = []
         try:
+            print("阶段：Vim 编辑与断连", flush=True)
             first = Frontend(binary, socket)
             clients.append(first)
             first.wait("READY>")
@@ -123,6 +136,7 @@ def main():
             assert mux("display-message", "-p", "#{pane_current_command}").strip() == b"vim"
 
             second = Frontend(binary, socket)
+            print("阶段：重连、保存与历史复制", flush=True)
             clients.append(second)
             second.wait("BEFORE_DETACH")
             assert mux("list-panes", "-F", "#{pane_pid}") == pids
@@ -224,6 +238,7 @@ def main():
             mux("respawn-pane", "-k", "-t", "%0",
                 f"env ZDOTDIR={shlex.quote(root)} zsh -d")
             third = Frontend(binary, socket)
+            print("阶段：Zsh 光标与重连", flush=True)
             clients.append(third)
             third.wait("ZSH_READY>")
             third.cursor(6)
@@ -253,6 +268,7 @@ def main():
             subprocess.run(
                 ["tmux", "-S", socket, "kill-server"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5,
             )
 
 
