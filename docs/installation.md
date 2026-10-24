@@ -2,7 +2,19 @@
 
 命令行阅读：`twig guide installation`。
 
-需要 Rust/Cargo、Git、tmux 和 Unix `ps`。历史人工验证环境为 macOS、Rust 1.93.1、Git 2.50.1、tmux 3.6a，这不是最低版本要求；Console 的 Control Mode 工作台另在 Linux、tmux 3.8 上完成自动化 PTY 验收；macOS 工作台尚未验收。
+运行环境需要 Git、**tmux 3.8 或更新版本**和 Unix `ps`；源码安装还需要 Rust/Cargo 和 Make。
+
+tmux 3.8 是当前支持基线：Ubuntu 24.04 和 macOS Tahoe 26（Apple Silicon）的 Rust 测试均使用该版本通过，Linux 另通过独立 Control Mode PTY 验收。CI 的 Rust 检查与独立 Control Mode 脚本均覆盖这两个平台，最新验收结果以对应提交的 CI 为准。3.8 之后的版本需关注其兼容性，并非每个版本都已验收。
+
+tmux 3.4 已确认会因缺少工作台查询的光标信息而失败；3.5–3.7 系列未完整验收，不承诺支持。历史上用 tmux 3.6a 运行过早期功能，不代表当前工作台兼容它。
+
+安装前检查：
+
+```sh
+tmux -V
+```
+
+升级前确认现有任务已妥善处理。替换 tmux 可执行文件不会升级正在运行的 server；有旧 server 时可用 `tmux display-message -p '#{version}'` 核对服务端版本。不要为了升级直接终止仍承载任务的 server。
 
 ```bash
 cd /path/to/twig
@@ -23,6 +35,6 @@ make build
 
 直接运行 `make` 也会构建 release 版本，等价于 `cargo build --release --locked`。
 
-运行时需要 Git、tmux 和 Unix `ps`；Rust/Cargo 只用于源码构建和安装。普通任务管理不需要 Codex、gh 或 glab。Console 的 Codex 观察功能需要本机已有服务；PR/MR 按平台需要 gh 或 glab。
+Rust/Cargo 只用于源码构建和安装，CI 使用 Rust stable。普通任务管理不需要 Codex、gh 或 glab。Console 的 Codex 观察功能需要本机已有服务；PR/MR 按平台需要 gh 或 glab。
 
 首次使用见 [快速开始](quickstart.md)（`twig guide quickstart`）。安装后可直接执行 `twig guide` 阅读离线文档；当前没有单独安装的 man 页面，也不会自动启动分页器。需要分页时用 `twig guide --all | less`。
