@@ -83,6 +83,8 @@
 
 ## 主控 Agent 验证
 
+- 主控历史解析集中于 src/agent/history.rs，Console 和飞书共用，包含本地主控投递记录与所有公开条目类型；工具可折叠但不能丢失。飞书只读取 controller，不提供子任务内部会话访问；发给主控的子任务回报属于同步范围。首次接入补齐历史，出站水位与分段原子持久化，未知结果阻塞对应目的地并可诊断；测试覆盖跨入口、重启去重、长文本、更新、允许列表变化与子任务隔离。
+
 - 主控派活、子任务回报和验收规范集中维护在 skills/twig-controller/SKILL.md，由 make install 复制更新到 ~/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md，不安装到 Codex 主目录。运行时不写 skill，初始化指令只保留入口和运行路径。安装测试使用临时 HOME 和模拟 cargo，不覆盖真实安装。
 
 - 主控提醒复用 Console 只读轮次采集，按当前配置的 controller thread ID 识别；空会话建立空基线，历史完成不提醒。Agent 查看状态与采集线程同步，查看期间静默，进入清除；主控卡片合并并在任务卡片之后显示，未读跨重启保留。测试覆盖导航和工作台提醒、到期保留未读及查看后清除。

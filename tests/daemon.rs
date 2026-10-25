@@ -127,7 +127,7 @@ fn rpc(daemon: &Daemon, method: &str, params: serde_json::Value) -> serde_json::
     writeln!(
         socket,
         "{}",
-        serde_json::json!({"version":1,"id":"test","method":method,"params":params})
+        serde_json::json!({"version":status["version"],"id":"test","method":method,"params":params})
     )
     .unwrap();
     let mut line = String::new();

@@ -1382,7 +1382,7 @@ fn disconnected_submit_and_retry_create_only_one_task() {
         writeln!(
             stream,
             "{}",
-            json!({"version":1,"id":"client","method":method,"params":params})
+            json!({"version":status["version"],"id":"client","method":method,"params":params})
         )
         .unwrap();
         if !read {

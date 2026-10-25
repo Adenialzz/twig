@@ -293,14 +293,14 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
                     *subscribed = store.resume(client, binding)?;
                     result = client.thread(&binding.thread)?;
                 }
-                view.entries = view::transcript(&result);
                 view.thread = binding.thread.clone();
                 view.model = result["thread"]["model"].as_str().map(str::to_owned);
                 view.reasoning_effort = result["thread"]["reasoningEffort"]
                     .as_str()
                     .map(str::to_owned);
                 let state = store.load()?;
-                view::apply_sources(&mut view.entries, &state.messages, &binding.thread);
+                view.entries =
+                    super::history::conversation(&result, &state.messages, &binding.thread);
                 let pending = state
                     .messages
                     .iter()
@@ -317,27 +317,6 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
                 }
                 if unknown > 0 {
                     view.status.push_str(&format!(" · 待核对 {unknown}"));
-                }
-                let mut ids: HashSet<String> = view
-                    .entries
-                    .iter()
-                    .filter_map(|entry| entry.id.clone())
-                    .collect();
-                for message in state.messages.iter().filter(|m| {
-                    m.thread == binding.thread
-                        && matches!(m.status.as_str(), "queued" | "sending" | "sent" | "failed")
-                }) {
-                    if !ids.insert(message.id.clone()) {
-                        continue;
-                    }
-                    let mut entry = Entry::new(Kind::Unknown, &message.text);
-                    entry.apply_source(message);
-                    entry.id = Some(message.id.clone());
-                    entry.detail = format!("消息 ID：{}", message.id);
-                    view.entries.push(entry);
-                    if let Some(error) = &message.error {
-                        view.entries.push(Entry::new(Kind::Error, error));
-                    }
                 }
                 if pending > 0 && result["thread"]["status"]["type"] == "idle" {
                     store.flush()?;

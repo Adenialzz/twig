@@ -78,7 +78,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 
 主控默认 **YOLO：无需审批、完整访问权限**，页面顶部常驻红色提示；子任务沿用 Codex 自身权限配置。
 
-飞书支持应用机器人双向单聊，允许的用户可直接向同一主控发消息并接收对应轮次回复；旧 webhook 保留为显式主动通知。从个人申请、权限到长连接与凭证配置，见 [飞书机器人指南](docs/feishu.md)（`twig guide feishu`）。后台持续运行与 Linux/macOS 系统托管见 [后台指南](docs/daemon.md)。
+飞书支持应用机器人双向单聊，允许的用户可直接向同一主控发消息，并在已接入单聊中同步完整主控历史（含 Console/CLI 输入、工具结果和子任务回报，不含子任务内部会话）；旧 webhook 保留为显式主动通知。从个人申请、权限到长连接与凭证配置，见 [飞书机器人指南](docs/feishu.md)（`twig guide feishu`）。后台持续运行与 Linux/macOS 系统托管见 [后台指南](docs/daemon.md)。
 
 ## 常用交互
 

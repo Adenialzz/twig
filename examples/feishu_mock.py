@@ -74,7 +74,7 @@ class Feishu:
 
     def api(self, handler):
         path = handler.path
-        if path not in ("/callback/ws/endpoint", "/open-apis/auth/v3/tenant_access_token/internal") and not path.startswith("/open-apis/im/v1/messages/"):
+        if path not in ("/callback/ws/endpoint", "/open-apis/auth/v3/tenant_access_token/internal") and not path.startswith("/open-apis/im/v1/messages"):
             return False
         body = json.loads(handler.rfile.read(int(handler.headers["Content-Length"])))
         if path == "/callback/ws/endpoint":
@@ -84,6 +84,8 @@ class Feishu:
             value = {"code": 0, "tenant_access_token": "test-token"}
         else:
             assert handler.headers["Authorization"] == "Bearer test-token"
+            if path == "/open-apis/im/v1/messages?receive_id_type=chat_id":
+                assert body["receive_id"] == "oc_test", body
             self.replies.append((path, json.loads(body["content"])["text"]))
             value = {"code": 0, "data": {"message_id": f"reply-{len(self.replies)}"}}
         encoded = json.dumps(value).encode()

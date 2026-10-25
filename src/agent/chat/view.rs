@@ -1,4 +1,5 @@
 use super::{Draft, View, render};
+#[cfg(test)]
 use crate::agent::{Delivery, MessageSource};
 use ratatui::{
     Frame,
@@ -10,169 +11,10 @@ use ratatui::{
         Wrap,
     },
 };
-use serde_json::Value;
 
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(super) enum Kind {
-    User,
-    Assistant,
-    Task,
-    Completion,
-    Unknown,
-    Tool,
-    Error,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(super) enum Tool {
-    Command {
-        status: String,
-        exit_code: Option<i64>,
-    },
-    Files {
-        status: String,
-        changes: Vec<(String, String)>,
-    },
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(super) struct Entry {
-    pub id: Option<String>,
-    pub kind: Kind,
-    pub text: String,
-    pub detail: String,
-    pub source_label: Option<String>,
-    pub tool: Option<Tool>,
-}
-impl Entry {
-    pub fn new(kind: Kind, text: impl Into<String>) -> Self {
-        Self {
-            id: None,
-            kind,
-            text: clean(&text.into()),
-            detail: String::new(),
-            source_label: None,
-            tool: None,
-        }
-    }
-    pub fn apply_source(&mut self, message: &Delivery) {
-        let (kind, label) = match &message.source {
-            Some(MessageSource::User) => (Kind::User, None),
-            Some(MessageSource::Feishu { user }) => (Kind::User, Some(format!("飞书 · {user}"))),
-            Some(MessageSource::Task { project, task }) => {
-                (Kind::Task, Some(format!("子任务 · {project}/{task}")))
-            }
-            Some(MessageSource::Completion { project, task }) => (
-                Kind::Completion,
-                Some(format!("轮次结束 · {project}/{task}")),
-            ),
-            None => (Kind::Unknown, None),
-        };
-        self.kind = kind;
-        self.source_label = label.map(|label| clean(&label));
-    }
-}
-pub(super) fn apply_sources(entries: &mut [Entry], messages: &[Delivery], thread: &str) {
-    let sources: std::collections::HashMap<_, _> = messages
-        .iter()
-        .filter(|message| message.thread == thread)
-        .map(|message| (message.id.as_str(), message))
-        .collect();
-    for entry in entries {
-        if entry.kind == Kind::Unknown
-            && let Some(message) = entry.id.as_deref().and_then(|id| sources.get(id))
-        {
-            entry.apply_source(message);
-        }
-    }
-}
-
-fn clean(text: &str) -> String {
-    text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect()
-}
-
-pub(super) fn transcript(value: &Value) -> Vec<Entry> {
-    let mut entries = Vec::new();
-    if let Some(turns) = value["thread"]["turns"].as_array() {
-        for turn in turns {
-            if let Some(items) = turn["items"].as_array() {
-                for item in items {
-                    let entry = match item["type"].as_str() {
-                        Some("userMessage") => {
-                            let text = item["content"]
-                                .as_array()
-                                .map(|parts| {
-                                    parts
-                                        .iter()
-                                        .filter_map(|part| part["text"].as_str())
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                })
-                                .unwrap_or_default();
-                            let mut entry = Entry::new(Kind::Unknown, text);
-                            entry.id = item["clientId"].as_str().map(str::to_owned);
-                            entry
-                        }
-                        Some("agentMessage") => {
-                            Entry::new(Kind::Assistant, item["text"].as_str().unwrap_or_default())
-                        }
-                        Some("commandExecution") => {
-                            let mut entry = Entry::new(
-                                Kind::Tool,
-                                item["command"].as_str().unwrap_or_default(),
-                            );
-                            entry.detail =
-                                clean(item["aggregatedOutput"].as_str().unwrap_or_default());
-                            entry.tool = Some(Tool::Command {
-                                status: item["status"].as_str().unwrap_or_default().to_owned(),
-                                exit_code: item["exitCode"].as_i64(),
-                            });
-                            entry
-                        }
-                        Some("fileChange") => {
-                            let changes = item["changes"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .map(|change| {
-                                    let kind = match change["kind"]["type"].as_str() {
-                                        Some("add") => "新增",
-                                        Some("delete") => "删除",
-                                        _ => "修改",
-                                    };
-                                    (
-                                        kind.to_owned(),
-                                        clean(change["path"].as_str().unwrap_or_default()),
-                                    )
-                                })
-                                .collect();
-                            let mut entry = Entry::new(Kind::Tool, "文件修改");
-                            entry.tool = Some(Tool::Files {
-                                status: item["status"].as_str().unwrap_or_default().to_owned(),
-                                changes,
-                            });
-                            entry
-                        }
-                        _ => continue,
-                    };
-                    entries.push(entry);
-                }
-            }
-            if !turn["error"].is_null() {
-                entries.push(Entry::new(
-                    Kind::Error,
-                    turn["error"]["message"]
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| turn["error"].to_string()),
-                ));
-            }
-        }
-    }
-    entries
-}
+pub(super) use crate::agent::history::{Entry, Kind, Tool, clean};
+#[cfg(test)]
+pub(super) use crate::agent::history::{apply_sources, transcript};
 
 fn tool_lines(entry: &Entry, expanded: bool, width: usize) -> Vec<Line<'static>> {
     let Some(tool) = &entry.tool else {
@@ -276,7 +118,7 @@ fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
             lines.push(Line::from(""));
             continue;
         }
-        let (label, color) = match entry.kind {
+        let (_, color) = match entry.kind {
             Kind::User => ("你", Color::Cyan),
             Kind::Assistant => ("主控", Color::Green),
             Kind::Task => ("子任务", Color::Yellow),
@@ -285,7 +127,7 @@ fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
             Kind::Tool => ("工具", Color::DarkGray),
             Kind::Error => ("需要处理", Color::Red),
         };
-        let label = entry.source_label.as_deref().unwrap_or(label);
+        let label = entry.label();
         lines.push(Line::styled(
             format!("▎ {label}"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),

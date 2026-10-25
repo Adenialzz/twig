@@ -33,7 +33,7 @@ use std::{
 };
 
 pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 

@@ -17,9 +17,9 @@ twig daemon run             # 前台运行，供调试或系统服务托管
 
 后台使用启动时的 PATH、SHELL、CODEX_HOME 和飞书环境变量；客户端的新 `export` 不会改变它。更新环境后有序停止并重新启动 Twig 后台。业务命令不将客户端环境通过 RPC 传入；`add` 的相对路径由客户端解析。
 
-`status` 中的 `collection` 展示登记、Codex 与任务采集的年龄和错误；`agent_queue` 为投递状态计数，`operations` 为排队数量和运行/待核对阶段；`feishu` 展示连接、待处理请求、未知回复数和按消息 ID 记录的错误。未启用 Codex 时其采集失败不影响普通任务管理。
+`status` 中的 `collection` 展示登记、Codex 与任务采集的年龄和错误；`agent_queue` 为投递状态计数，`operations` 为排队数量和运行/待核对阶段；`feishu` 展示连接、待处理请求、未知回复数和按消息 ID 记录的错误；`history_pending` 是待发主控历史分段，`history_error` 为历史采集错误，`history_errors` 为各单聊同步错误。未启用 Codex 时其采集失败不影响普通任务管理。
 
-Unix socket 位于 `/tmp/twig-<UID>/` 私有目录，按规范化配置路径隔离。后台运行目录为配置旁的 `daemon/<配置身份>/`，包含单例锁、`operations.json`、可选 `feishu.json`。配置文件尚不存在也可先启动。socket 不受客户端 TMPDIR 和启动目录影响。
+Unix socket 位于 `/tmp/twig-<UID>/` 私有目录，按规范化配置路径隔离。后台运行目录为配置旁的 `daemon/<配置身份>/`，包含单例锁、`operations.json`、可选 `feishu.json` 与 `feishu-history.json`。配置文件尚不存在也可先启动。socket 不受客户端 TMPDIR 和启动目录影响。
 
 ## 操作进度与未知结果
 
@@ -80,7 +80,7 @@ launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.twig.daemon.plist
 
 ## 日志与升级
 
-手动 `start` 的启动诊断在运行目录 `daemon.log`，达到 1 MiB 后下次启动保留一份 `.1`。运行连接/操作故障写 `events.log`，达到 1 MiB 时保留一份 `.1`。系统托管的启动错误由服务管理器接收。普通诊断不记录消息正文或密钥；`operations.json`、Agent runtime 和 `feishu.json` 是受限业务数据，可能含用户消息，不能当作脱敏日志公开。
+手动 `start` 的启动诊断在运行目录 `daemon.log`，达到 1 MiB 后下次启动保留一份 `.1`。运行连接/操作故障写 `events.log`，达到 1 MiB 时保留一份 `.1`。系统托管的启动错误由服务管理器接收。普通诊断不记录消息正文或密钥；`operations.json`、Agent runtime 和 飞书接收/历史同步记录是受限业务数据，可能含用户消息，不能当作脱敏日志公开。
 
 升级步骤：
 

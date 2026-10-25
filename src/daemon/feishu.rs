@@ -1,5 +1,7 @@
 //! 飞书应用机器人：官方长连接帧协议；事件落盘后确认，投递与回复独立推进。
 //! 协议来源：https://github.com/larksuite/oapi-sdk-python/tree/v2_main/lark_oapi/ws
+mod history;
+
 use anyhow::{Context, Result, ensure};
 use prost::Message as ProtoMessage;
 use serde::{Deserialize, Serialize};
@@ -160,6 +162,9 @@ pub struct Health {
     pub pending: usize,
     pub unknown_replies: usize,
     pub message_errors: BTreeMap<String, String>,
+    pub history_pending: usize,
+    pub history_errors: BTreeMap<String, String>,
+    pub history_error: Option<String>,
 }
 pub struct Runtime {
     stop: Arc<AtomicBool>,
@@ -177,6 +182,7 @@ impl Runtime {
         let mut workers = vec![];
         if let Some(config) = config {
             let inbox = Arc::new(Mutex::new(Inbox::open(dir.join("feishu.json"))?));
+            let mut history = history::History::open(dir.join("feishu-history.json"))?;
             let config = Arc::new(config);
             let rx_config = config.clone();
             let rx_inbox = inbox.clone();
@@ -199,7 +205,14 @@ impl Runtime {
             let registry = registry.to_owned();
             workers.push(thread::spawn(move || {
                 while !tx_stop.load(Ordering::Relaxed) {
-                    let ids: Vec<_> = inbox.lock().unwrap().messages.keys().cloned().collect();
+                    let ids: Vec<_> = inbox
+                        .lock()
+                        .unwrap()
+                        .messages
+                        .iter()
+                        .filter(|(_, m)| config.users.contains(&m.user))
+                        .map(|(id, _)| id.clone())
+                        .collect();
                     for id in ids {
                         if tx_stop.load(Ordering::Relaxed) {
                             break;
@@ -213,8 +226,13 @@ impl Runtime {
                             }
                         }
                     }
+                    let history_error = history
+                        .sync(&registry, &config, &inbox, &tx_stop)
+                        .err()
+                        .map(|error| format!("{error:#}"));
                     let inbox = inbox.lock().unwrap();
                     let mut health = tx_health.lock().unwrap();
+                    health.history_error = history_error;
                     health.message_errors = inbox
                         .messages
                         .iter()
@@ -231,6 +249,7 @@ impl Runtime {
                         .flat_map(|m| &m.replies)
                         .filter(|r| r.status == "sending")
                         .count();
+                    history.health(&mut health);
                     drop(health);
                     drop(inbox);
                     sleep(&tx_stop, 2);
@@ -324,6 +343,14 @@ fn token(config: &Config) -> Result<String> {
 }
 fn dispatch(registry: &Path, config: &Config, inbox: &Mutex<Inbox>, id: &str) -> Result<()> {
     let mut incoming = inbox.lock().unwrap().messages[id].clone();
+    if incoming.finished
+        && !incoming
+            .replies
+            .iter()
+            .any(|reply| reply.status == "queued")
+    {
+        return Ok(());
+    }
     let store = crate::agent::Store::new(registry)?;
     if incoming.thread.is_none() {
         let binding = store.initialize()?;
@@ -370,19 +397,8 @@ fn dispatch(registry: &Path, config: &Config, inbox: &Mutex<Inbox>, id: &str) ->
             {
                 match turn["status"].as_str() {
                     Some("completed") => {
-                        let text = turn["items"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter(|item| item["type"] == "agentMessage")
-                            .filter_map(|item| item["text"].as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        result = Some(if text.is_empty() {
-                            "本轮已完成，没有文本回复。".into()
-                        } else {
-                            text
-                        });
+                        // 文本及工具输出由完整历史同步发送，不再另外发送最终回复。
+                        incoming.finished = true;
                     }
                     Some("failed" | "interrupted") => {
                         result = Some("本轮失败或被中断，请检查 Twig Agent。".into())
@@ -403,6 +419,11 @@ fn dispatch(registry: &Path, config: &Config, inbox: &Mutex<Inbox>, id: &str) ->
             inbox.messages.insert(id.into(), incoming.clone());
             inbox.save()?;
         }
+    }
+    {
+        let mut inbox = inbox.lock().unwrap();
+        inbox.messages.insert(id.into(), incoming.clone());
+        inbox.save()?;
     }
     for index in 0..incoming.replies.len() {
         if incoming.replies[index].status == "sending" {
@@ -688,7 +709,7 @@ mod transport_tests {
         io::{BufRead, BufReader, Read},
         net::TcpListener,
     };
-    fn read_http(stream: &mut TcpStream) -> String {
+    pub(super) fn read_http(stream: &mut TcpStream) -> String {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -709,9 +730,9 @@ mod transport_tests {
         }
         let mut body = vec![0; length];
         reader.read_exact(&mut body).unwrap();
-        request
+        format!("{request}{}", String::from_utf8(body).unwrap())
     }
-    fn respond(stream: &mut TcpStream, value: Value) {
+    pub(super) fn respond(stream: &mut TcpStream, value: Value) {
         let body = value.to_string();
         write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
     }

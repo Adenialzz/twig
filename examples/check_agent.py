@@ -35,7 +35,7 @@ from feishu_mock import Feishu
 
 class Model(ProbeModel):
     # 产品验收比协议实验多出恢复、切页及通知跳转轮次。
-    request_limit = 26
+    request_limit = 30
 
     def do_POST(self):
         if self.server.feishu.api(self):
@@ -631,12 +631,54 @@ supports_websockets = false
         model.feishu.event("om_offline")
         model.feishu.event("om_offline")
         wait_for(lambda: len(model.feishu.acks) >= 4, "飞书事件未确认")
-        wait_for(lambda: any("probe complete" in text for _, text in model.feishu.replies), "无界面飞书请求未得到最终回复")
+        def synced_text():
+            return "\n".join(text for _, text in model.feishu.replies)
+
+        def history_caught_up():
+            current = json.loads(twig("agent", "read"))["thread"]
+            if current["status"]["type"] != "idle":
+                return False
+            history = current["turns"]
+            text = synced_text()
+            expected = [part["text"] for turn in history for item in turn["items"]
+                        if item["type"] == "userMessage" for part in item["content"] if part.get("text")]
+            expected += [item["text"] for turn in history for item in turn["items"] if item["type"] == "agentMessage"]
+            health = json.loads(twig("daemon", "status"))["feishu"]
+            assert not health["history_error"] and not health["history_errors"], health
+            assert not health["unknown_replies"], health
+            return (expected and all(value in text for value in expected)
+                    and not health["history_pending"] and not health["pending"])
+
+        # 首次接入需要补齐多轮历史；有界分批发送，使用明确的整体超时。
+        def wait_history():
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                if history_caught_up():
+                    return
+                time.sleep(.3)
+            raise AssertionError("主控完整历史未同步：" + twig("daemon", "status"))
+
+        wait_history()
         messages = [m for m in state()["messages"] if m["text"] == "offline-feishu-request"]
         assert len(messages) == 1, messages
         assert messages[0]["source"] == {"kind": "feishu", "user": "ou_allowed"}
-        replies = model.feishu.replies
-        assert len(replies) == 2 and all("/om_offline/reply" in path for path, _ in replies), replies
+        assert "before-tab-one" in synced_text() and "probe complete 1" in synced_text()
+        assert "子任务 · demo/test" in synced_text()
+        assert "主控会话" in synced_text() and "工具" in synced_text()
+        assert not any("om_group" in path or "om_denied" in path for path, _ in model.feishu.replies)
+        # 没有新的飞书输入也同步 CLI 消息、子任务向主控的回报及后续主控回复。
+        cli_id = twig("agent", "send", "--message", "cli-after-feishu-subscription").strip()
+        report_id = twig("agent", "send", "--from-project", "demo", "--from-task", "test",
+                         "--message", "child-report-after-subscription").strip()
+        wait_for(lambda: all(next(m for m in state()["messages"] if m["id"] == ident)["status"] == "sent"
+                             for ident in (cli_id, report_id)), "跨入口消息未投递")
+        wait_history()
+        assert "cli-after-feishu-subscription" in synced_text()
+        assert "child-report-after-subscription" in synced_text()
+        # 子任务内部输入属于其他 thread，不应作为历史条目进入飞书。
+        assert "\nhold-worker\n" not in synced_text()
+        assert "\nnew-instance\n" not in synced_text()
+        replies_before_restart = list(model.feishu.replies)
         twig_daemon.terminate()
         twig_daemon.wait(timeout=30)
         twig_daemon = subprocess.Popen([str(binary), "--config", str(config), "daemon", "run"], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=twig_log, stderr=twig_log)
@@ -645,8 +687,8 @@ supports_websockets = false
         wait_for(lambda: len(model.feishu.acks) >= 5, "重连事件未确认")
         time.sleep(3)
         assert len([m for m in state()["messages"] if m["text"] == "offline-feishu-request"]) == 1
-        assert len(model.feishu.replies) == 2
-        print("PASS: 无界面飞书长连接收发、身份限制、重复事件与后台重启去重", flush=True)
+        assert model.feishu.replies == replies_before_restart
+        print("PASS: 飞书主控完整历史补齐、跨入口消息/子任务回报同步、子任务内部隔离与重启去重", flush=True)
 
     except BaseException:
         twig_log.flush()

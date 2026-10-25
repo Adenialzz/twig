@@ -1,5 +1,6 @@
 //! 主控业务由 Twig 后台执行；模型会话使用已有 Codex daemon，不负责启动它。
 pub mod chat;
+pub(crate) mod history;
 pub mod rpc;
 
 use anyhow::{Context, Result, ensure};
