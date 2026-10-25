@@ -99,6 +99,7 @@ pub struct Worker {
 impl Worker {
     pub fn start(registry: PathBuf) -> Result<Self> {
         let inbox = Inbox::remote(&registry, crate::agent::message_id())?;
+        let _ = inbox.sync();
         let saved = inbox.load().unwrap_or_default();
         let (tx, rx) = mpsc::channel::<Request>();
         let updates = Updates::default();
@@ -110,6 +111,7 @@ impl Worker {
             &saved,
         )));
         let client = inbox.client_id().unwrap().to_owned();
+        let remote_inbox = inbox.clone();
         let handle = thread::spawn(move || {
             let mut request = Request::default();
             let mut latest = Snapshot::default();
@@ -179,6 +181,9 @@ impl Worker {
                 latest.history_error = detail.history_error.clone();
                 latest.turn = detail.turn.clone();
                 latest.associations.extend(detail.associations.clone());
+                if let Err(error) = remote_inbox.sync() {
+                    latest.delivery_error = Some(format!("未读同步失败：{error:#}"));
+                }
                 out.publish(&latest);
                 for _ in 0..5 {
                     if stop.load(Ordering::Relaxed) {
@@ -187,6 +192,7 @@ impl Worker {
                     thread::sleep(Duration::from_millis(50));
                 }
             }
+            let _ = remote_inbox.sync();
             let _ = crate::daemon::call::<serde_json::Value>(
                 &registry,
                 "disconnect",

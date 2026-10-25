@@ -9,7 +9,7 @@ use std::{
 use twig_cli::notification::{CompletionNotice, UnreadTask};
 
 /// 首次成功读取只建立基线；待发消息确认送达后才消耗其 ID。
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Deliveries {
     pub initialized: bool,
     pub seen: std::collections::HashSet<String>,

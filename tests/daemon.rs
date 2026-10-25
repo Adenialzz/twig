@@ -149,7 +149,7 @@ fn two_clients_share_unread_and_refresh_snapshots_across_instances() {
     rpc(
         &daemon,
         "viewing",
-        json!({"client":"one","target":"controller"}),
+        json!({"client":"one","target":"controller","seen":["event"]}),
     );
     assert!(
         rpc(&daemon, "inbox", json!("two"))["unread"]

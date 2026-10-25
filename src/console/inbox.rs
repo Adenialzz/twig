@@ -8,6 +8,7 @@ use std::{
     fs::{self, OpenOptions},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -39,6 +40,38 @@ mod tests {
                 task: "work".into(),
             }),
         }
+    }
+
+    #[test]
+    fn stable_remote_view_is_local_and_only_acknowledges_observed_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let inbox = Inbox::remote(&temp.path().join("config.toml"), "client".into()).unwrap();
+        let remote = inbox.remote.as_ref().unwrap();
+        remote.cache.lock().unwrap().target = serde_json::json!({"project":"demo","path":"/work"});
+        remote
+            .cache
+            .lock()
+            .unwrap()
+            .state
+            .unread
+            .push(event("old", true));
+        assert_eq!(inbox.load().unwrap().unread.len(), 1);
+        // 后台拉取了新事件，但 UI 尚未看到，不能随进入任务一起清除。
+        remote
+            .cache
+            .lock()
+            .unwrap()
+            .state
+            .unread
+            .push(event("new", true));
+        inbox.read_task("demo", Path::new("/work")).unwrap();
+        assert!(inbox.viewing(serde_json::Value::Null).is_err());
+        let cache = remote.cache.lock().unwrap();
+        assert_eq!(cache.read, HashSet::from(["old".into()]));
+        assert_eq!(cache.state.unread[0].id, "new");
+        // 没有后台也能完成 UI 更新；切走保留待上报水位，不依赖一次 RPC 的时序。
+        assert!(cache.target.is_null());
+        assert!(!temp.path().join("config.toml").exists());
     }
 
     #[test]
@@ -186,7 +219,7 @@ mod tests {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct State {
     pub unread: Vec<Event>,
     seen: HashSet<String>,
@@ -197,7 +230,21 @@ pub struct State {
 #[derive(Clone)]
 pub struct Inbox {
     path: PathBuf,
-    remote: Option<(PathBuf, String)>,
+    remote: Option<Remote>,
+}
+#[derive(Clone)]
+struct Remote {
+    registry: PathBuf,
+    client: String,
+    cache: Arc<Mutex<RemoteState>>,
+    sync_lock: Arc<Mutex<()>>,
+}
+#[derive(Default)]
+struct RemoteState {
+    state: State,
+    seen: HashSet<String>,
+    read: HashSet<String>,
+    target: serde_json::Value,
 }
 
 impl Inbox {
@@ -215,25 +262,88 @@ impl Inbox {
 
     pub fn remote(registry: &Path, client: String) -> Result<Self> {
         let mut inbox = Self::new(registry)?;
-        inbox.remote = Some((registry.to_owned(), client));
+        inbox.remote = Some(Remote {
+            registry: registry.to_owned(),
+            client,
+            cache: Arc::new(Mutex::new(RemoteState::default())),
+            sync_lock: Arc::new(Mutex::new(())),
+        });
         Ok(inbox)
     }
     pub fn client_id(&self) -> Option<&str> {
-        self.remote.as_ref().map(|(_, client)| client.as_str())
+        self.remote.as_ref().map(|remote| remote.client.as_str())
+    }
+    // 仅订阅线程调用网络；终端按键和绘制只读缓存，不在每轮 UI 回调等待 RPC。
+    pub fn sync(&self) -> Result<()> {
+        let Some(remote) = &self.remote else {
+            return Ok(());
+        };
+        let _sync = remote.sync_lock.lock().unwrap();
+        let (target, read) = {
+            let cache = remote.cache.lock().unwrap();
+            (cache.target.clone(), cache.read.clone())
+        };
+        let _: serde_json::Value = crate::daemon::call(
+            &remote.registry,
+            "viewing",
+            serde_json::json!({"client":remote.client,"target":target,"seen":read}),
+        )?;
+        let state: State =
+            crate::daemon::call(&remote.registry, "inbox", serde_json::json!(remote.client))?;
+        let mut cache = remote.cache.lock().unwrap();
+        cache.read.retain(|id| !read.contains(id));
+        cache.state = state;
+        let pending = cache.read.clone();
+        cache
+            .state
+            .unread
+            .retain(|event| !pending.contains(&event.id));
+        Ok(())
     }
     pub fn viewing(&self, target: serde_json::Value) -> Result<()> {
-        if let Some((registry, client)) = &self.remote {
-            let _: serde_json::Value = crate::daemon::call(
-                registry,
-                "viewing",
-                serde_json::json!({"client":client,"target":target}),
-            )?;
+        if let Some(remote) = &self.remote {
+            let mut cache = remote.cache.lock().unwrap();
+            let changed = cache.target != target;
+            let read: HashSet<_> = cache
+                .state
+                .unread
+                .iter()
+                .filter(|event| {
+                    cache.seen.contains(&event.id)
+                        && match &event.task {
+                            None => target == "controller",
+                            Some(task) => {
+                                target["project"] == task.project
+                                    && target["path"]
+                                        .as_str()
+                                        .is_some_and(|p| Path::new(p) == task.path)
+                            }
+                        }
+                })
+                .map(|event| event.id.clone())
+                .collect();
+            cache.state.unread.retain(|event| !read.contains(&event.id));
+            cache.read.extend(read);
+            cache.target = target;
+            drop(cache);
+            // 目标切换只确认一次，避免离开页面后的完成事件仍按旧租约静默。
+            // 相同目标的逐帧更新完全本地；后台轮询与切换同步按客户端串行。
+            if changed {
+                self.sync()?;
+            }
         }
         Ok(())
     }
     pub fn load(&self) -> Result<State> {
-        if let Some((registry, client)) = &self.remote {
-            return crate::daemon::call(registry, "inbox", serde_json::json!(client));
+        if let Some(remote) = &self.remote {
+            let mut cache = remote.cache.lock().unwrap();
+            cache.seen = cache
+                .state
+                .unread
+                .iter()
+                .map(|event| event.id.clone())
+                .collect();
+            return Ok(cache.state.clone());
         }
         match fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes)

@@ -15,7 +15,6 @@ use std::{
 struct Presence {
     at: Instant,
     target: Value,
-    seen: HashSet<String>,
 }
 static PRESENCE: OnceLock<Mutex<BTreeMap<String, Presence>>> = OnceLock::new();
 fn presence() -> &'static Mutex<BTreeMap<String, Presence>> {
@@ -161,10 +160,8 @@ impl State {
                 let p = presence.entry(id.into()).or_insert(Presence {
                     at: Instant::now(),
                     target: Value::Null,
-                    seen: HashSet::new(),
                 });
                 p.at = Instant::now();
-                p.seen = state.unread.iter().map(|e| e.id.clone()).collect();
                 Ok(serde_json::to_value(state)?)
             }
             "viewing" => {
@@ -174,17 +171,11 @@ impl State {
                 let p = presence.entry(id.into()).or_insert(Presence {
                     at: Instant::now(),
                     target: Value::Null,
-                    seen: HashSet::new(),
                 });
                 p.at = Instant::now();
                 p.target = target;
-                let ids = inbox
-                    .load()?
-                    .unread
-                    .into_iter()
-                    .filter(|event| p.seen.contains(&event.id) && matches(&p.target, event))
-                    .map(|event| event.id)
-                    .collect();
+                let ids: HashSet<String> = serde_json::from_value(value["seen"].clone())
+                    .context("缺少已查看的事件水位")?;
                 inbox.discard(&ids)?;
                 Ok(Value::Null)
             }

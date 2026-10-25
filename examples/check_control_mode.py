@@ -184,9 +184,11 @@ def main():
             # 有限输出负载：约 120 行，用于交互延迟回归，不是吞吐压测。
             # 在第十行暂停，等选区已经显示才继续，避免较慢 CI 在选区确认前耗尽负载。
             load_gate = Path(root) / "load-ready"
-            second.send(("PS1='LOAD_READY> '; i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; "
-                         f"if [ $i -eq 10 ]; then while [ ! -f {shlex.quote(str(load_gate))} ]; do sleep 0.01; done; fi; "
-                         "i=$((i+1)); sleep 0.01; done; printf 'LOAD_%s\\n' FINISHED\r").encode())
+            load_script = Path(root) / "load.sh"
+            load_script.write_text("i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; "
+                                   f"if [ $i -eq 10 ]; then while [ ! -f {shlex.quote(str(load_gate))} ]; do sleep 0.01; done; fi; "
+                                   "i=$((i+1)); sleep 0.01; done; printf 'LOAD_%s\\n' FINISHED\n")
+            second.send(f"PS1='LOAD_READY> '; sh {shlex.quote(str(load_script))}\r".encode())
             second.wait("LOAD_10")
             # 有选区时 Ctrl-C 仍中断 Shell 前台程序，不拦截为复制。
             second.send(b"\x1b[<0;1;3M\x1b[<32;5;3M")
