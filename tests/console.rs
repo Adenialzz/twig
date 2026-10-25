@@ -360,6 +360,10 @@ impl Pty {
     fn wait(&mut self, needle: &str) {
         self.wait_for(needle, false, true);
     }
+    fn task_form_ready(&mut self) {
+        self.wait_screen("新建任务");
+        self.wait_screen_absent("正在读取分支候选");
+    }
     fn wait_screen(&mut self, needle: &str) {
         self.wait_for(needle, true, true);
     }
@@ -965,7 +969,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("终端已返回导航：不能在当前");
     p.clear_output();
     p.send(b"2n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"feat/nested");
     p.wait_screen("无匹配分支，将新建分支");
     p.send(b"\r");
@@ -1699,7 +1703,7 @@ fn forms_register_create_retry_and_enter_task() {
     p.clear_output();
     // 创建项目后焦点已在任务区；通过候选补全打开任务表单。
     p.send(b"/ne\t\r");
-    p.wait("新建任务");
+    p.task_form_ready();
     let before_creation = fs::read(&f.registry).unwrap();
     p.send(b"feat/fresh\t\x7f\x7f\x7f\x7fmissing\r");
     p.wait("基础分支不存在");
@@ -1747,7 +1751,7 @@ fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         if during_confirmation {
             p.send(b"pending\r");
             p.wait("使用已有分支");
@@ -1802,7 +1806,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"2n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"feature/");
     p.wait("feature/alpha");
     p.wait("feature/beta");
@@ -1812,7 +1816,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     // 默认取消，候选选择本身不创建资源。
     p.send(b"\r");
     p.clear_output();
-    p.wait("新建任务");
+    p.task_form_ready();
     assert_eq!(fs::read(&state_path).unwrap(), state_before);
     assert_eq!(refs(), before);
     p.send(b"\r");
@@ -1838,7 +1842,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"upstream/feat/collision");
         p.wait("upstream/feat/collision");
         // 本地与远端候选显示同名，第二项才是远端跟踪分支。
@@ -1847,7 +1851,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         p.wait("使用已有分支");
         // 默认取消后再次提交，仍须保持同一远端候选。
         p.send(b"\r");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.clear_output();
         p.send(b"\r");
         p.wait("使用已有分支");
@@ -1896,7 +1900,7 @@ fn remote_candidates_fill_task_names_and_preserve_local_precedence() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"upstream/feat");
         p.wait("upstream/feat/remote");
         assert!(!p.text.contains("origin/HEAD"));
@@ -1982,7 +1986,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"km");
         p.wait("upstream/feat/km_story");
         p.clear_output();
@@ -2005,7 +2009,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         assert!(!p.text.contains("选择来源"));
         p.send(b"\r");
         p.clear_output();
-        p.wait("新建任务");
+        p.task_form_ready();
         assert_eq!(fs::read(&state_path).unwrap(), before);
         p.send(b"\r");
         p.wait("分支 upstream/feat/km_story 已存在");
@@ -2061,7 +2065,7 @@ fn selected_source_cannot_disappear_or_replace_a_recorded_source_silently() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"upstream/feat");
         p.wait("upstream/feat/km_story");
         if !recorded {
@@ -2103,7 +2107,7 @@ fn remote_candidate_handles_remote_names_with_slashes() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"2n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"team/mirror/");
     p.wait("team/mirror/fix/login");
     p.send(b"\t\r");
@@ -2186,7 +2190,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     let mut p = f.terminal(false);
     p.wait("主工作目录");
     p.send(b"2/new\r");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"existing\r");
     p.wait("使用已有分支");
     p.send(b"\r");
@@ -2338,7 +2342,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     let mut p = f.terminal(false);
     p.wait("主工作目录");
     p.send(b"2/new\r");
-    p.wait("新建任务");
+    p.task_form_ready();
     // 手动输入后切到起点字段提交，不接受候选，仍允许选择来源。
     p.send(b"feat/remote\x1b[Z\r");
     p.wait("origin/feat/remote");
@@ -2449,7 +2453,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     }
     // 表单中的数字仍可输入，取消不创建任务。
     p.send(b"n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"task12");
     p.wait("2▏");
     p.resize(66, 22);
