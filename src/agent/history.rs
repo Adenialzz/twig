@@ -166,7 +166,7 @@ pub(crate) fn transcript(value: &Value) -> Vec<Entry> {
                             .unwrap_or_else(|| format!("item-{index}"))
                     ])
                     .to_string();
-                    // 工具、补丁、MCP、图像等不再静默丢弃；Console 可折叠，飞书分段完整发送。
+                    // 工具、补丁、MCP、图像等不再静默丢弃；Console 可折叠展示完整详情。
                     if entry.kind == Kind::Tool {
                         entry.detail = clean(&serde_json::to_string_pretty(item).unwrap());
                     }
@@ -209,14 +209,6 @@ impl Entry {
             Kind::Tool => "工具",
             Kind::Error => "需要处理",
         })
-    }
-    pub fn full_text(&self) -> String {
-        let mut text = format!("【{}】\n{}", self.label(), self.text);
-        if !self.detail.is_empty() {
-            text.push('\n');
-            text.push_str(&self.detail);
-        }
-        text
     }
 }
 
@@ -269,7 +261,7 @@ mod tests {
         messages.push(other);
         let queued = conversation(&json!({}), &messages, "main");
         assert_eq!(queued.len(), 1);
-        assert!(queued[0].full_text().contains("queued"));
+        assert!(queued[0].detail.contains("queued"));
         messages[0].status = "sent".into();
         let sent = conversation(
             &json!({"thread":{"turns":[{"id":"turn", "items":[{"id":"user", "type":"userMessage","clientId":"msg","content":[{"text":"输入"}]}]}]}}),
@@ -278,10 +270,10 @@ mod tests {
         );
         assert_eq!(sent.len(), 1);
         assert_eq!(queued[0].key, sent[0].key);
-        assert!(sent[0].full_text().contains("sent"));
+        assert!(sent[0].detail.contains("sent"));
         messages[0].status = "cancelled".into();
         let cancelled = conversation(&json!({}), &messages, "main");
         assert_eq!(cancelled.len(), 1);
-        assert!(cancelled[0].full_text().contains("cancelled"));
+        assert!(cancelled[0].detail.contains("cancelled"));
     }
 }

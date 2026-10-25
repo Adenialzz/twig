@@ -640,33 +640,33 @@ supports_websockets = false
                 return False
             history = current["turns"]
             text = synced_text()
-            expected = [part["text"] for turn in history for item in turn["items"]
-                        if item["type"] == "userMessage" for part in item["content"] if part.get("text")]
-            expected += [item["text"] for turn in history for item in turn["items"] if item["type"] == "agentMessage"]
+            latest = history[-1]
+            expected = [item["text"] for item in latest["items"] if item["type"] == "agentMessage"][-1:]
             health = json.loads(twig("daemon", "status"))["feishu"]
             assert not health["history_error"] and not health["history_errors"], health
             assert not health["unknown_replies"], health
             return (expected and all(value in text for value in expected)
                     and not health["history_pending"] and not health["pending"])
 
-        # 首次接入需要补齐多轮历史；有界分批发送，使用明确的整体超时。
+        # 首次仅补最近一轮；等待完成后的最终回复与队列清空。
         def wait_history():
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 if history_caught_up():
                     return
                 time.sleep(.3)
-            raise AssertionError("主控完整历史未同步：" + twig("daemon", "status"))
+            raise AssertionError("主控最终回复未同步：" + twig("daemon", "status"))
 
         wait_history()
         messages = [m for m in state()["messages"] if m["text"] == "offline-feishu-request"]
         assert len(messages) == 1, messages
         assert messages[0]["source"] == {"kind": "feishu", "user": "ou_allowed"}
-        assert "before-tab-one" in synced_text() and "probe complete 1" in synced_text()
-        assert "子任务 · demo/test" in synced_text()
-        assert "主控会话" in synced_text() and "工具" in synced_text()
+        assert "before-tab-one" not in synced_text()
+        assert "子任务 · demo/test" not in synced_text()
+        assert "【User】" in synced_text() and "【Codex】" in synced_text()
+        assert "主控会话" not in synced_text() and "【工具】" not in synced_text()
         assert not any("om_group" in path or "om_denied" in path for path, _ in model.feishu.replies)
-        # 没有新的飞书输入也同步 CLI 消息、子任务向主控的回报及后续主控回复。
+        # 没有新的飞书输入也同步 CLI 用户输入和最终回复，隐藏子任务回报正文。
         cli_id = twig("agent", "send", "--message", "cli-after-feishu-subscription").strip()
         report_id = twig("agent", "send", "--from-project", "demo", "--from-task", "test",
                          "--message", "child-report-after-subscription").strip()
@@ -674,7 +674,7 @@ supports_websockets = false
                              for ident in (cli_id, report_id)), "跨入口消息未投递")
         wait_history()
         assert "cli-after-feishu-subscription" in synced_text()
-        assert "child-report-after-subscription" in synced_text()
+        assert "【User】\nchild-report-after-subscription" not in synced_text()
         # 子任务内部输入属于其他 thread，不应作为历史条目进入飞书。
         assert "\nhold-worker\n" not in synced_text()
         assert "\nnew-instance\n" not in synced_text()
@@ -688,7 +688,7 @@ supports_websockets = false
         time.sleep(3)
         assert len([m for m in state()["messages"] if m["text"] == "offline-feishu-request"]) == 1
         assert model.feishu.replies == replies_before_restart
-        print("PASS: 飞书主控完整历史补齐、跨入口消息/子任务回报同步、子任务内部隔离与重启去重", flush=True)
+        print("PASS: 飞书最近一轮补齐、跨入口输入与最终回复、子任务回报过滤及重启去重", flush=True)
 
     except BaseException:
         twig_log.flush()
