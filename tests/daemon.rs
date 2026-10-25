@@ -19,10 +19,19 @@ impl Daemon {
         command
     }
     fn start() -> Self {
+        Self::seeded(None)
+    }
+    fn seeded(seed: Option<serde_json::Value>) -> Self {
         let temp = tempfile::tempdir().unwrap();
+        if let Some(seed) = seed {
+            std::fs::write(temp.path().join("notifications.json"), seed.to_string()).unwrap();
+            std::fs::create_dir(temp.path().join("controller")).unwrap();
+            std::fs::write(temp.path().join("controller/runtime.json"), serde_json::json!({"socket":null,"bindings":{"controller":{"thread":"controller-thread","cwd":temp.path(),"project":null,"task":null,"stopped":true}},"messages":[],"seen":[]}).to_string()).unwrap();
+        }
         let child = Command::new(env!("CARGO_BIN_EXE_twig"))
             .arg("--config")
             .arg(temp.path().join("config.toml"))
+            .env("PATH", "")
             .args(["daemon", "run"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -100,4 +109,82 @@ fn lifecycle_singleton_and_config_isolation() {
         .unwrap();
     assert!(errors.is_empty(), "{errors}");
     assert!(!daemon.temp.path().join("config.toml").exists());
+}
+
+fn rpc(daemon: &Daemon, method: &str, params: serde_json::Value) -> serde_json::Value {
+    use std::io::{BufRead, BufReader, Write};
+    let status = daemon
+        .command()
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    let mut socket =
+        std::os::unix::net::UnixStream::connect(status["socket"].as_str().unwrap()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(
+        socket,
+        "{}",
+        serde_json::json!({"version":1,"id":"test","method":method,"params":params})
+    )
+    .unwrap();
+    let mut line = String::new();
+    BufReader::new(socket).read_line(&mut line).unwrap();
+    let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(reply["error"].is_null(), "{reply}");
+    reply["result"].clone()
+}
+#[test]
+fn two_clients_share_unread_and_refresh_snapshots_across_instances() {
+    use serde_json::json;
+    let daemon = Daemon::seeded(Some(
+        json!({"unread":[{"id":"event","thread":"controller-thread","task":null}],"seen":["event"],"deliveries":{"seen":[],"initialized":false},"watched":{}}),
+    ));
+    let one = rpc(&daemon, "inbox", json!("one"));
+    let two = rpc(&daemon, "inbox", json!("two"));
+    assert_eq!(one["unread"], two["unread"]);
+    assert_eq!(one["unread"].as_array().unwrap().len(), 1);
+    rpc(
+        &daemon,
+        "viewing",
+        json!({"client":"one","target":"controller"}),
+    );
+    assert!(
+        rpc(&daemon, "inbox", json!("two"))["unread"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let request = json!({"project":null,"path":null,"history":false,"descendants":false,"page":0,"turn":null,"refresh":0,"background":true});
+    let first = rpc(
+        &daemon,
+        "snapshot",
+        json!({"client":"one","request":request}),
+    );
+    let second = rpc(
+        &daemon,
+        "snapshot",
+        json!({"client":"two","request":request,"version":first["version"],"instance":"previous-process"}),
+    );
+    assert!(
+        !second["snapshot"].is_null(),
+        "重启后相同版本号也必须重新返回快照"
+    );
+    let status = daemon
+        .command()
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["collection"]["clients"], 2);
+    rpc(&daemon, "disconnect", json!("one"));
+    rpc(&daemon, "disconnect", json!("two"));
+    assert!(
+        rpc(&daemon, "inbox", json!("reopened"))["unread"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }

@@ -1,7 +1,7 @@
 use twig_cli::notification::{PickerAction, UnreadPicker};
-mod data;
+pub(crate) mod data;
 pub(crate) mod form;
-mod inbox;
+pub(crate) mod inbox;
 mod notifications;
 pub(crate) mod query;
 pub(crate) mod selection;
@@ -117,6 +117,8 @@ impl App {
         let result = (|| -> Result<()> {
             if let Some((project, path)) = viewed {
                 worker.inbox.read_task(project, path)?;
+            } else {
+                worker.inbox.viewing(serde_json::Value::Null)?;
             }
             let mut state = worker.inbox.load()?;
             if let Some((project, path)) = viewed {
@@ -200,9 +202,9 @@ impl App {
             0 => self.form = Some(form::Form::project()),
             1 => {
                 if let Some(repo) = self.repo() {
-                    if let Some((_, config)) = &repo.context {
+                    if let Some((project, config)) = &repo.context {
                         let mut form = form::Form::task(repo.name.clone(), config.base.clone());
-                        form.load_branches(&config.main);
+                        form.load_branches(&project.registry, &config.main);
                         self.form = Some(form);
                     } else {
                         self.message = Some("项目不可用，请先处理项目异常".into());
@@ -287,6 +289,7 @@ impl App {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("项目不可用"))?;
             form::Form::delete(
+                &project.registry,
                 repo.name.clone(),
                 task.name.clone(),
                 &project.common,
@@ -439,6 +442,7 @@ impl App {
             turn: self.thread.clone().filter(|_| self.detail),
             refresh: self.refresh,
             background: false,
+            projects: vec![],
         }
     }
 }
@@ -487,6 +491,7 @@ impl Drop for Screen {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerminalTarget {
     pub project: String,
     pub session: String,
@@ -540,9 +545,13 @@ fn open_terminal(
             twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
                 if recorded.as_deref() != Some(task) {
                     recorded = Some(task.to_owned());
-                    usage_error = crate::registry::record_use(registry, &target.project, task)
-                        .err()
-                        .map(|error| format!("{error:#}"));
+                    usage_error = crate::daemon::call::<serde_json::Value>(
+                        registry,
+                        "record_use",
+                        serde_json::json!([&target.project, task]),
+                    )
+                    .err()
+                    .map(|error| format!("{error:#}"));
                 }
                 if let Some(notice) = jump.take() {
                     app.notifications.dismiss(&notice);

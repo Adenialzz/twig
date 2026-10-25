@@ -1,4 +1,11 @@
 //! Twig 本机后台：单例、受限 Unix socket 与有界同步请求处理。
+mod feishu;
+mod log;
+pub mod operations;
+pub mod output;
+mod queries;
+pub(crate) mod state;
+pub mod time;
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -25,6 +32,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const VERSION: u32 = 1;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;
 static TERMINATE: AtomicBool = AtomicBool::new(false);
@@ -33,12 +41,12 @@ extern "C" fn terminate(_: libc::c_int) {
     TERMINATE.store(true, Ordering::Relaxed);
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Action,
 }
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum Action {
     /// 前台运行 Twig 后台；供 systemd/launchd 托管
     Run,
@@ -66,7 +74,7 @@ impl Paths {
             .join("daemon")
             .join(&id);
         // Unix socket 路径有长度限制，状态仍保存在配置旁；短路径按 UID 与配置身份隔离。
-        let socket = std::env::temp_dir()
+        let socket = PathBuf::from("/tmp")
             .join(format!("twig-{}", unsafe { libc::geteuid() }))
             .join(format!("{id}.sock"));
         Ok(Self {
@@ -196,7 +204,7 @@ pub fn call<T: DeserializeOwned>(registry: &Path, method: &str, params: Value) -
         bail!("{error}");
     }
     Ok(serde_json::from_value(
-        response.result.context("后台响应缺少结果")?,
+        response.result.unwrap_or(Value::Null),
     )?)
 }
 
@@ -230,6 +238,10 @@ fn start(registry: &Path) -> Result<()> {
     let paths = Paths::new(registry)?;
     fs::create_dir_all(&paths.dir)?;
     fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700))?;
+    let log_path = paths.dir.join("daemon.log");
+    if fs::metadata(&log_path).is_ok_and(|m| m.len() >= 1024 * 1024) {
+        fs::rename(&log_path, paths.dir.join("daemon.log.1"))?;
+    }
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -277,6 +289,7 @@ fn start(registry: &Path) -> Result<()> {
 fn run(registry: &Path) -> Result<()> {
     let paths = Paths::new(registry)?;
     let _instance = Instance::acquire(&paths)?;
+    log::init(paths.dir.join("events.log"));
     let listener = UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
@@ -285,17 +298,53 @@ fn run(registry: &Path) -> Result<()> {
         libc::signal(libc::SIGINT, terminate as *const () as libc::sighandler_t);
     }
     let stopping = Arc::new(AtomicBool::new(false));
+    let (operations, operation_worker) = operations::Service::start(&paths.registry, &paths.dir)?;
+    let state = Mutex::new(state::State::start(&paths.registry)?);
+    let chat = Mutex::new(None::<crate::agent::chat::Backend>);
+    let agent_stop = Arc::new(AtomicBool::new(false));
+    let agent_error = Arc::new(Mutex::new(None::<String>));
+    let agent_worker = {
+        let stop = agent_stop.clone();
+        let error = agent_error.clone();
+        let registry = paths.registry.clone();
+        thread::spawn(move || {
+            crate::console::query::install(stop.clone());
+            while !stop.load(Ordering::Relaxed) {
+                let result = (|| -> Result<()> {
+                    let store = crate::agent::Store::new(&registry)?;
+                    if !store.load()?.bindings.is_empty() {
+                        store.drain()?;
+                    }
+                    Ok(())
+                })();
+                *error.lock().unwrap() = result.err().map(|e| format!("{e:#}"));
+                for _ in 0..40 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+        })
+    };
+    let feishu = feishu::Runtime::start(&paths.registry, &paths.dir)?;
     let started = Instant::now();
     let instance = crate::agent::message_id();
     let (tx, rx) = mpsc::sync_channel::<UnixStream>(32);
     let input = Arc::new(Mutex::new(rx));
-    thread::scope(|scope| -> Result<()> {
+    let result = thread::scope(|scope| -> Result<()> {
         for _ in 0..4 {
             let input = input.clone();
             let stopping = stopping.clone();
             let instance = &instance;
             let paths = &paths;
+            let operations = &operations;
+            let state = &state;
+            let chat = &chat;
+            let agent_error = &agent_error;
+            let feishu = &feishu.health;
             scope.spawn(move || {
+                crate::console::query::install(stopping.clone());
                 loop {
                     let stream = input.lock().unwrap().recv();
                     let Ok(mut stream) = stream else { break; };
@@ -306,8 +355,30 @@ fn run(registry: &Path) -> Result<()> {
                         let result = (|| -> Result<Value> {
                             ensure!(request.version == VERSION, "Twig 后台协议不兼容，请统一更新并重启");
                             match request.method.as_str() {
-                                "status" => Ok(json!({"instance":instance,"version":VERSION,"pid":std::process::id(),"uptime_seconds":started.elapsed().as_secs(),"config":paths.registry,"stopping":stopping.load(Ordering::Relaxed)})),
+                                "status" => Ok(json!({"instance":instance,"version":VERSION,"pid":std::process::id(),"uptime_seconds":started.elapsed().as_secs(),"config":paths.registry,"socket":paths.socket,"stopping":stopping.load(Ordering::Relaxed),"agent_error":*agent_error.lock().unwrap(),"agent_queue":agent_queue(&paths.registry),"collection":state.lock().unwrap().health(),"operations":operations.health(),"feishu":*feishu.lock().unwrap()})),
                                 "stop" => { stopping.store(true, Ordering::Relaxed); Ok(json!({"stopping":true})) },
+                                method if method.starts_with("form.") => queries::handle(&paths.registry,method,request.params),
+                                "details" => {
+                                    let snapshot=state.lock().unwrap().snapshot();
+                                    Ok(serde_json::to_value(queries::details(snapshot,serde_json::from_value(request.params)?)?)?)
+                                },
+                                "query.execute" => {
+                                    let action:crate::Action=serde_json::from_value(request.params)?;
+                                    ensure!(matches!(&action,crate::Action::Ls{..}|crate::Action::Agent(crate::agent::Cli{command:crate::agent::Action::Status|crate::agent::Action::Read{..}})),"仅接受只读业务查询");
+                                    let (output,result)=output::capture(||crate::execute_business(paths.registry.clone(),action,&Value::Null));
+                                    result?; Ok(serde_json::to_value(output)?)
+                                },
+                                "agent.chat" => chat.lock().unwrap().get_or_insert_with(||crate::agent::chat::Backend::new(paths.registry.clone())).handle(request.params),
+                                "snapshot" => {
+                                    let deadline=Instant::now()+Duration::from_millis(200);
+                                    loop {
+                                        let value=state.lock().unwrap().handle("snapshot",request.params.clone())?;
+                                        if !value["snapshot"].is_null()||Instant::now()>=deadline {break Ok(value);}
+                                        thread::sleep(Duration::from_millis(20));
+                                    }
+                                },
+                                method @ ("inbox"|"viewing"|"disconnect"|"record_use") => state.lock().unwrap().handle(method,request.params),
+                                method if method.starts_with("operation.") => operations.handle(method, request.params),
                                 _ => bail!("未知后台方法：{}", request.method),
                             }
                         })();
@@ -317,11 +388,14 @@ fn run(registry: &Path) -> Result<()> {
                         };
                         write_frame(&response, &mut stream)
                     })();
-                    if let Err(error) = result { eprintln!("本机连接失败：{error:#}"); }
+                    if let Err(error) = result { log::error(&format!("本机连接失败：{error:#}")); }
                 }
             });
         }
         while !stopping.load(Ordering::Relaxed) && !TERMINATE.load(Ordering::Relaxed) {
+            if let Ok(mut state) = state.try_lock() {
+                state.expire();
+            }
             match listener.accept() {
                 Ok((stream, _)) => {
                     let _ = tx.try_send(stream);
@@ -334,7 +408,29 @@ fn run(registry: &Path) -> Result<()> {
         }
         drop(tx);
         Ok(())
-    })
+    });
+    agent_stop.store(true, Ordering::Relaxed);
+    agent_worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("Agent 调度线程异常退出"))?;
+    drop(operations);
+    operation_worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("操作执行线程异常退出"))?;
+    result
+}
+
+fn agent_queue(registry: &Path) -> Value {
+    match crate::agent::Store::new(registry).and_then(|store| store.load()) {
+        Ok(state) => {
+            let mut counts = std::collections::BTreeMap::<String, usize>::new();
+            for message in state.messages {
+                *counts.entry(message.status).or_default() += 1;
+            }
+            json!(counts)
+        }
+        Err(_) => Value::Null,
+    }
 }
 
 #[cfg(test)]

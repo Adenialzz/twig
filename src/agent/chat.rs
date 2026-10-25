@@ -23,13 +23,14 @@ use std::{
 };
 use view::{Entry, Kind};
 
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Command {
     Send(String, String),
     Refresh,
     Viewing(bool),
     Exit,
 }
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct View {
     entries: Vec<Entry>,
     thread: String,
@@ -88,7 +89,7 @@ impl Runtime {
         let (tx, rx) = mpsc::channel();
         let updates = Arc::new(Mutex::new(Updates::default()));
         let output = updates.clone();
-        let handle = thread::spawn(move || worker(registry, rx, output));
+        let handle = thread::spawn(move || remote_worker(registry, rx, output));
         Self {
             tx,
             updates,
@@ -104,6 +105,110 @@ impl Drop for Runtime {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+pub(crate) struct Backend {
+    runtime: Runtime,
+    registry: PathBuf,
+}
+impl Backend {
+    pub fn new(registry: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let updates = Arc::new(Mutex::new(Updates::default()));
+        let output = updates.clone();
+        let path = registry.clone();
+        let handle = thread::spawn(move || worker(path, rx, output));
+        Self {
+            registry,
+            runtime: Runtime {
+                tx,
+                updates,
+                view: View::default(),
+                handle: Some(handle),
+            },
+        }
+    }
+    pub fn handle(&mut self, value: serde_json::Value) -> Result<serde_json::Value> {
+        let command: Option<Command> = serde_json::from_value(value)?;
+        if let Some(Command::Send(id, text)) = command {
+            let store = Store::new(&self.registry)?;
+            let result = store.initialize().and_then(|binding| {
+                store.enqueue_with_id(
+                    &binding,
+                    text.clone(),
+                    id.clone(),
+                    Some(MessageSource::User),
+                )
+            });
+            if let Err(error) = result {
+                let rejected = store
+                    .load()
+                    .ok()
+                    .filter(|state| !state.messages.iter().any(|m| m.id == id))
+                    .map(|_| (id.clone(), text));
+                return Ok(serde_json::to_value(View {
+                    error: Some(format!(
+                        "{error:#}（消息 {id}；结果未知时通过 agent status 核对）"
+                    )),
+                    rejected,
+                    ..View::default()
+                })?);
+            }
+        } else if matches!(command, Some(Command::Refresh)) {
+            self.runtime.tx.send(Command::Refresh)?;
+        }
+        let mut output = self.runtime.updates.lock().unwrap();
+        if let Some(view) = output.latest.take() {
+            self.runtime.view = view;
+        }
+        Ok(serde_json::to_value(&self.runtime.view)?)
+    }
+}
+fn remote_worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<Updates>>) {
+    let mut viewing = true;
+    let mut send_error = None;
+    loop {
+        let command = match input.recv_timeout(Duration::from_millis(700)) {
+            Ok(Command::Exit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Ok(command) => Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+        };
+        if let Some(Command::Viewing(active)) = command {
+            viewing = active;
+        }
+        if !viewing && !matches!(command, Some(Command::Send(..))) {
+            continue;
+        }
+        let result = crate::daemon::call::<View>(
+            &registry,
+            "agent.chat",
+            serde_json::to_value(&command).unwrap(),
+        );
+        let mut view = match result {
+            Ok(view) => view,
+            Err(error) => View {
+                error: Some(match &command {
+                    Some(Command::Send(id, _)) => format!(
+                        "{error:#}；消息 {id} 的提交结果未知，请用 agent status 核对，不要重复发送"
+                    ),
+                    _ => format!("{error:#}"),
+                }),
+                status: "后台连接失败 · F5 重试".into(),
+                ..Default::default()
+            },
+        };
+        if matches!(command, Some(Command::Send(..) | Command::Refresh)) {
+            send_error = view.error.clone();
+        }
+        if let Some(error) = &send_error {
+            view.error = Some(error.clone());
+        }
+        let mut updates = output.lock().unwrap();
+        if let Some(rejected) = view.rejected.take() {
+            updates.rejected.push(rejected);
+        }
+        updates.latest = Some(view);
     }
 }
 

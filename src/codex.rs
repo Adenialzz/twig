@@ -12,7 +12,7 @@ use std::{
 };
 use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub id: String,

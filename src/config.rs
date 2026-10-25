@@ -44,7 +44,7 @@ impl BranchStart {
 
 pub type State = BTreeMap<String, Feature>;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Project {
     pub common: PathBuf,
     pub dir: PathBuf,

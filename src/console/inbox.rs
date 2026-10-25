@@ -197,6 +197,7 @@ pub struct State {
 #[derive(Clone)]
 pub struct Inbox {
     path: PathBuf,
+    remote: Option<(PathBuf, String)>,
 }
 
 impl Inbox {
@@ -209,10 +210,31 @@ impl Inbox {
                 .join("notifications")
                 .join(format!("{}.json", crate::config::repository_id(registry)))
         };
-        Ok(Self { path })
+        Ok(Self { path, remote: None })
     }
 
+    pub fn remote(registry: &Path, client: String) -> Result<Self> {
+        let mut inbox = Self::new(registry)?;
+        inbox.remote = Some((registry.to_owned(), client));
+        Ok(inbox)
+    }
+    pub fn client_id(&self) -> Option<&str> {
+        self.remote.as_ref().map(|(_, client)| client.as_str())
+    }
+    pub fn viewing(&self, target: serde_json::Value) -> Result<()> {
+        if let Some((registry, client)) = &self.remote {
+            let _: serde_json::Value = crate::daemon::call(
+                registry,
+                "viewing",
+                serde_json::json!({"client":client,"target":target}),
+            )?;
+        }
+        Ok(())
+    }
     pub fn load(&self) -> Result<State> {
+        if let Some((registry, client)) = &self.remote {
+            return crate::daemon::call(registry, "inbox", serde_json::json!(client));
+        }
         match fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .with_context(|| format!("未读状态损坏：{}", self.path.display())),
@@ -250,6 +272,7 @@ impl Inbox {
     }
 
     pub fn record(&self, event: Event, viewed: bool) -> Result<()> {
+        let viewed = viewed || crate::daemon::state::is_viewed(&event);
         self.update(|state| {
             let fresh = state.seen.insert(event.id.clone());
             if viewed {
@@ -268,6 +291,9 @@ impl Inbox {
     }
 
     pub fn read_task(&self, project: &str, path: &Path) -> Result<()> {
+        if self.remote.is_some() {
+            return self.viewing(serde_json::json!({"project":project,"path":path}));
+        }
         if !self.load()?.unread.iter().any(|event| {
             event
                 .task
@@ -287,6 +313,9 @@ impl Inbox {
     }
 
     pub fn read_controller(&self) -> Result<()> {
+        if self.remote.is_some() {
+            return self.viewing(serde_json::json!("controller"));
+        }
         self.update(|state| state.unread.retain(|event| event.task.is_some()))
     }
 

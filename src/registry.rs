@@ -99,7 +99,7 @@ pub fn recent_projects(path: &Path) -> Result<Vec<(String, Entry)>> {
 
 pub fn list(path: &Path) -> Result<()> {
     for (name, entry) in load(path)?.projects {
-        println!("{name}\t{}", entry.path.display());
+        crate::output!("{name}\t{}", entry.path.display());
     }
     Ok(())
 }
@@ -114,7 +114,7 @@ pub fn remove(path: &Path, name: &str) -> Result<()> {
         "未登记项目 {name}"
     );
     save(path, &registry)?;
-    println!("已取消登记 {name}；仓库、任务和项目状态保留");
+    crate::output!("已取消登记 {name}；仓库、任务和项目状态保留");
     Ok(())
 }
 
@@ -188,7 +188,7 @@ fn initialize(
         );
         save(path, &registry).context("项目已初始化，但全局登记保存失败；请重试 twig add")?;
     }
-    println!("项目别名：{name}（{}）", path.display());
+    crate::output!("项目别名：{name}（{}）", path.display());
     Ok(name)
 }
 

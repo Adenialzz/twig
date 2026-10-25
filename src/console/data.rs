@@ -7,7 +7,7 @@ use crate::{
     codex::{Client, Thread},
     config::{Config, Feature, Project},
     git::git,
-    registry, tmux,
+    registry,
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Task {
     pub name: String,
     pub path: PathBuf,
@@ -30,9 +30,10 @@ pub struct Task {
     pub git: String,
     pub window: String,
     pub error: Option<String>,
+    #[serde(with = "crate::daemon::time")]
     pub checked: Option<Instant>,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Repo {
     pub name: String,
     pub path: PathBuf,
@@ -40,14 +41,16 @@ pub struct Repo {
     pub error: Option<String>,
     pub context: Option<(Project, Config)>,
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
     pub repos: Vec<Repo>,
     pub registry_error: Option<String>,
+    #[serde(with = "crate::daemon::time")]
     pub registry_checked: Option<Instant>,
     pub threads: Vec<Thread>,
     pub codex_error: Option<String>,
     pub delivery_error: Option<String>,
+    #[serde(with = "crate::daemon::time")]
     pub codex_checked: Option<Instant>,
     pub history: Vec<Thread>,
     pub history_key: Option<(PathBuf, bool)>,
@@ -58,7 +61,7 @@ pub struct Snapshot {
     pub turn: Option<(String, Result<String, String>)>,
     pub associations: BTreeMap<String, (String, PathBuf)>,
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Request {
     pub project: Option<String>,
     pub path: Option<PathBuf>,
@@ -68,6 +71,8 @@ pub struct Request {
     pub turn: Option<String>,
     pub refresh: u64,
     pub background: bool,
+    #[serde(default)]
+    pub projects: Vec<String>,
 }
 
 // 快照可覆盖；完成事件使用独立队列，不能丢弃。
@@ -93,6 +98,111 @@ pub struct Worker {
 }
 impl Worker {
     pub fn start(registry: PathBuf) -> Result<Self> {
+        let inbox = Inbox::remote(&registry, crate::agent::message_id())?;
+        let saved = inbox.load().unwrap_or_default();
+        let (tx, rx) = mpsc::channel::<Request>();
+        let updates = Updates::default();
+        let out = updates.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let chat = Arc::new(Mutex::new(ChatNotifications::persisted(
+            inbox.clone(),
+            &saved,
+        )));
+        let client = inbox.client_id().unwrap().to_owned();
+        let handle = thread::spawn(move || {
+            let mut request = Request::default();
+            let mut latest = Snapshot::default();
+            let mut version = None::<u64>;
+            let mut instance = serde_json::Value::Null;
+            let mut detail_key = None;
+            let mut detail = Snapshot::default();
+            while !stop.load(Ordering::Relaxed) {
+                for next in rx.try_iter() {
+                    request = next;
+                }
+                let result = crate::daemon::call::<serde_json::Value>(
+                    &registry,
+                    "snapshot",
+                    serde_json::json!({"client":client,"request":request,"version":version,"instance":instance}),
+                );
+                match result {
+                    Ok(value) => {
+                        if instance != value["instance"] {
+                            detail_key = None;
+                        }
+                        instance = value["instance"].clone();
+                        version = value["version"].as_u64();
+                        if !value["snapshot"].is_null() {
+                            match serde_json::from_value(value["snapshot"].clone()) {
+                                Ok(snapshot) => latest = snapshot,
+                                Err(error) => {
+                                    latest.registry_error =
+                                        Some(format!("后台快照格式错误：{error}"))
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        version = None;
+                        latest.registry_error =
+                            Some(format!("后台连接中断，旧数据过期：{error:#}"));
+                    }
+                }
+                let key = serde_json::json!([
+                    request.path,
+                    request.history,
+                    request.descendants,
+                    request.page,
+                    request.turn,
+                    request.refresh
+                ]);
+                if !request.background && detail_key.as_ref() != Some(&key) {
+                    detail_key = Some(key);
+                    detail = Snapshot::default();
+                    if request.history || request.turn.is_some() {
+                        match crate::daemon::call::<Snapshot>(
+                            &registry,
+                            "details",
+                            serde_json::json!(request),
+                        ) {
+                            Ok(snapshot) => detail = snapshot,
+                            Err(error) => detail.history_error = Some(format!("{error:#}")),
+                        }
+                    }
+                }
+                latest.history = detail.history.clone();
+                latest.history_key = detail.history_key.clone();
+                latest.history_more = detail.history_more;
+                latest.history_pages = detail.history_pages;
+                latest.history_scanned = detail.history_scanned;
+                latest.history_error = detail.history_error.clone();
+                latest.turn = detail.turn.clone();
+                latest.associations.extend(detail.associations.clone());
+                out.publish(&latest);
+                for _ in 0..5 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            let _ = crate::daemon::call::<serde_json::Value>(
+                &registry,
+                "disconnect",
+                serde_json::json!(client),
+            );
+        });
+        Ok(Self {
+            requests: tx,
+            updates,
+            inbox,
+            chat,
+            cancel,
+            handle: Some(handle),
+        })
+    }
+    pub fn start_local(registry: PathBuf) -> Result<Self> {
         let inbox = Inbox::new(&registry)?;
         let saved = inbox.load()?;
         let (tx, rx) = mpsc::channel();
@@ -513,16 +623,20 @@ fn collect(
     let mut git_at = None;
     let mut git_project = None;
     let mut git_scan: Option<GitScan> = None;
+    let mut next_project = 0;
     let mut cursor: Option<String> = None;
     let mut seen_cursors = HashSet::new();
     let mut handled_refresh = 0;
+    let mut revision = crate::daemon::REVISION.load(Ordering::Relaxed);
     let mut unpublished = false;
     let mut published_at = Instant::now();
     while !cancel.load(Ordering::Relaxed) {
         for next in requests.try_iter() {
             request = next;
         }
-        let force = request.refresh != handled_refresh;
+        let next_revision = crate::daemon::REVISION.load(Ordering::Relaxed);
+        let force = request.refresh != handled_refresh || revision != next_revision;
+        revision = next_revision;
         handled_refresh = request.refresh;
         let mut dirty = false;
         let mut associations_changed = false;
@@ -790,9 +904,14 @@ fn collect(
                 git_scan = snapshot
                     .repos
                     .iter()
-                    .find(|r| Some(&r.name) == request.project.as_ref())
+                    .filter(|r| {
+                        request.projects.contains(&r.name)
+                            || Some(&r.name) == request.project.as_ref()
+                    })
+                    .nth(next_project)
                     .and_then(|repo| GitScan::new(repo, request.path.as_deref()));
                 if git_scan.is_none() {
+                    next_project = 0;
                     git_at = Some(Instant::now());
                 }
             }
@@ -805,7 +924,8 @@ fn collect(
                 }
                 if scan.paths.is_empty() {
                     git_scan = None;
-                    git_at = Some(Instant::now());
+                    next_project += 1;
+                    git_at = None;
                 }
             }
         }
@@ -907,7 +1027,7 @@ fn collect(
         }));
     }
 }
-fn associate(snapshot: &mut Snapshot) {
+pub(crate) fn associate(snapshot: &mut Snapshot) {
     let mut owners = Owners::new(&snapshot.repos);
     snapshot.associations = snapshot
         .threads
@@ -921,29 +1041,15 @@ fn due(at: Option<Instant>, seconds: u64) -> bool {
 }
 
 pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<(String, String)> {
-    // Enter 时重新解析登记信息，不能用陈旧快照决定写操作。
-    let entry = registry::entry(registry_path, name)?;
-    let path = registry::expand(&entry.path)?;
-    let project = Project::discover_at(&path, registry_path)?;
-    let config = project.config()?;
-    ensure!(
-        path.canonicalize()? == config.main.canonicalize()?,
-        "项目主目录归属已改变"
-    );
-    let lock = project.lock()?;
-    let window = if task == "main" {
-        tmux::ensure_main_window(&config, &project)?
-    } else {
-        let state = project.state()?;
-        let feature = crate::feature(&state, task)?;
-        ensure!(
-            crate::check_worktree(&config, feature)?,
-            "Worktree 缺失；请先检查 twig ls <项目名>"
-        );
-        tmux::ensure_window(&config, &project, task, &feature.path)?
-    };
-    drop(lock);
-    Ok((config.session, window))
+    let output = crate::daemon::operations::execute(
+        registry_path,
+        crate::Action::Open {
+            project: name.into(),
+            name: task.into(),
+        },
+    )?;
+    let (_, target) = output.terminal.context("后台未返回终端目标")?;
+    Ok((target.session, target.window))
 }
 
 #[cfg(test)]

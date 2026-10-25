@@ -12,7 +12,7 @@ use ratatui::{
 };
 use serde_json::Value;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Kind {
     User,
     Assistant,
@@ -23,6 +23,7 @@ pub(super) enum Kind {
     Error,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) enum Tool {
     Command {
         status: String,
@@ -34,6 +35,7 @@ pub(super) enum Tool {
     },
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct Entry {
     pub id: Option<String>,
     pub kind: Kind,
@@ -56,6 +58,7 @@ impl Entry {
     pub fn apply_source(&mut self, message: &Delivery) {
         let (kind, label) = match &message.source {
             Some(MessageSource::User) => (Kind::User, None),
+            Some(MessageSource::Feishu { user }) => (Kind::User, Some(format!("飞书 · {user}"))),
             Some(MessageSource::Task { project, task }) => {
                 (Kind::Task, Some(format!("子任务 · {project}/{task}")))
             }

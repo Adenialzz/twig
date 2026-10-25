@@ -351,6 +351,12 @@ impl ChatNotifications {
         if viewing {
             self.inbox.as_ref().unwrap().read_controller()?;
         }
+        if !viewing {
+            self.inbox
+                .as_ref()
+                .unwrap()
+                .viewing(serde_json::Value::Null)?;
+        }
         self.viewing(viewing);
         Ok(())
     }

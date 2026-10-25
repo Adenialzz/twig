@@ -37,4 +37,6 @@ make build
 
 Rust/Cargo 只用于源码构建和安装，CI 使用 Rust stable。普通任务管理不需要 Codex。Console 的 Codex 观察功能需要本机已有服务。
 
+安装不自动启动后台。业务入口使用前执行 `twig daemon start`；持续托管及升级切换见 [后台指南](daemon.md)。
+
 首次使用见 [快速开始](quickstart.md)（`twig guide quickstart`）。安装后可直接执行 `twig guide` 阅读离线文档；当前没有单独安装的 man 页面，也不会自动启动分页器。需要分页时用 `twig guide --all | less`。

@@ -126,6 +126,7 @@ impl Fixture {
             .arg("--config")
             .arg(&self.registry)
             .args(args);
+        support::daemon::ensure(&c, &self.registry);
         let o = c.output().unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
@@ -192,6 +193,7 @@ printf '\nTERMINAL_RESTORED:%s\n' "$code"
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        support::daemon::stop_under(self.temp.path());
         let _ = Command::new(&self.tmux)
             .args(["-L", &self.socket, "kill-server"])
             .output();
@@ -222,6 +224,7 @@ struct Pty {
 }
 impl Pty {
     fn spawn(mut command: Command) -> Self {
+        support::daemon::for_pty(&command);
         let (mut master, mut slave) = (0, 0);
         let mut size = libc::winsize {
             ws_row: 36,
@@ -1181,6 +1184,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     let seen = methods.clone();
     let cwd = f.repo.canonicalize().unwrap();
     let server = thread::spawn(move || {
+        let mut connections = Vec::new();
         while !done.load(Ordering::Relaxed) {
             let (socket, _) = match listener.accept() {
                 Ok(s) => s,
@@ -1190,13 +1194,18 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                 }
                 Err(e) => panic!("{e}"),
             };
+            let done = done.clone();
+            let disconnected = disconnected.clone();
+            let seen = seen.clone();
+            let cwd = cwd.clone();
+            connections.push(thread::spawn(move || {
             socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut ws = match tungstenite::accept(socket) {
                 Ok(ws) => ws,
-                Err(_) => continue,
+                Err(_) => return,
             };
             ws.get_mut()
                 .set_read_timeout(Some(Duration::from_millis(200)))
@@ -1256,6 +1265,10 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                     break;
                 }
             }
+            }));
+        }
+        for connection in connections {
+            connection.join().unwrap();
         }
     });
     // 即使断言失败也释放模拟 server，不遗留线程。
@@ -1277,7 +1290,18 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
         thread::sleep(Duration::from_millis(20));
     }
     p.send(b"n");
-    thread::sleep(Duration::from_millis(200));
+    let start = Instant::now();
+    while methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "thread/list")
+        .count()
+        < 2
+    {
+        assert!(start.elapsed() < Duration::from_secs(5), "历史下一页未完成");
+        thread::sleep(Duration::from_millis(20));
+    }
     p.send(b"\r");
     let start = Instant::now();
     while !methods
@@ -1292,6 +1316,12 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     offline.store(true, Ordering::Relaxed);
     p.send(b"r");
     p.wait("服务关闭连接");
+    let prior_connections = methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "initialize")
+        .count();
     offline.store(false, Ordering::Relaxed);
     p.send(b"r");
     let start = Instant::now();
@@ -1301,7 +1331,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
         .iter()
         .filter(|m| m.as_str() == "initialize")
         .count()
-        < 2
+        <= prior_connections
     {
         assert!(start.elapsed() < Duration::from_secs(5));
         thread::sleep(Duration::from_millis(20));
@@ -2219,7 +2249,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     p.wait("[y/N]");
     f.git(&["update-ref", "refs/remotes/upstream/feat/remote", "main"]);
     p.send(b"y\n");
-    p.wait("分支已变化");
+    p.wait("资源已变化");
     assert!(!p.wait_exit().success());
     assert_eq!(fs::read(&state_path).unwrap(), before);
     f.git(&[
@@ -2501,7 +2531,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     // 失败后回到取消，取消勾选删除分支，再明确选择确认。
     p.clear_output();
     p.send(b" \t\r");
-    p.wait("已选中 demo / main");
+    p.wait_screen("已选中 demo / main");
     assert!(!path.exists());
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert!(state.get("auth").is_none());
@@ -2560,7 +2590,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     fs::remove_file(path.join("unsaved")).unwrap();
     p.clear_output();
     p.send(b"\t\r");
-    p.wait("已选中 demo / main");
+    p.wait_screen("已选中 demo / main");
     let output = Command::new("git")
         .current_dir(&f.repo)
         .args(["show-ref", "--verify", "refs/heads/auth"])
@@ -2600,7 +2630,7 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     assert!(path.join(".venv/data").exists());
     p.clear_output();
     p.send(b"dd\t\r");
-    p.wait("已选中 demo / main");
+    p.wait_screen("已选中 demo / main");
     assert!(!path.exists());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
@@ -2612,6 +2642,8 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
     let mut f = Fixture::new();
     f.registry = f.temp.path().join("config.toml");
     f.init();
+    support::daemon::stop_under(f.temp.path());
+    let _ = fs::remove_file(f.temp.path().join("notifications.json"));
     let project_state = support::project_dir(&f.repo, &f.registry).join("state.json");
     let mut tasks: serde_json::Value =
         serde_json::from_slice(&fs::read(&project_state).unwrap()).unwrap();

@@ -79,6 +79,14 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Rust 测试
         run: cargo test --locked -- --nocapture
+      - name: 校验 systemd 示例
+        if: runner.os == 'Linux'
+        run: |
+          sed "s|%h/.cargo/bin/twig|$PWD/target/debug/twig|" examples/services/twig.service > "$RUNNER_TEMP/twig.service"
+          XDG_RUNTIME_DIR="$RUNNER_TEMP" systemd-analyze --user verify "$RUNNER_TEMP/twig.service"
+      - name: 校验 launchd 示例
+        if: runner.os == 'macOS'
+        run: plutil -lint examples/services/com.twig.daemon.plist
 
   terminal:
     name: terminal (${{ matrix.os }})

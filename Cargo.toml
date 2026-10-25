@@ -19,7 +19,7 @@ tempfile = "3"
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 # 使用同步 poll 后端，避免 macOS 同时收到缩放和输入时丢失边沿通知。
 crossterm = { version = "0.28", features = ["use-dev-tty"] }
-tungstenite = "0.26"
+tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 libc = "0.2"
 
 alacritty_terminal = "0.26.0"
@@ -36,3 +36,4 @@ url = "2"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 urlencoding = "2"
 tracing = "0.1"
+prost = "0.13"

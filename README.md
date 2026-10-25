@@ -12,6 +12,7 @@ Twig 提供两个可切换的页面：**Console** 管理项目、任务和终端
 - **终端工作台**：在 Twig 内使用 Shell、编辑器或任务启动程序，支持分屏、滚动和拖选复制；离开界面后任务进程继续运行。
 - **对话阅读**：主控回复支持 Markdown 排版、代码高亮与自适应表格；工具过程以紧凑状态和输出预览展示，F4 展开详情。
 - **主控协作**：通过 Codex daemon 创建受管任务、派发消息、跟进完成回调，要求子任务回报结果和阻塞，并核对验收。
+- **持续后台**：Console、CLI 和飞书共享状态与消息队列；多窗口同步未读，界面退出后继续采集与投递。
 - **状态与提醒**：查看 Codex 会话状态，接收消息送达和轮次完成通知，从通知直接跳转任务或主控；重要事项可由主控发送飞书通知。
 
 ## 安装
@@ -27,7 +28,7 @@ make install
 | 可选能力 | 额外依赖 |
 | --- | --- |
 | 主控与受管 Codex 任务 | 支持 app-server daemon 的 Codex，且服务已启动 |
-| 飞书通知 | curl、`TWIG_FEISHU_WEBHOOK_URL` |
+| 飞书双向机器人 / 主动 webhook 通知 | curl、应用凭证与允许用户 / `TWIG_FEISHU_WEBHOOK_URL` |
 
 也可用 `cargo install --path . --locked` 只安装二进制；使用主控时需另行复制 skill。完整说明及平台验证范围见 [安装指南](docs/installation.md)。
 
@@ -38,6 +39,7 @@ make install
 先准备一个已有提交的 Git 仓库，登记后创建任务：
 
 ```sh
+twig daemon start             # 显式启动 Twig 后台
 twig add myapp --path ~/projects/myapp
 twig new myapp feat/login
 ```
@@ -76,7 +78,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 
 主控默认 **YOLO：无需审批、完整访问权限**，页面顶部常驻红色提示；子任务沿用 Codex 自身权限配置。
 
-飞书通知可选，读取 `TWIG_FEISHU_WEBHOOK_URL`。需让执行通知命令的 Codex 环境能读取该变量；已经运行的 daemon 不会自动继承新终端里的 `export`。配置方式、消息恢复及已有会话的通信边界见 [主控指南](docs/agent.md)。
+飞书支持应用机器人双向单聊，允许的用户可直接向同一主控发消息并接收对应轮次回复；旧 webhook 保留为显式主动通知。凭证配置在 Twig 后台环境中，见 [主控指南](docs/agent.md)。后台持续运行与 Linux/macOS 系统托管见 [后台指南](docs/daemon.md)。
 
 ## 常用交互
 
@@ -98,7 +100,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 
 ## 行为边界
 
-- Twig 不运行自有后台服务，也不启动、重启或停止共享 Codex daemon；服务不可用时提示用户启动。
+- 所有业务入口依赖显式启动的 Twig 后台；不启动、重启或停止共享 Codex daemon。帮助、guide、只读补全不依赖后台，已有终端工作台在后台断开时仍可操作。
 - 受管任务通过 `new --agent` 新建，不自动迁移或接管旧任务。普通任务的已有 Codex session 是否可通信，需核对当前 daemon 中的会话并取得用户授权。
 - 消息送达和一轮回复完成都不代表任务通过验收。投递结果未知时按消息 ID 核对，不自动重发。
 - 新建分支默认 fetch base 的远端 upstream，从最新远端提交创建，不改动本地 base 或工作目录；`--no-fetch` 使用本地 base。复用已有分支不 fetch，其他任务管理不联网，不自动 pull、push 或合并。
@@ -115,7 +117,7 @@ twig guide agent
 twig guide --all
 ```
 
-常用主题：[配置](docs/configuration.md) · [任务窗口与启动命令](docs/windows.md) · [Shell 补全](docs/completion.md) · [Agent 与脚本](docs/automation.md) · [故障排查](docs/troubleshooting.md)。
+常用主题：[后台与操作查询](docs/daemon.md) · [配置](docs/configuration.md) · [任务窗口与启动命令](docs/windows.md) · [Shell 补全](docs/completion.md) · [Agent 与脚本](docs/automation.md) · [故障排查](docs/troubleshooting.md)。
 
 ## 开发
 

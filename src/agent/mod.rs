@@ -1,4 +1,4 @@
-//! 可选主控工作流；运行时由 Codex daemon 托管，Twig 不启动后台服务。
+//! 主控业务由 Twig 后台执行；模型会话使用已有 Codex daemon，不负责启动它。
 pub mod chat;
 pub mod rpc;
 
@@ -16,12 +16,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Args)]
+#[derive(Args, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Action,
 }
-#[derive(Subcommand)]
+#[derive(Subcommand, serde::Serialize, serde::Deserialize, Clone)]
 pub enum Action {
     /// 初始化主控 session；不启动 Codex daemon
     Init,
@@ -67,7 +67,7 @@ pub enum Action {
     #[command(hide = true)]
     Event { event: String },
 }
-#[derive(Args, Default)]
+#[derive(Args, Default, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Target {
     #[arg(long, requires = "task")]
     project: Option<String>,
@@ -86,6 +86,7 @@ pub struct Binding {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageSource {
     User,
+    Feishu { user: String },
     Task { project: String, task: String },
     Completion { project: String, task: String },
 }
@@ -317,7 +318,7 @@ impl Store {
         self.save(&state)?;
         Ok(thread)
     }
-    fn enqueue_with_id(
+    pub(crate) fn enqueue_with_id(
         &self,
         binding: &Binding,
         text: String,
@@ -339,6 +340,13 @@ impl Store {
             state.bindings.values().any(|b| b.thread == binding.thread),
             "会话绑定已变化"
         );
+        if let Some(existing) = state.messages.iter().find(|message| message.id == id) {
+            ensure!(
+                existing.thread == binding.thread && existing.text == text,
+                "同一消息 ID 不能用于不同内容或会话"
+            );
+            return Ok(id);
+        }
         state.messages.push(Delivery {
             id: id.clone(),
             thread: binding.thread.clone(),
@@ -630,6 +638,10 @@ impl Store {
     }
     pub fn removal_guard(&self, thread: &str) -> Result<impl Drop> {
         let lock = self.lock()?;
+        self.check_removal(thread)?;
+        Ok(lock)
+    }
+    pub fn check_removal(&self, thread: &str) -> Result<()> {
         let state = self.load()?;
         let result = self.client(&state)?.thread(thread)?;
         ensure!(
@@ -646,7 +658,7 @@ impl Store {
                 .any(|m| m.thread == thread && matches!(m.status.as_str(), "queued" | "sending")),
             "任务仍有排队或结果未知的消息，请先核对或停止"
         );
-        Ok(lock)
+        Ok(())
     }
 }
 fn record_completion(state: &mut State, binding: &Binding, turn: &str) -> Result<()> {
@@ -766,8 +778,8 @@ pub fn task_layout(
 pub fn execute(registry: &Path, action: Action) -> Result<()> {
     let store = Store::new(registry)?;
     match action {
-        Action::Init => println!("{}", serde_json::to_string(&store.initialize()?)?),
-        Action::Status => println!("{}", serde_json::to_string_pretty(&store.load()?)?),
+        Action::Init => crate::output!("{}", serde_json::to_string(&store.initialize()?)?),
+        Action::Status => crate::output!("{}", serde_json::to_string_pretty(&store.load()?)?),
         Action::Send {
             target,
             message,
@@ -778,12 +790,12 @@ pub fn execute(registry: &Path, action: Action) -> Result<()> {
             let source = from_project
                 .zip(from_task)
                 .map(|(project, task)| MessageSource::Task { project, task });
-            println!(
+            crate::output!(
                 "{}",
                 store.enqueue_with_id(&binding, message, message_id(), source)?
             );
         }
-        Action::Read { target } => println!(
+        Action::Read { target } => crate::output!(
             "{}",
             serde_json::to_string_pretty(&store.read(&store.binding(&target)?)?)?
         ),
@@ -839,7 +851,7 @@ fn notify(message: &str) -> Result<()> {
         "飞书未接受通知，错误码：{}",
         result["code"]
     );
-    println!("飞书已接受通知");
+    crate::output!("飞书已接受通知");
     Ok(())
 }
 

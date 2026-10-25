@@ -30,13 +30,16 @@ import time
 import pyte
 sys.dont_write_bytecode = True
 from check_controller import Client, Model as ProbeModel, wait_for
+from feishu_mock import Feishu
 
 
 class Model(ProbeModel):
     # 产品验收比协议实验多出恢复、切页及通知跳转轮次。
-    request_limit = 24
+    request_limit = 26
 
     def do_POST(self):
+        if self.server.feishu.api(self):
+            return
         if self.path == "/feishu":
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             self.server.notices.append(body)
@@ -136,6 +139,7 @@ def check(root):
     version = subprocess.check_output([real_codex, "--version"], text=True).strip()
     print(version, flush=True)
     model = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Model)
+    model.feishu = Feishu()
     model.root = root
     model.count = 0
     model.counter_lock = threading.Lock()
@@ -164,6 +168,8 @@ def check(root):
     env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")}
     env.update(
         CODEX_HOME=str(home), PATH=str(shim) + ":" + env["PATH"],
+        TWIG_FEISHU_APP_ID="test-app", TWIG_FEISHU_APP_SECRET="test-secret",
+        TWIG_FEISHU_ALLOWED_USERS="ou_allowed", TWIG_FEISHU_API_BASE=f"http://127.0.0.1:{model.server_port}",
         TWIG_FEISHU_WEBHOOK_URL=f"http://127.0.0.1:{model.server_port}/feishu",
         GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
     )
@@ -210,8 +216,14 @@ supports_websockets = false
 
     server = start_server()
     frontend = None
+    twig_log = (root / "twig-daemon.log").open("w+")
+    twig_daemon = subprocess.Popen(
+        [str(binary), "--config", str(config), "daemon", "run"], cwd=cwd, env=env,
+        stdin=subprocess.DEVNULL, stdout=twig_log, stderr=twig_log,
+    )
     try:
         wait_for(socket.exists, "服务未启动")
+        wait_for(lambda: '"instance"' in twig("daemon", "status"), "Twig 后台未就绪")
         # 首次 Chat 必须从没有任何历史轮次的主控开始，而不是预先发过消息。
         frontend = Frontend(binary, config, cwd, env)
         frontend.wait("空闲")
@@ -614,7 +626,32 @@ supports_websockets = false
         frontend = None
         print("PASS: 失效子任务明确报错，主控仍可连接和投递，不重发异常消息", flush=True)
 
+        model.feishu.event("om_group", chat_type="group")
+        model.feishu.event("om_denied", user="ou_stranger")
+        model.feishu.event("om_offline")
+        model.feishu.event("om_offline")
+        wait_for(lambda: len(model.feishu.acks) >= 4, "飞书事件未确认")
+        wait_for(lambda: any("probe complete" in text for _, text in model.feishu.replies), "无界面飞书请求未得到最终回复")
+        messages = [m for m in state()["messages"] if m["text"] == "offline-feishu-request"]
+        assert len(messages) == 1, messages
+        assert messages[0]["source"] == {"kind": "feishu", "user": "ou_allowed"}
+        replies = model.feishu.replies
+        assert len(replies) == 2 and all("/om_offline/reply" in path for path, _ in replies), replies
+        twig_daemon.terminate()
+        twig_daemon.wait(timeout=30)
+        twig_daemon = subprocess.Popen([str(binary), "--config", str(config), "daemon", "run"], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=twig_log, stderr=twig_log)
+        wait_for(lambda: '"instance"' in twig("daemon", "status"), "Twig 重启未就绪")
+        model.feishu.event("om_offline")
+        wait_for(lambda: len(model.feishu.acks) >= 5, "重连事件未确认")
+        time.sleep(3)
+        assert len([m for m in state()["messages"] if m["text"] == "offline-feishu-request"]) == 1
+        assert len(model.feishu.replies) == 2
+        print("PASS: 无界面飞书长连接收发、身份限制、重复事件与后台重启去重", flush=True)
+
     except BaseException:
+        twig_log.flush()
+        twig_log.seek(0)
+        print(twig_log.read()[-8000:], file=sys.stderr)
         log.flush()
         log.seek(0)
         print(log.read()[-8000:], file=sys.stderr)
@@ -624,12 +661,17 @@ supports_websockets = false
             frontend.close()
         for event in model.release.values():
             event.set()
+        if twig_daemon.poll() is None:
+            twig_daemon.terminate()
+            twig_daemon.wait(timeout=30)
+        twig_log.close()
         subprocess.run([real_tmux, "-S", str(root / "tmux.sock"), "kill-server"], capture_output=True)
         if server.poll() is None:
             os.killpg(server.pid, signal.SIGTERM)
             server.wait(timeout=10)
         model.shutdown()
         model.server_close()
+        model.feishu.close()
         serving.join(timeout=2)
         log.close()
 

@@ -42,6 +42,12 @@ impl Fixture {
         let wrapper = bin.join("tmux");
         fs::write(&wrapper, format!("#!/bin/sh\nif [ \"$TWIG_FAIL_TMUX\" = 1 ] && [ \"$1\" = new-window ]; then echo injected-failure >&2; exit 71; fi\nexec '{}' -L '{}' -f /dev/null \"$@\"\n", tmux.replace('\'', "'\\''"), socket)).unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            bin.join("codex"),
+            "#!/bin/sh\nprintf '%s\\n' '{\"status\":\"stopped\"}'\n",
+        )
+        .unwrap();
+        fs::set_permissions(bin.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
         let f = Self {
             _temp: temp,
             repo,
@@ -79,6 +85,7 @@ impl Fixture {
             .env("SHELL", "/bin/sh")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE");
+        support::daemon::ensure(&c, registry);
         c
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -132,6 +139,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        support::daemon::stop_under(self._temp.path());
         let _ = Command::new(&self.tmux)
             .args(["-L", &self.socket, "kill-server"])
             .output();
@@ -735,26 +743,19 @@ fn detects_conflicts_and_preserves_partial_creation() {
         "分支已存在",
     );
     fs::create_dir(f.root.join("occupied")).unwrap();
-    f.fail(
-        &["new", "local", "--no-fetch", "--no-open", "occupied"],
-        "路径已存在",
-    );
-    f.fail(
-        &["new", "local", "--no-fetch", "--no-open", "../escape"],
-        "名称须",
-    );
-    let out = f
-        .command(&f.repo)
-        .env("TWIG_FAIL_TMUX", "1")
+    f.fail(&["new", "local", "--no-fetch", "--no-open", "occupied"], "路径已存在");
+    f.fail(&["new", "local", "--no-fetch", "--no-open", "../escape"], "名称须");
+    let mut command = f.command(&f.repo);
+    command.env("TWIG_FAIL_TMUX", "1");
+    support::daemon::ensure(&command, &f.registry_path());
+    let out = command
         .args(["new", "local", "--no-fetch", "--no-open", "partial"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(f.root.join("partial").is_dir());
-    f.fail(
-        &["new", "local", "--no-fetch", "--no-open", "partial"],
-        "已存在",
-    );
+    support::daemon::stop_under(f._temp.path());
+    f.fail(&["new", "local", "--no-fetch", "--no-open", "partial"], "已存在");
     f.fail(&["open", "local", "partial"], "工作台需要交互式终端");
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
@@ -864,21 +865,16 @@ fn upstream_and_foreign_window_protection() {
     f.git(&["merge", "--ff-only", "unpushed"]);
     f.fail(&["rm", "local", "unpushed", "-y"], "未推送提交");
     f.mux(&["new-window", "-d", "-t", &f.session(), "-n", "foreign"]);
-    f.fail(
-        &["new", "local", "--no-fetch", "--no-open", "foreign"],
-        "同名非 twig",
-    );
-    assert!(f.root.join("foreign").is_dir());
+    f.fail(&["new", "local", "--no-fetch", "--no-open", "foreign"], "同名非 twig");
+    // prepare 在创建资源前发现外来窗口，不能留下半成品 Worktree。
+    assert!(!f.root.join("foreign").exists());
     f.mux(&[
         "rename-window",
         "-t",
         &format!("{}:foreign", f.session()),
         "personal",
     ]);
-    f.fail(
-        &["new", "local", "--no-fetch", "--no-open", "foreign"],
-        "已存在",
-    );
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "foreign"]);
     f.fail(&["open", "local", "foreign"], "工作台需要交互式终端");
 }
 
@@ -1201,6 +1197,7 @@ fn default_global_storage_ignores_and_preserves_old_files() {
         .env("SHELL", "/bin/sh")
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
+    support::daemon::ensure(&c, &home.join(".twig/config.toml"));
     success(
         c.args(["add", "default", "--path", f.repo.to_str().unwrap()])
             .output()
@@ -1365,7 +1362,68 @@ fn listing_missing_registry_is_readonly_and_requires_no_repository() {
             .status
             .success()
     );
-    assert!(!registry.parent().unwrap().exists());
+    assert!(!registry.exists());
+    assert!(!registry.parent().unwrap().join("projects").exists());
+}
+
+#[test]
+fn disconnected_submit_and_retry_create_only_one_task() {
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let f = Fixture::new();
+    let status: Value = serde_json::from_str(&f.ok(&["daemon", "status"])).unwrap();
+    let socket = status["socket"].as_str().unwrap();
+    let rpc = |method: &str, params: Value, read: bool| -> Value {
+        let mut stream = UnixStream::connect(socket).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({"version":1,"id":"client","method":method,"params":params})
+        )
+        .unwrap();
+        if !read {
+            return Value::Null;
+        }
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+        assert!(value["error"].is_null(), "{value}");
+        value["result"].clone()
+    };
+    let plan = rpc(
+        "operation.prepare",
+        json!({"New":{"project":"local","name":"detached","base":null,"no_open":true,"agent":false,"expected_branch":null}}),
+        true,
+    );
+    let params = json!({"plan":plan["id"],"request":"lost-response","confirmed":true});
+    rpc("operation.submit", params.clone(), false);
+    let id = rpc("operation.submit", params, true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let record = rpc("operation.get", json!("lost-response"), true);
+        if record["status"] == "succeeded" {
+            assert_eq!(record["id"], id);
+            assert!(record["stages"].as_array().unwrap().len() >= 3);
+            break;
+        }
+        assert!(
+            record["status"] == "queued" || record["status"] == "running",
+            "{record}"
+        );
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(f.root.join("detached").is_dir());
+    assert_eq!(
+        f.git(&["worktree", "list", "--porcelain"])
+            .matches("worktree ")
+            .count(),
+        2
+    );
 }
 
 #[test]

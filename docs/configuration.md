@@ -64,4 +64,4 @@ panes = [
 
 ## 可选主控数据
 
-主控默认保存于 `~/.twig/controller/`，包含 workspace 和 runtime.json；遵循 `--config` 隔离，详情见 [主控 Agent](agent.md)。受管任务登记记录增加 `agent_thread`，工作树创建 `.twig/state.md`，由共享 Git `info/exclude` 精确忽略。普通任务不创建这些资源，不迁移旧任务。飞书地址通过 `TWIG_FEISHU_WEBHOOK_URL` 传入，不写入配置。
+主控默认保存于 `~/.twig/controller/`，包含 workspace 和 runtime.json；遵循 `--config` 隔离，详情见 [主控 Agent](agent.md)。受管任务登记记录增加 `agent_thread`，工作树创建 `.twig/state.md`，由共享 Git `info/exclude` 精确忽略。普通任务不创建这些资源，不迁移旧任务。飞书主动通知地址通过 Twig 后台环境 `TWIG_FEISHU_WEBHOOK_URL` 传入；双向机器人另使用 APP_ID、APP_SECRET 和允许用户列表，见主控指南。后台操作和渠道状态位于配置旁 `daemon/<配置身份>/`，不写入 config.toml。
