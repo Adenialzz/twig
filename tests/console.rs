@@ -571,28 +571,50 @@ fn navigation_batches_worktree_and_window_queries() {
             .lines()
             .filter(|line| line.starts_with("git status "))
             .count()
-            == 3
+            >= 3
         {
             break queries;
         }
         assert!(start.elapsed() < Duration::from_secs(3), "{queries}");
         thread::sleep(Duration::from_millis(10));
     };
+    // 只检查第一轮三个任务的 Git 扫描，避免慢机器已进入后续扫描。
+    let mut statuses = 0;
+    let queries = queries
+        .lines()
+        .take_while(|line| {
+            if statuses == 3 {
+                return false;
+            }
+            statuses += usize::from(line.starts_with("git status "));
+            true
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         queries
-            .lines()
+            .iter()
             .filter(|line| line.starts_with("git worktree list "))
             .count(),
         1
     );
-    assert_eq!(
-        queries
-            .lines()
-            .filter(|line| line.starts_with("tmux list-windows "))
-            .count(),
-        1
+    // 窗口采集有独立的两秒周期，不要求与一轮 Git 扫描次数相等；
+    // 每次必须全局批量读取，不能按任务逐个查询窗口。
+    let windows: Vec<_> = queries
+        .iter()
+        .filter(|line| line.starts_with("tmux list-windows "))
+        .collect();
+    assert!(!windows.is_empty());
+    assert!(
+        windows
+            .iter()
+            .all(|line| line.starts_with("tmux list-windows -a -F ")),
+        "{windows:?}"
     );
-    assert!(!queries.contains("git branch --show-current"));
+    assert!(
+        !queries
+            .iter()
+            .any(|line| line.contains("git branch --show-current"))
+    );
     p.send(b"q");
     assert!(p.wait_exit().success());
 }
