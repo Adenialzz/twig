@@ -17,7 +17,7 @@ twig daemon run             # 前台运行，供调试或系统服务托管
 
 后台使用启动时的 PATH、SHELL、CODEX_HOME 和飞书环境变量；客户端的新 `export` 不会改变它。更新环境后有序停止并重新启动 Twig 后台。业务命令不将客户端环境通过 RPC 传入；`add` 的相对路径由客户端解析。
 
-`status` 中的 `collection` 展示登记、Codex 与任务采集的年龄和错误；`agent_queue` 为投递状态计数，`operations` 为排队数量和运行/待核对阶段；`feishu` 展示连接、待处理请求、未知回复数和按消息 ID 记录的错误；`history_pending` 是待发主控历史分段，`history_error` 为历史采集错误，`history_errors` 为各单聊同步错误。未启用 Codex 时其采集失败不影响普通任务管理。
+`status` 中的 `collection` 展示登记、Codex 与任务采集的年龄和错误；`agent_queue` 为投递状态计数，`operations` 为排队数量和运行/待核对阶段；`feishu` 展示连接、待处理请求、未知回复数和按消息 ID 记录的错误；`history_pending` 是待发主控历史分段，`history_error` 为历史采集错误，`history_errors` 为各单聊同步错误；`worker_errors` 记录飞书接收/发送线程的异常退出，接收线程异常也会将 connected 置为 false 并设置 error。未启用 Codex 时其采集失败不影响普通任务管理。
 
 Unix socket 位于 `/tmp/twig-<UID>/` 私有目录，按规范化配置路径隔离。后台运行目录为配置旁的 `daemon/<配置身份>/`，包含单例锁、`operations.json`、可选 `feishu.json` 与 `feishu-history.json`。配置文件尚不存在也可先启动。socket 不受客户端 TMPDIR 和启动目录影响。
 

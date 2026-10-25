@@ -20,7 +20,30 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use tungstenite::{Message, stream::MaybeTlsStream};
+use tungstenite::{Connector, Message, stream::MaybeTlsStream};
+
+fn tls_client(roots: rustls::RootCertStore) -> Result<Arc<rustls::ClientConfig>> {
+    Ok(Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth(),
+    ))
+}
+
+fn native_tls_client() -> Result<Arc<rustls::ClientConfig>> {
+    let certificates = rustls_native_certs::load_native_certs();
+    let mut roots = rustls::RootCertStore::empty();
+    let (added, _) = roots.add_parsable_certificates(certificates.certs);
+    ensure!(
+        added > 0,
+        "未找到可用的系统 TLS 根证书：{:?}",
+        certificates.errors
+    );
+    tls_client(roots).context("初始化飞书 TLS 失败")
+}
 
 #[derive(Clone)]
 struct Config {
@@ -165,6 +188,7 @@ pub struct Health {
     pub history_pending: usize,
     pub history_errors: BTreeMap<String, String>,
     pub history_error: Option<String>,
+    pub worker_errors: BTreeMap<String, String>,
 }
 pub struct Runtime {
     stop: Arc<AtomicBool>,
@@ -181,6 +205,8 @@ impl Runtime {
         let stop = Arc::new(AtomicBool::new(false));
         let mut workers = vec![];
         if let Some(config) = config {
+            // TLS 初始化在启动线程前完成，配置错误直接报告，不能留下假在线的后台。
+            let tls = native_tls_client()?;
             let inbox = Arc::new(Mutex::new(Inbox::open(dir.join("feishu.json"))?));
             let mut history = history::History::open(dir.join("feishu-history.json"))?;
             let config = Arc::new(config);
@@ -188,73 +214,87 @@ impl Runtime {
             let rx_inbox = inbox.clone();
             let rx_stop = stop.clone();
             let rx_health = health.clone();
-            workers.push(thread::spawn(move || {
-                let mut delay = 2;
-                while !rx_stop.load(Ordering::Relaxed) {
-                    let result = receive_loop(&rx_config, &rx_inbox, &rx_stop, &rx_health);
-                    let mut health = rx_health.lock().unwrap();
-                    health.connected = false;
-                    health.error = result.err().map(|e| format!("{e:#}"));
-                    drop(health);
-                    sleep(&rx_stop, delay);
-                    delay = (delay * 2).min(60);
-                }
-            }));
+            workers.push(spawn_worker(
+                "接收",
+                rx_stop.clone(),
+                rx_health.clone(),
+                move || {
+                    let mut delay = 2;
+                    while !rx_stop.load(Ordering::Relaxed) {
+                        let result =
+                            receive_loop(&rx_config, &rx_inbox, &rx_stop, &rx_health, &tls);
+                        let mut health = rx_health.lock().unwrap();
+                        health.connected = false;
+                        health.error = result.err().map(|e| format!("{e:#}"));
+                        drop(health);
+                        sleep(&rx_stop, delay);
+                        delay = (delay * 2).min(60);
+                    }
+                },
+            ));
             let tx_stop = stop.clone();
             let tx_health = health.clone();
             let registry = registry.to_owned();
-            workers.push(thread::spawn(move || {
-                while !tx_stop.load(Ordering::Relaxed) {
-                    let ids: Vec<_> = inbox
-                        .lock()
-                        .unwrap()
-                        .messages
-                        .iter()
-                        .filter(|(_, m)| config.users.contains(&m.user))
-                        .map(|(id, _)| id.clone())
-                        .collect();
-                    for id in ids {
-                        if tx_stop.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        if let Err(error) = dispatch(&registry, &config, &inbox, &id) {
-                            let mut inbox = inbox.lock().unwrap();
-                            inbox.messages.get_mut(&id).unwrap().error = Some(format!("{error:#}"));
-                            if let Err(error) = inbox.save() {
-                                tx_health.lock().unwrap().error =
-                                    Some(format!("飞书状态保存失败：{error:#}"));
+            workers.push(spawn_worker(
+                "发送",
+                tx_stop.clone(),
+                tx_health.clone(),
+                move || {
+                    while !tx_stop.load(Ordering::Relaxed) {
+                        let ids: Vec<_> = inbox
+                            .lock()
+                            .unwrap()
+                            .messages
+                            .iter()
+                            .filter(|(_, m)| config.users.contains(&m.user))
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                        for id in ids {
+                            if tx_stop.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            if let Err(error) = dispatch(&registry, &config, &inbox, &id) {
+                                let mut inbox = inbox.lock().unwrap();
+                                inbox.messages.get_mut(&id).unwrap().error =
+                                    Some(format!("{error:#}"));
+                                if let Err(error) = inbox.save() {
+                                    tx_health.lock().unwrap().error =
+                                        Some(format!("飞书状态保存失败：{error:#}"));
+                                }
                             }
                         }
+                        let history_error = history
+                            .sync(&registry, &config, &inbox, &tx_stop)
+                            .err()
+                            .map(|error| format!("{error:#}"));
+                        let inbox = inbox.lock().unwrap();
+                        let mut health = tx_health.lock().unwrap();
+                        health.history_error = history_error;
+                        health.message_errors = inbox
+                            .messages
+                            .iter()
+                            .filter_map(|(id, m)| m.error.as_ref().map(|e| (id.clone(), e.clone())))
+                            .collect();
+                        health.pending = inbox
+                            .messages
+                            .values()
+                            .filter(|m| {
+                                !m.finished || m.replies.iter().any(|r| r.status == "queued")
+                            })
+                            .count();
+                        health.unknown_replies = inbox
+                            .messages
+                            .values()
+                            .flat_map(|m| &m.replies)
+                            .filter(|r| r.status == "sending")
+                            .count();
+                        history.health(&mut health);
+                        drop(health);
+                        drop(inbox);
+                        sleep(&tx_stop, 2);
                     }
-                    let history_error = history
-                        .sync(&registry, &config, &inbox, &tx_stop)
-                        .err()
-                        .map(|error| format!("{error:#}"));
-                    let inbox = inbox.lock().unwrap();
-                    let mut health = tx_health.lock().unwrap();
-                    health.history_error = history_error;
-                    health.message_errors = inbox
-                        .messages
-                        .iter()
-                        .filter_map(|(id, m)| m.error.as_ref().map(|e| (id.clone(), e.clone())))
-                        .collect();
-                    health.pending = inbox
-                        .messages
-                        .values()
-                        .filter(|m| !m.finished || m.replies.iter().any(|r| r.status == "queued"))
-                        .count();
-                    health.unknown_replies = inbox
-                        .messages
-                        .values()
-                        .flat_map(|m| &m.replies)
-                        .filter(|r| r.status == "sending")
-                        .count();
-                    history.health(&mut health);
-                    drop(health);
-                    drop(inbox);
-                    sleep(&tx_stop, 2);
-                }
-            }));
+                },
+            ));
         }
         Ok(Self {
             stop,
@@ -262,6 +302,46 @@ impl Runtime {
             health,
         })
     }
+}
+
+// 不捕获并重试 panic：保留原始崩溃日志，同时让健康接口反映线程已经退出。
+struct WorkerExit {
+    name: &'static str,
+    stop: Arc<AtomicBool>,
+    health: Arc<Mutex<Health>>,
+}
+impl Drop for WorkerExit {
+    fn drop(&mut self) {
+        if thread::panicking() || !self.stop.load(Ordering::Relaxed) {
+            let error = format!(
+                "飞书{}线程异常退出，请查看 daemon.log 或服务日志并重启 Twig 后台",
+                self.name
+            );
+            // panic 时业务代码可能正持有此锁；仅恢复锁以写入失败诊断，不恢复业务。
+            let mut health = self
+                .health
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if self.name == "接收" {
+                health.connected = false;
+                health.error = Some(error.clone());
+            }
+            health.worker_errors.insert(self.name.into(), error.clone());
+            self.health.clear_poison();
+            super::log::error(&error);
+        }
+    }
+}
+fn spawn_worker(
+    name: &'static str,
+    stop: Arc<AtomicBool>,
+    health: Arc<Mutex<Health>>,
+    work: impl FnOnce() + Send + 'static,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let _exit = WorkerExit { name, stop, health };
+        work();
+    })
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
@@ -502,6 +582,7 @@ fn receive_loop(
     inbox: &Mutex<Inbox>,
     stop: &AtomicBool,
     health: &Mutex<Health>,
+    tls: &Arc<rustls::ClientConfig>,
 ) -> Result<()> {
     let endpoint = post(
         config,
@@ -530,8 +611,13 @@ fn receive_loop(
         .context("飞书长连接 TCP 连接失败")?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let (mut ws, _) = tungstenite::client_tls(url, stream)
-        .map_err(|_| anyhow::anyhow!("飞书长连接握手失败，请核对应用凭证与网络"))?;
+    let (mut ws, _) = tungstenite::client_tls_with_config(
+        url,
+        stream,
+        None,
+        Some(Connector::Rustls(tls.clone())),
+    )
+    .map_err(|_| anyhow::anyhow!("飞书长连接握手失败，请核对应用凭证与网络"))?;
     match ws.get_mut() {
         MaybeTlsStream::Plain(s) => s.set_read_timeout(Some(Duration::from_millis(500)))?,
         MaybeTlsStream::Rustls(s) => s.sock.set_read_timeout(Some(Duration::from_millis(500)))?,
@@ -657,6 +743,45 @@ fn receive_loop(
 mod tests {
     use super::*;
     #[test]
+    fn worker_panic_is_visible_even_when_health_lock_was_poisoned() {
+        for name in ["接收", "发送"] {
+            let health = Arc::new(Mutex::new(Health {
+                connected: true,
+                ..Health::default()
+            }));
+            let inner = health.clone();
+            let worker = spawn_worker(
+                name,
+                Arc::new(AtomicBool::new(false)),
+                health.clone(),
+                move || {
+                    let _locked = inner.lock().unwrap();
+                    panic!("模拟飞书线程故障");
+                },
+            );
+            assert!(worker.join().is_err());
+            let health = health.lock().unwrap();
+            assert!(health.worker_errors[name].contains("异常退出"));
+            if name == "接收" {
+                assert!(!health.connected);
+                assert!(health.error.is_some());
+            }
+        }
+    }
+    #[test]
+    fn orderly_worker_exit_does_not_report_failure() {
+        let health = Arc::new(Mutex::new(Health::default()));
+        spawn_worker(
+            "接收",
+            Arc::new(AtomicBool::new(true)),
+            health.clone(),
+            || {},
+        )
+        .join()
+        .unwrap();
+        assert!(health.lock().unwrap().worker_errors.is_empty());
+    }
+    #[test]
     fn receives_only_allowed_private_user_text_and_deduplicates_after_restart() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("feishu.json");
@@ -709,6 +834,8 @@ mod transport_tests {
         io::{BufRead, BufReader, Read},
         net::TcpListener,
     };
+    trait ReadWrite: Read + Write + std::fmt::Debug {}
+    impl<T: Read + Write + std::fmt::Debug> ReadWrite for T {}
     pub(super) fn read_http(stream: &mut TcpStream) -> String {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -746,6 +873,81 @@ mod transport_tests {
     }
     #[test]
     fn websocket_ack_follows_durable_storage_and_duplicate_keeps_delivery_id() {
+        check_websocket_delivery(false);
+    }
+    #[test]
+    fn secure_websocket_handshake_receives_and_acknowledges_durable_events() {
+        check_websocket_delivery(true);
+    }
+    fn certificate() -> (Arc<rustls::ServerConfig>, rustls::RootCertStore) {
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.der().clone()).unwrap();
+        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![cert.der().clone()],
+            rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into(),
+        )
+        .unwrap();
+        (Arc::new(server), roots)
+    }
+    #[test]
+    fn tls_rejects_untrusted_certificates_and_wrong_hostnames() {
+        for wrong_host in [false, true] {
+            let (server_config, roots) = certificate();
+            let tls = tls_client(if wrong_host {
+                roots
+            } else {
+                rustls::RootCertStore::empty()
+            })
+            .unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let stream = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(server_config).unwrap(),
+                    socket,
+                );
+                assert!(tungstenite::accept(stream).is_err());
+            });
+            let socket = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let url = format!(
+                "wss://{}:{}/",
+                if wrong_host { "localhost" } else { "127.0.0.1" },
+                address.port()
+            );
+            assert!(
+                tungstenite::client_tls_with_config(
+                    url,
+                    socket,
+                    None,
+                    Some(Connector::Rustls(tls))
+                )
+                .is_err()
+            );
+            server.join().unwrap();
+        }
+    }
+    fn check_websocket_delivery(secure: bool) {
         let temp = tempfile::tempdir().unwrap();
         let inbox = Arc::new(Mutex::new(
             Inbox::open(temp.path().join("inbox.json")).unwrap(),
@@ -753,8 +955,11 @@ mod transport_tests {
         let http = TcpListener::bind("127.0.0.1:0").unwrap();
         let ws = TcpListener::bind("127.0.0.1:0").unwrap();
         let config = config(http.local_addr().unwrap().port());
+        let (server_tls, roots) = certificate();
+        let tls = tls_client(roots).unwrap();
         let url = format!(
-            "ws://127.0.0.1:{}/events?service_id=7",
+            "{}://127.0.0.1:{}/events?service_id=7",
+            if secure { "wss" } else { "ws" },
             ws.local_addr().unwrap().port()
         );
         let endpoint = thread::spawn(move || {
@@ -771,13 +976,21 @@ mod transport_tests {
             let inbox = inbox.clone();
             let stop = stop.clone();
             let health = health.clone();
-            thread::spawn(move || receive_loop(&config, &inbox, &stop, &health))
+            thread::spawn(move || receive_loop(&config, &inbox, &stop, &health, &tls))
         };
         let (socket, _) = ws.accept().unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
-        let mut ws = tungstenite::accept(socket).unwrap();
+        let stream: Box<dyn ReadWrite> = if secure {
+            Box::new(rustls::StreamOwned::new(
+                rustls::ServerConnection::new(server_tls).unwrap(),
+                socket,
+            ))
+        } else {
+            Box::new(socket)
+        };
+        let mut ws = tungstenite::accept(stream).unwrap();
         let event = json!({"header":{"event_type":"im.message.receive_v1"},"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"ou_allowed"}},"message":{"message_id":"om_once","chat_id":"oc_chat","chat_type":"p2p","message_type":"text","content":"{\"text\":\"任务\"}"}}});
         let frame = Frame {
             method: 1,
