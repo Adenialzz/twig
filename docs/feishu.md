@@ -63,10 +63,22 @@ codex app-server daemon start
 
 Twig 用发送者的 `open_id` 做允许列表。它通常以 `ou_` 开头，且**同一个人在不同应用下的 open_id 不同**。不能复制其他应用的 ID，也不能用机器人 ID、`user_id`、`union_id` 或 `chat_id` 替代。
 
-1. 从当前应用进入开放平台的 API 调试台，确认调试应用是刚创建的 `Twig`。
-2. 找到支持用户 ID 参数的接口，使用参数旁的用户选择/获取 ID 工具，选择你在当前组织中的账号。
-3. 将 ID 类型选择为 `open_id`；工具可能通过 `user_id_type` 参数控制类型。复制得到的完整 `ou_...`。
-4. 只需要获取 ID，不需要执行发送消息或修改用户的 API。如果页面没有选择工具，按官方[Open ID 获取说明](https://open.feishu.cn/document/home/user-identity-introduction/open-id)查找当前入口，不要为此盲目扩大通讯录权限。
+最方便的方式是在 API 调试台选择自己，直接复制 Open ID：
+
+1. 打开[获取单个用户信息](https://open.feishu.cn/document/server-docs/contact-v3/user/get)，点击页面里的「API 调试台」。
+2. 在调试台选择刚创建的 **Twig 应用**，确认 App ID 与 `TWIG_FEISHU_APP_ID` 一致，同时核对组织身份。
+3. 将查询参数 **`user_id_type` 设置为 `open_id`**，再打开用户 ID 参数旁的用户选择/获取 ID 工具。
+4. 在组织成员中找到自己的账号，点击「复制成员 ID」，保存得到的完整 `ou_...`。选择的是你本人，不是机器人。
+
+这里只借助调试台的选择工具获取 ID，**不必执行“获取单个用户信息”接口**，也不需要执行发送消息或修改用户的 API。如果页面没有选择工具，按官方[Open ID 获取说明](https://open.feishu.cn/document/home/user-identity-introduction/open-id)查找当前入口，不要为此盲目扩大通讯录权限。
+
+将复制的 ID 写入 Twig 后台使用的环境文件（完整配置见第 5 步）：
+
+```sh
+TWIG_FEISHU_ALLOWED_USERS='ou_替换为当前应用下自己的完整ID'
+```
+
+已有后台需要在修改后有序重启，新的允许列表才会生效；仅在另一个终端 export 不会更新运行中的后台。
 
 API 调试台选取用户 ID 和跨应用 ID 错误说明可查[官方错误码文档](https://open.feishu.cn/document/server-docs/api-call-guide/generic-error-code)。如果选不到自己，先核对组织身份、应用可用范围及页面要求的发布状态；必要时先发布一版，再继续配置。
 
