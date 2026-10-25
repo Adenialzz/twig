@@ -89,4 +89,8 @@ launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.twig.daemon.plist
 3. 更新二进制及主控 skill，保持受管会话回调使用的可执行路径可用。重新启动 Twig 后台，检查 status 和 operation ls。
 4. 重新打开 Console/Agent，核对已有项目、未读及会话绑定。完成回调失败由后台补查真实 completed 轮次；未知投递不自动重发。
 
-协议不兼容会明确提示统一更新并重启。回退旧版本前也必须停止新后台，保留新增状态备份并检查已接受的操作；不要把旧版本直接接到运行中的新服务。
+业务协议不兼容会明确提示统一更新并重启。`daemon status/stop` 使用独立的稳定管理协议，新客户端仍能查看并有序停止旧后台；`status.version` 表示后台实际业务版本。`start` 检测到旧后台时明确提示先停止，不把旧进程当作新版已就绪。
+
+如果你已经先更新了二进制，执行 `daemon stop` 却收到“后台协议不兼容”，先安装包含此修复的版本，然后再次执行 `twig daemon stop`，用同配置的 `twig daemon status` 等到未运行后再 `twig daemon start`。系统托管实例通过对应的服务管理器停止/启动。不需要删除 socket、状态文件或停止 Codex。
+
+回退旧版本前也必须停止新后台，保留新增状态备份并检查已接受的操作；不要把旧版本直接接到运行中的新服务。

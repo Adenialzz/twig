@@ -188,3 +188,45 @@ fn two_clients_share_unread_and_refresh_snapshots_across_instances() {
             .is_empty()
     );
 }
+
+#[test]
+fn management_protocol_stays_stable_while_business_versions_are_rejected() {
+    use std::io::{BufRead, BufReader, Write};
+    let mut daemon = Daemon::start();
+    let status = daemon
+        .command()
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    for method in ["status", "operation.submit", "stop"] {
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(status["socket"].as_str().unwrap()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        writeln!(
+            stream,
+            "{}",
+            serde_json::json!({"version":1,"id":"old-client","method":method,"params":null})
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+        if method == "operation.submit" {
+            assert!(response["error"].as_str().unwrap().contains("协议不兼容"));
+        } else {
+            assert!(response["error"].is_null(), "{response}");
+            assert_eq!(response["version"], 1);
+            if method == "status" {
+                assert_eq!(response["result"]["version"], status["version"]);
+            }
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while daemon.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "管理协议 stop 未生效");
+        thread::sleep(Duration::from_millis(20));
+    }
+}

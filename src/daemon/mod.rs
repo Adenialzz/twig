@@ -34,6 +34,8 @@ use std::{
 
 pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const VERSION: u32 = 2;
+// 生命周期协议独立于业务视图，更新客户端后仍能有序停止旧后台。
+const CONTROL_VERSION: u32 = 1;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 
@@ -177,7 +179,7 @@ fn write_frame(value: &impl Serialize, writer: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-pub fn call<T: DeserializeOwned>(registry: &Path, method: &str, params: Value) -> Result<T> {
+fn exchange(registry: &Path, method: &str, params: Value, version: u32) -> Result<Response> {
     let paths = Paths::new(registry)?;
     let mut stream = UnixStream::connect(&paths.socket).with_context(|| {
         format!(
@@ -188,24 +190,58 @@ pub fn call<T: DeserializeOwned>(registry: &Path, method: &str, params: Value) -
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let request = Request {
-        version: VERSION,
+        version,
         id: crate::agent::message_id(),
         method: method.into(),
         params,
     };
     write_frame(&request, &mut stream)?;
     let response: Response = read_frame(&mut BufReader::new(stream))?;
-    ensure!(
-        response.version == VERSION,
-        "Twig 后台协议不兼容，请统一更新并重启"
-    );
     ensure!(response.id == request.id, "Twig 后台响应 ID 不匹配");
+    Ok(response)
+}
+
+pub fn call<T: DeserializeOwned>(registry: &Path, method: &str, params: Value) -> Result<T> {
+    let response = if control_method(method) {
+        let mut status = exchange(registry, "status", Value::Null, CONTROL_VERSION)?;
+        // 已发布的 v2 后台将管理请求也绑定了业务版本；只读探测其版本，
+        // stop 始终只发送一次，不能在未知写结果后自动重试。
+        if status.error.is_some() && status.version != CONTROL_VERSION {
+            let version = status.version;
+            status = exchange(registry, "status", Value::Null, version)?;
+            ensure!(
+                status.version == version,
+                "Twig 后台协议在探测期间变化，请重试"
+            );
+        }
+        if method == "status" || status.error.is_some() {
+            status
+        } else {
+            let response = exchange(registry, "stop", Value::Null, status.version)?;
+            ensure!(
+                response.version == status.version,
+                "Twig 后台协议在停止期间变化，请核对 daemon status"
+            );
+            response
+        }
+    } else {
+        let response = exchange(registry, method, params, VERSION)?;
+        ensure!(
+            response.version == VERSION,
+            "Twig 后台协议不兼容，请统一更新并重启"
+        );
+        response
+    };
     if let Some(error) = response.error {
         bail!("{error}");
     }
     Ok(serde_json::from_value(
         response.result.unwrap_or(Value::Null),
     )?)
+}
+
+fn control_method(method: &str) -> bool {
+    matches!(method, "status" | "stop")
 }
 
 pub fn execute(registry: &Path, action: Action) -> Result<()> {
@@ -231,7 +267,11 @@ pub fn execute(registry: &Path, action: Action) -> Result<()> {
 }
 
 fn start(registry: &Path) -> Result<()> {
-    if call::<Value>(registry, "status", Value::Null).is_ok() {
+    if let Ok(status) = call::<Value>(registry, "status", Value::Null) {
+        ensure!(
+            status["version"] == VERSION,
+            "旧版本 Twig 后台仍在运行；请先执行 daemon stop，等待退出后再执行 daemon start"
+        );
         println!("Twig 后台已运行");
         return Ok(());
     }
@@ -353,7 +393,7 @@ fn run(registry: &Path) -> Result<()> {
                         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                         let request: Request = read_frame(&mut BufReader::new(stream.try_clone()?))?;
                         let result = (|| -> Result<Value> {
-                            ensure!(request.version == VERSION, "Twig 后台协议不兼容，请统一更新并重启");
+                            ensure!(request.version == VERSION || (control_method(&request.method) && request.version == CONTROL_VERSION), "Twig 后台协议不兼容，请统一更新并重启");
                             match request.method.as_str() {
                                 "status" => Ok(json!({"instance":instance,"version":VERSION,"pid":std::process::id(),"uptime_seconds":started.elapsed().as_secs(),"config":paths.registry,"socket":paths.socket,"stopping":stopping.load(Ordering::Relaxed),"agent_error":*agent_error.lock().unwrap(),"agent_queue":agent_queue(&paths.registry),"collection":state.lock().unwrap().health(),"operations":operations.health(),"feishu":*feishu.lock().unwrap()})),
                                 "stop" => { stopping.store(true, Ordering::Relaxed); Ok(json!({"stopping":true})) },
@@ -382,9 +422,10 @@ fn run(registry: &Path) -> Result<()> {
                                 _ => bail!("未知后台方法：{}", request.method),
                             }
                         })();
+                        let version = if control_method(&request.method) { request.version } else { VERSION };
                         let response = match result {
-                            Ok(value) => Response { version: VERSION, id:request.id, result:Some(value), error:None },
-                            Err(error) => Response { version: VERSION, id:request.id, result:None, error:Some(format!("{error:#}")) },
+                            Ok(value) => Response { version, id:request.id, result:Some(value), error:None },
+                            Err(error) => Response { version, id:request.id, result:None, error:Some(format!("{error:#}")) },
                         };
                         write_frame(&response, &mut stream)
                     })();
@@ -436,6 +477,116 @@ fn agent_queue(registry: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn updated_client_can_inspect_and_stop_released_daemons() {
+        for version in [1, 2] {
+            let temp = tempfile::tempdir().unwrap();
+            let registry = temp.path().join("config.toml");
+            let paths = Paths::new(&registry).unwrap();
+            let _instance = Instance::acquire(&paths).unwrap();
+            let listener = UnixListener::bind(&paths.socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let server = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut methods = Vec::new();
+                loop {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "旧后台模拟未收到 stop");
+                            thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let request: Request =
+                        read_frame(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
+                    methods.push(request.method.clone());
+                    let compatible = request.version == version;
+                    let result = compatible.then(|| match request.method.as_str() {
+                        "status" => json!({"version":version,"pid":123,"stopping":false}),
+                        "stop" => json!({"stopping":true}),
+                        _ => panic!("不应向旧后台派发业务操作"),
+                    });
+                    write_frame(
+                        &Response {
+                            version,
+                            id: request.id,
+                            result,
+                            error: (!compatible)
+                                .then(|| "Twig 后台协议不兼容，请统一更新并重启".into()),
+                        },
+                        &mut stream,
+                    )
+                    .unwrap();
+                    if compatible && request.method == "stop" {
+                        return methods;
+                    }
+                }
+            });
+            let status: Value = call(&registry, "status", Value::Null).unwrap();
+            assert_eq!(status["version"], version);
+            if version != VERSION {
+                assert!(call::<Value>(&registry, "operation.submit", Value::Null).is_err());
+                assert!(
+                    start(&registry)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("daemon stop")
+                );
+            }
+            let stopped: Value = call(&registry, "stop", Value::Null).unwrap();
+            assert_eq!(stopped["stopping"], true);
+            assert_eq!(
+                server
+                    .join()
+                    .unwrap()
+                    .iter()
+                    .filter(|method| *method == "stop")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn stop_with_lost_response_is_not_retried() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("config.toml");
+        let paths = Paths::new(&registry).unwrap();
+        let _instance = Instance::acquire(&paths).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        let server = thread::spawn(move || {
+            for method in ["status", "stop"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request: Request =
+                    read_frame(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
+                assert_eq!(request.method, method);
+                if method == "status" {
+                    write_frame(
+                        &Response {
+                            version: CONTROL_VERSION,
+                            id: request.id,
+                            result: Some(json!({"version":VERSION})),
+                            error: None,
+                        },
+                        &mut stream,
+                    )
+                    .unwrap();
+                }
+                // stop 已收到但响应丢失；不再 accept，重发将导致客户端超时而不是成功。
+            }
+        });
+        assert!(call::<Value>(&registry, "stop", Value::Null).is_err());
+        server.join().unwrap();
+    }
+
     #[test]
     fn frame_requires_boundary_and_valid_json() {
         assert!(read_frame::<Value>(&mut &b"{}"[..]).is_err());
