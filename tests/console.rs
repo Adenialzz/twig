@@ -362,7 +362,18 @@ impl Pty {
     }
     fn task_form_ready(&mut self) {
         self.wait_screen("新建任务");
-        self.wait_screen_absent("正在读取分支候选");
+        // 等待正向就绪标志；PTY 分片到达时，“加载提示尚未绘制”不等于已加载。
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            self.read_output();
+            let screen = self.screen_text();
+            if screen.contains("已有分支 · 选作任务") || screen.contains("无匹配分支，将新建分支")
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "分支候选未就绪：{screen}");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
     fn wait_screen(&mut self, needle: &str) {
         self.wait_for(needle, true, true);
