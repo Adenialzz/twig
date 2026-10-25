@@ -4,6 +4,8 @@ use clap::ValueEnum;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Topic {
+    /// Twig 后台生命周期与系统托管
+    Daemon,
     /// 安装、依赖和更新
     Installation,
     /// 从登记项目到完成任务
@@ -31,6 +33,7 @@ pub enum Topic {
 impl Topic {
     fn content(self) -> &'static str {
         match self {
+            Self::Daemon => include_str!("../docs/daemon.md"),
             Self::Installation => include_str!("../docs/installation.md"),
             Self::Quickstart => include_str!("../docs/quickstart.md"),
             Self::Commands => include_str!("../docs/commands.md"),

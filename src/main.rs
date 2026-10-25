@@ -3,6 +3,7 @@ mod codex;
 mod completion;
 mod config;
 mod console;
+mod daemon;
 mod git;
 mod guide;
 mod registry;
@@ -37,6 +38,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Action {
+    /// 管理 Twig 本机后台；不影响 Codex daemon 和任务进程
+    #[command(after_help = "后台管理与托管说明：twig guide daemon")]
+    Daemon(daemon::Cli),
     /// 阅读离线用户手册；不带主题时显示导航
     #[command(
         after_help = "示例：twig guide quickstart\n      twig guide windows\n      twig guide --all | less\n\n输出 Markdown 文本，不读取配置、不联网、不调用 Git/tmux，也不自动打开分页器。"
@@ -203,6 +207,7 @@ fn execute(cli: Cli) -> Result<()> {
     let registry_path = registry::location(cli.config)?;
     let action = cli.command.unwrap_or(Action::Console);
     match action {
+        Action::Daemon(args) => return daemon::execute(&registry_path, args.command),
         Action::Console => return console::run(registry_path, invocation_dir, None),
         Action::Chat => return console::run_chat(registry_path, invocation_dir),
         Action::Agent(args) => return agent::execute(&registry_path, args.command),
@@ -359,7 +364,8 @@ fn execute(cli: Cli) -> Result<()> {
             }
             remove(&project, &config, &mut state, &name, &options)
         }
-        Action::Guide { .. }
+        Action::Daemon(_)
+        | Action::Guide { .. }
         | Action::Console
         | Action::Chat
         | Action::Agent(_)
@@ -369,6 +375,7 @@ fn execute(cli: Cli) -> Result<()> {
 
 fn init(
     project: &Project,
+    cwd: &Path,
     base: Option<String>,
     target: Option<String>,
     root: Option<PathBuf>,
@@ -385,12 +392,11 @@ fn init(
         println!("项目已初始化：{}", project.dir.display());
         return Ok(());
     }
-    let cwd = std::env::current_dir()?;
     ensure!(
-        git(&cwd, &["rev-parse", "--is-bare-repository"])? == "false",
+        git(cwd, &["rev-parse", "--is-bare-repository"])? == "false",
         "暂不支持裸仓库"
     );
-    let main = git::worktrees(&cwd)?
+    let main = git::worktrees(cwd)?
         .first()
         .context("未找到主工作目录")?
         .0

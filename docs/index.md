@@ -39,3 +39,5 @@ twig guide --all          # 输出完整手册
 - 新建分支默认 fetch base 的远端 upstream，`--no-fetch` 使用本地 base；复用已有分支及其他任务管理不联网，不自动 pull/push。用户启动程序的联网行为由程序决定。
 
 源码贡献者另见仓库根目录的 DESIGN.md、AGENTS.md 与 CONTRIBUTING.md；这些开发记录不是用户操作手册。
+
+后台生命周期：[Twig 后台](daemon.md)（`twig guide daemon`）。

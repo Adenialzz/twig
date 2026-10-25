@@ -688,7 +688,7 @@ fn find_message(value: &Value, id: &str) -> Option<String> {
         .as_str()
         .map(str::to_owned)
 }
-fn message_id() -> String {
+pub(crate) fn message_id() -> String {
     format!(
         "twig-{}-{}",
         std::process::id(),
