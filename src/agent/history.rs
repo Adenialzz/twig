@@ -49,7 +49,7 @@ impl Entry {
     pub fn apply_source(&mut self, message: &Delivery) {
         let (kind, label) = match &message.source {
             Some(MessageSource::User) => (Kind::User, None),
-            Some(MessageSource::Feishu { user }) => (Kind::User, Some(format!("飞书 · {user}"))),
+            Some(MessageSource::Feishu { .. }) => (Kind::User, Some("飞书".into())),
             Some(MessageSource::Task { project, task }) => {
                 (Kind::Task, Some(format!("子任务 · {project}/{task}")))
             }
