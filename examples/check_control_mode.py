@@ -182,11 +182,17 @@ def main():
             second.send(b"\x1b[<65;2;3M" * 12)
             second.wait("SCROLL_059")
             # 有限输出负载：约 120 行，用于交互延迟回归，不是吞吐压测。
-            second.send(b"PS1='LOAD_READY> '; i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; i=$((i+1)); sleep 0.01; done; printf 'LOAD_%s\\n' FINISHED\r")
+            # 在第十行暂停，等选区已经显示才继续，避免较慢 CI 在选区确认前耗尽负载。
+            load_gate = Path(root) / "load-ready"
+            second.send(("PS1='LOAD_READY> '; i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; "
+                         f"if [ $i -eq 10 ]; then while [ ! -f {shlex.quote(str(load_gate))} ]; do sleep 0.01; done; fi; "
+                         "i=$((i+1)); sleep 0.01; done; printf 'LOAD_%s\\n' FINISHED\r").encode())
             second.wait("LOAD_10")
             # 有选区时 Ctrl-C 仍中断 Shell 前台程序，不拦截为复制。
             second.send(b"\x1b[<0;1;3M\x1b[<32;5;3M")
             second.until(lambda: second.screen.buffer[2][0].reverse, "负载期间选区反显")
+            load_gate.touch()
+            second.until(lambda: "LOAD_11" in mux("capture-pane", "-p", "-S", "-150").decode().splitlines(), "选区就绪后继续输出")
             started = time.monotonic()
             try:
                 # 中断可能清空终端输入队列；先确认 Shell 已恢复，再发送下一条命令。
