@@ -25,3 +25,14 @@ libc = "0.2"
 alacritty_terminal = "0.26.0"
 arboard = { version = "3.7.0", default-features = false, features = ["wayland-data-control"] }
 base64 = "0.22"
+
+# Agent 正文渲染（从 Codex 提取，见 third_party/codex）。
+pulldown-cmark = "0.10"
+textwrap = "0.16.2"
+unicode-width = "0.2"
+regex-lite = "0.1"
+dirs = "6"
+url = "2"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+urlencoding = "2"
+tracing = "0.1"

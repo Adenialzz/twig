@@ -1,5 +1,6 @@
 //! 原生 Chat；后台线程只负责本客户端通信，退出不停止 Codex。
 use super::{Binding, MessageSource, Store, rpc};
+mod render;
 mod view;
 use crate::console::selection::Selection;
 use anyhow::Result;
