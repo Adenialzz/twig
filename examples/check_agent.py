@@ -356,14 +356,14 @@ supports_websockets = false
         (cwd / ".twig/config.toml").write_text(
             '[tmux]\n[[tmux.panes]]\ncommand = ["touch", ' + json.dumps(str(root / "unwanted")) + ']\n'
         )
-        twig("new", "demo", "test", "--agent", "--no-open")
+        twig("new", "demo", "--no-fetch", "test", "--agent", "--no-open")
         task = next(b for b in state()["bindings"].values() if b["task"] == "test")
         assert not (root / "unwanted").exists()
         task_dir = Path(task["cwd"])
         assert (task_dir / ".twig/state.md").exists()
         assert command("git", "-C", str(task_dir), "status", "--porcelain") == ""
         assert "state.md" in command("git", "-C", str(task_dir), "ls-files", "--others", "--ignored", "--exclude-standard")
-        assert "已存在" in twig("new", "demo", "test", "--agent", "--no-open", success=False)
+        assert "已存在" in twig("new", "demo", "--no-fetch", "test", "--agent", "--no-open", success=False)
         first = twig("agent", "send", "--from-project", "demo", "--from-task", "test", "--message", "hold-controller").strip()
         assert next(m for m in state()["messages"] if m["id"] == first)["source"] == {"kind": "task", "project": "demo", "task": "test"}
         assert model.entered["controller"].wait(10)
@@ -462,7 +462,7 @@ supports_websockets = false
         assert not task_dir.exists()
         print("PASS: 中断活动轮次、取消排队、停止后拒绝派发及显式删除", flush=True)
         # 删除并重建同名任务，不能命中留存的旧绑定。
-        twig("new", "demo", "test", "--agent", "--no-open")
+        twig("new", "demo", "--no-fetch", "test", "--agent", "--no-open")
         new_task = next(b for b in state()["bindings"].values() if b["task"] == "test" and b["thread"] != task["thread"])
         message = twig("agent", "send", "--project", "demo", "--task", "test", "--message", "new-instance").strip()
         assert next(m for m in state()["messages"] if m["id"] == message)["thread"] == new_task["thread"]
@@ -582,7 +582,7 @@ supports_websockets = false
         print("PASS: 导航 Ctrl-W f 跳主控并清除未读，无卡片时不跳转", flush=True)
 
         # 空子任务没有 rollout，daemon 重启后不能拖垮正常主控。
-        twig("new", "demo", "empty", "--agent", "--no-open")
+        twig("new", "demo", "--no-fetch", "empty", "--agent", "--no-open")
         broken = next(b for b in state()["bindings"].values() if b["task"] == "empty")
         server.terminate()
         server.wait(timeout=10)

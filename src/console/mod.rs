@@ -998,14 +998,15 @@ fn run_inner(
                 }
                 continue;
             }
+            let fields = if form.project.is_some() { 3 } else { 2 };
             match key.code {
                 KeyCode::Esc => app.form = None,
                 KeyCode::Tab => {
                     if !form.complete_path() && !form.complete_branch() {
-                        form.field = (form.field + 1) % 2;
+                        form.field = (form.field + 1) % fields;
                     }
                 }
-                KeyCode::BackTab => form.field = (form.field + 1) % 2,
+                KeyCode::BackTab => form.field = (form.field + fields - 1) % fields,
                 KeyCode::Down if form.completing_path() && !form.directories.is_empty() => {
                     form.directory_selection =
                         (form.directory_selection + 1) % form.directories.len();
@@ -1027,7 +1028,7 @@ fn run_inner(
                         form.branch_selection = (form.branch_selection + count - 1) % count;
                     }
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace if form.field < 2 => {
                     form.fields[form.field].pop();
                     form.error = None;
                     form.scroll = 0;
@@ -1040,7 +1041,12 @@ fn run_inner(
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.form = None
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char(' ') if form.field == 2 => {
+                    form.fetch_base = !form.fetch_base;
+                }
+                KeyCode::Char(c)
+                    if form.field < 2 && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
                     form.fields[form.field].push(c);
                     form.error = None;
                     form.scroll = 0;
@@ -1189,12 +1195,9 @@ fn run_inner(
             KeyCode::Enter if app.focus == 0 => {
                 if app.repo().is_some() {
                     app.filters[1].clear();
-                    app.task = app.repo().and_then(|r| {
-                        r.tasks
-                            .iter()
-                            .find(|t| t.name == "main")
-                            .map(|t| t.path.clone())
-                    });
+                    app.task = app
+                        .repo()
+                        .and_then(|r| r.tasks.first().map(|t| t.path.clone()));
                     app.focus = 1;
                     app.detail = false;
                     app.scroll = 0;

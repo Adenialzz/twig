@@ -68,3 +68,5 @@ stop 关闭窗口和进程但保留代码；rm 默认要求目录干净、没有
 - 配置分屏和启动命令：`twig guide windows`。
 - 从 Agent 或脚本调用：`twig guide automation`。
 - 处理失败和资源恢复：`twig guide troubleshooting`。
+
+新建分支默认更新 base 的远端 upstream，再从远端最新提交创建，不修改本地 base 或主工作目录。没有 upstream 或更新失败时停止；离线或需要从本地提交开始时用 `twig new myapp TASK --no-fetch`，Console 可取消勾选「更新远端 base」。复用已有分支时不更新。

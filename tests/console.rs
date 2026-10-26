@@ -80,6 +80,17 @@ impl Fixture {
             "-m",
             "initial",
         ]);
+        // 表单默认更新 base，所有网络操作使用本地隔离的远端。
+        let remote = f.temp.path().join("base.git");
+        f.git(&[
+            "clone",
+            "--bare",
+            f.repo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ]);
+        f.git(&["remote", "add", "base-source", remote.to_str().unwrap()]);
+        f.git(&["fetch", "base-source"]);
+        f.git(&["branch", "--set-upstream-to=base-source/main", "main"]);
         f
     }
     fn env(&self, c: &mut Command) {
@@ -703,6 +714,14 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
     let mut p = f.terminal(false);
     p.wait_screen("主工作目录");
     order(&p, &["second", "auth", "主工作目录"]);
+    p.send(b"\r");
+    p.wait_screen("› second");
+    // 返回项目再进入时，清空任务筛选并重新选中排序第一项。
+    p.send(b"/auth\r");
+    p.wait_screen("任务 / auth");
+    p.send(b"1\r");
+    p.wait_screen("› second");
+    assert_eq!(fs::read(&f.registry).unwrap(), created);
     p.send(b"2/main\r");
     p.wait_screen("任务 / main");
     assert_eq!(fs::read(&f.registry).unwrap(), created);
@@ -740,6 +759,9 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
     let mut p = f.terminal(false);
     p.wait_screen("主工作目录");
     order(&p, &["主工作目录", "second", "auth"]);
+    // 主目录排第一时仍按列表顺序选中它。
+    p.send(b"\r");
+    p.wait_screen("› 主工作目录");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.wait_exit().success());
@@ -1591,7 +1613,7 @@ fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
     ]);
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\r\r");
+    p.send(b"\r/main\r\r");
     p.wait("无法确认归属");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
@@ -2671,4 +2693,77 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
             .unwrap(),
         state
     );
+}
+
+#[test]
+fn new_form_fetch_failure_can_retry_with_checkbox_disabled() {
+    let f = Fixture::new();
+    f.init();
+    f.git(&["branch", "--unset-upstream", "main"]);
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let before = fs::read(&state_path).unwrap();
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"2n");
+    p.wait_screen("[x] 更新远端 base");
+    p.send(b"fresh-offline\r");
+    p.wait("未配置远端 upstream");
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    p.send(b"\x1b[Z ");
+    p.wait_screen("[ ] 更新远端 base");
+    p.send(b"\r");
+    p.created_task(&f, "fresh-offline");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
+}
+
+#[test]
+fn new_form_uses_latest_remote_base_by_default() {
+    let f = Fixture::new();
+    f.init();
+    f.git(&["checkout", "-b", "publish"]);
+    f.git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "remote update",
+    ]);
+    f.git(&["push", "base-source", "publish:main"]);
+    let remote_commit = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap()
+        .stdout;
+    f.git(&["checkout", "main"]);
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"2n");
+    p.wait_screen("[x] 更新远端 base");
+    p.send(b"fresh-remote\r");
+    p.created_task(&f, "fresh-remote");
+    let commit = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "fresh-remote"])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(commit, remote_commit);
+    let main = Command::new("git")
+        .current_dir(&f.repo)
+        .args(["rev-parse", "main"])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_ne!(main, remote_commit);
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
 }

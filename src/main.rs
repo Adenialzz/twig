@@ -86,7 +86,7 @@ enum Action {
     },
     /// 创建并进入新任务 Shell 窗口；拒绝已登记的同名任务
     #[command(
-        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-W d 返回 Console；--no-open 仅准备环境。已登记的同名任务直接报错，请使用 open。\n同名本地分支或远端跟踪分支存在时询问是否使用，默认取消；本地优先，多个 remote 时选择来源，不自动 fetch。非交互环境拒绝。不会接管已有 Worktree；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动配置：twig guide windows；twig guide troubleshooting"
+        after_help = "任务名直接作为分支名，可用 / 分段，总长 1–64；每段为 ASCII 字母数字、横线或下划线且首位为字母数字，main 保留。\n默认进入内置终端工作台，Ctrl-W d 返回 Console；--no-open 仅准备环境。已登记的同名任务直接报错，请使用 open。\n新建分支前默认 fetch base 的远端 upstream，并从远端最新提交创建；不更新本地 base 或工作目录。失败停止创建，--no-fetch 使用本地 base。\n同名本地分支或远端跟踪分支存在时询问是否使用，默认取消；本地优先，多个 remote 时选择来源，不自动 fetch。非交互环境拒绝。不会接管已有 Worktree；失败保留已创建资源。\n示例：twig new myapp feat/login --no-open\n启动配置：twig guide windows；twig guide troubleshooting"
     )]
     New {
         /// 已登记的项目别名，不根据当前目录推断
@@ -95,12 +95,15 @@ enum Action {
         /// 任务名
         #[arg(add = ArgValueCompleter::new(completion::tasks))]
         name: String,
-        /// 已有本地起点分支；默认项目 base，不联网更新分支
+        /// 已有本地起点分支；默认项目 base，从其远端 upstream 最新提交创建
         #[arg(long, add = ArgValueCompleter::new(completion::branches))]
         base: Option<String>,
         /// 不进入窗口；仍创建 Pane 并执行配置的启动命令（不是 dry-run）
         #[arg(long)]
         no_open: bool,
+        /// 跳过远端更新，从本地 base 创建，适用于离线或纯本地仓库
+        #[arg(long)]
+        no_fetch: bool,
         /// 创建受管 Codex 任务；专用启动方式替代 tmux 配置，不接管旧任务
         #[arg(long)]
         agent: bool,
@@ -263,6 +266,7 @@ fn execute(cli: Cli) -> Result<()> {
             name,
             base,
             no_open,
+            no_fetch,
             expected_branch,
             project: alias,
             agent,
@@ -277,6 +281,7 @@ fn execute(cli: Cli) -> Result<()> {
                     base,
                     expected_branch,
                     managed: agent,
+                    no_fetch,
                 },
             )?;
             drop(lock); // 工作台交互期间不能持有项目锁。
@@ -604,6 +609,7 @@ struct CreateOptions {
     base: Option<String>,
     expected_branch: Option<String>,
     managed: bool,
+    no_fetch: bool,
 }
 fn new(
     project: &Project,
@@ -617,10 +623,8 @@ fn new(
         base,
         expected_branch,
         managed,
+        no_fetch,
     } = options;
-    if managed {
-        agent::Store::new(&project.registry)?.initialize()?;
-    }
     config::task_name(name)?;
     ensure!(name != "main", "main 保留给项目主窗口");
     ensure!(
@@ -668,6 +672,18 @@ fn new(
         "路径已存在：{}",
         path.display()
     );
+    let start = if selected.is_none() {
+        Some(if no_fetch {
+            format!("refs/heads/{base}")
+        } else {
+            git::fetch_base(&config.main, &base)?
+        })
+    } else {
+        None
+    };
+    if managed {
+        agent::Store::new(&project.registry)?.initialize()?;
+    }
     // 先保存意图，部分失败保留资源及可诊断记录；重复 new 不执行恢复。
     state.insert(
         name.to_owned(),
@@ -718,7 +734,7 @@ fn new(
                 &feature.branch,
                 "--",
                 path,
-                &format!("refs/heads/{}", feature.base),
+                start.as_deref().unwrap(),
             ],
         )?;
     }

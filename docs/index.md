@@ -36,6 +36,6 @@ twig guide --all          # 输出完整手册
 
 - 项目是登记别名；任务操作显式指定项目和任务，不按当前目录猜测。
 - 创建窗口可能启动用户配置的程序，--no-open 只是不进入窗口。
-- 任务管理不隐式 fetch/pull/push。用户启动程序的联网行为由程序决定。
+- 新建分支默认 fetch base 的远端 upstream，`--no-fetch` 使用本地 base；复用已有分支及其他任务管理不联网，不自动 pull/push。用户启动程序的联网行为由程序决定。
 
 源码贡献者另见仓库根目录的 DESIGN.md、AGENTS.md 与 CONTRIBUTING.md；这些开发记录不是用户操作手册。
