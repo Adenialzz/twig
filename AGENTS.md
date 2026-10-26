@@ -108,4 +108,6 @@
 - 后台响应丢失按请求/操作 ID 查询，受管消息按消息 ID 核对；不能用测试通过掩盖重复投递或把 needs_inspection 当成功。确认后的资源变化、同名重建、部分失败、断连与重启必须保留保护。
 - 多窗口共享快照、未读和查看租约；清除携带已看到的事件集合，过期租约不能吞通知。后台新实例必须触发完整快照，即使版本数字相同。慢订阅只保留最新快照。
 - 飞书应用机器人只接收允许 open_id 的单聊文本；接收先落盘后 ACK、稳定平台消息 ID 去重、最终回复绑定实际 turn。未知回复 sending 保留不重发，status 报告消息 ID 与错误。原 webhook 仅显式主动通知，不能默认转发全部对话。测试使用本机 HTTP/WebSocket 与固定模型，禁止真实凭证和真实发送。
+- CI 的 agent job 在 Linux/macOS 使用 Node 22、固定 Codex 0.164.0，构建正式 binary 后运行 check_agent.py；本地模型和模拟飞书，不配置真实密钥。失败日志上传为 agent-check-<平台>，保留 7 天；升级 Codex 版本需同时验证两个平台。
+
 - `examples/check_agent.py` 现在同时启动隔离 Twig 后台和 Codex app-server，并验收无 Console 飞书双向收发及重启去重；`examples/feishu_mock.py` 仅供该隔离测试。系统托管示例位于 examples/services，不自动安装或修改用户服务。
