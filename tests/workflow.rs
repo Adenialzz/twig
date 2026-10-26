@@ -743,8 +743,14 @@ fn detects_conflicts_and_preserves_partial_creation() {
         "分支已存在",
     );
     fs::create_dir(f.root.join("occupied")).unwrap();
-    f.fail(&["new", "local", "--no-fetch", "--no-open", "occupied"], "路径已存在");
-    f.fail(&["new", "local", "--no-fetch", "--no-open", "../escape"], "名称须");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "occupied"],
+        "路径已存在",
+    );
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "../escape"],
+        "名称须",
+    );
     let mut command = f.command(&f.repo);
     command.env("TWIG_FAIL_TMUX", "1");
     support::daemon::ensure(&command, &f.registry_path());
@@ -755,7 +761,10 @@ fn detects_conflicts_and_preserves_partial_creation() {
     assert!(!out.status.success());
     assert!(f.root.join("partial").is_dir());
     support::daemon::stop_under(f._temp.path());
-    f.fail(&["new", "local", "--no-fetch", "--no-open", "partial"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "partial"],
+        "已存在",
+    );
     f.fail(&["open", "local", "partial"], "工作台需要交互式终端");
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
@@ -865,7 +874,10 @@ fn upstream_and_foreign_window_protection() {
     f.git(&["merge", "--ff-only", "unpushed"]);
     f.fail(&["rm", "local", "unpushed", "-y"], "未推送提交");
     f.mux(&["new-window", "-d", "-t", &f.session(), "-n", "foreign"]);
-    f.fail(&["new", "local", "--no-fetch", "--no-open", "foreign"], "同名非 twig");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "foreign"],
+        "同名非 twig",
+    );
     // prepare 在创建资源前发现外来窗口，不能留下半成品 Worktree。
     assert!(!f.root.join("foreign").exists());
     f.mux(&[

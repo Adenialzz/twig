@@ -167,20 +167,10 @@ pub(crate) fn transcript(value: &Value) -> Vec<Entry> {
                     ])
                     .to_string();
                     // 工具、补丁、MCP、图像等不再静默丢弃；Console 可折叠展示完整详情。
-                    if entry.kind == Kind::Tool {
+                    if entry.kind == Kind::Tool && entry.tool.is_none() {
                         entry.detail = clean(&serde_json::to_string_pretty(item).unwrap());
                     }
-                    if item["type"] == "commandExecution" && item["status"] == "failed" {
-                        let mut failure = Entry::new(
-                            Kind::Error,
-                            item["aggregatedOutput"].as_str().unwrap_or("命令执行失败"),
-                        );
-                        failure.key = format!("{}:failure", entry.key);
-                        entries.push(entry);
-                        entries.push(failure);
-                    } else {
-                        entries.push(entry);
-                    }
+                    entries.push(entry);
                 }
             }
             if !turn["error"].is_null()

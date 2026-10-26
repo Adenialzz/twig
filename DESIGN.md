@@ -2,6 +2,8 @@
 
 ## 当前架构与交接（2026-10-26）
 
+已整合 main 的默认 fetch 基础分支与 Agent Markdown/工具展示。结构化工具条目由共享 history 解析并经后台传递，飞书继续隐藏工具；业务协议为 v3，管理协议仍为 v1。旧 operation 的 new 记录缺失 no_fetch 时按原本地基础分支语义读取，未完成记录仍转待核对，不自动重跑。
+
 已按用户授权完成 [后台整体设计](DAEMON_DESIGN.md) 的业务迁移：`src/daemon/` 负责项目/任务操作、共享状态、事件与未读、Agent 队列、飞书双向单聊。Console/CLI 为客户端；显式 daemon start/run，无本地写入回退。帮助、guide、补全和终端 Control Mode 保持本地边界，不接管共享 Codex 服务生命周期。
 
 操作先 prepare 确认，再持久化 submit，通过 operation ls/show 查询阶段和结果。资源写入串行并持有项目锁，执行前复查；部分失败保留资源，异常退出转 needs_inspection，人工核对后 resolve。两个 Console 共享快照与未读，按实例与版本重连，查看租约十秒过期；导航草稿与焦点独立。Agent 页面显示期间持续确认缓存中已观察到的主控事件，防止进入页面时尚未同步的完成通知在返回 Console 后重新弹出；不清除子任务未读。

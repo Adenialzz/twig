@@ -113,6 +113,7 @@ enum Action {
         no_open: bool,
         /// 跳过远端更新，从本地 base 创建，适用于离线或纯本地仓库
         #[arg(long)]
+        #[serde(default = "legacy_no_fetch")]
         no_fetch: bool,
         /// 创建受管 Codex 任务；专用启动方式替代 tmux 配置，不接管旧任务
         #[arg(long)]
@@ -174,6 +175,11 @@ enum Action {
         #[arg(long, hide = true)]
         expected_task: Option<String>,
     },
+}
+
+// 旧持久化操作尚无该字段，当时的 new 使用本地基础分支；只恢复记录，不自动重跑。
+fn legacy_no_fetch() -> bool {
+    true
 }
 
 #[derive(clap::Args, serde::Serialize, serde::Deserialize, Clone)]

@@ -33,7 +33,7 @@ use std::{
 };
 
 pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 // 生命周期协议独立于业务视图，更新客户端后仍能有序停止旧后台。
 const CONTROL_VERSION: u32 = 1;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;

@@ -589,6 +589,23 @@ mod tests {
         }
     }
     #[test]
+    fn legacy_new_operation_keeps_local_base_semantics() {
+        let mut value = json!({"New":{"project":"demo","name":"task","base":null,
+            "no_open":true,"agent":false,"expected_branch":null}});
+        assert!(matches!(
+            serde_json::from_value::<Action>(value.clone()).unwrap(),
+            Action::New { no_fetch: true, .. }
+        ));
+        value["New"]["no_fetch"] = json!(false);
+        assert!(matches!(
+            serde_json::from_value::<Action>(value).unwrap(),
+            Action::New {
+                no_fetch: false,
+                ..
+            }
+        ));
+    }
+    #[test]
     fn accepted_request_is_durable_and_retries_do_not_execute_twice() {
         let temp = tempfile::tempdir().unwrap();
         let registry = temp.path().join("config.toml");
