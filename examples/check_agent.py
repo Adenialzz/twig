@@ -59,6 +59,7 @@ class Model(ProbeModel):
 class Frontend:
     def __init__(self, binary, config, cwd, env):
         self.master, self.slave = pty.openpty()
+        os.set_blocking(self.master, False)
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
         self.before = termios.tcgetattr(self.slave)
         self.output = bytearray()
@@ -76,7 +77,22 @@ class Frontend:
         )
 
     def send(self, data):
-        os.write(self.master, data)
+        pending = memoryview(data)
+        deadline = time.monotonic() + 10
+        while pending:
+            # 长粘贴会填满 PTY 输入缓冲区；同时消费输出，避免与前端重绘相互阻塞。
+            readable, writable, _ = select.select([self.master], [self.master], [], 0.05)
+            if readable:
+                output = os.read(self.master, 65536)
+                self.output.extend(output)
+                self.stream.feed(output)
+            if writable:
+                try:
+                    pending = pending[os.write(self.master, pending):]
+                except BlockingIOError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"PTY 输入超时：PID={self.process.pid}，剩余 {len(pending)} 字节\n{self.output[-8000:].decode(errors='replace')}")
 
     def drain(self):
         if select.select([self.master], [], [], 0.05)[0]:
