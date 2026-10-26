@@ -857,3 +857,13 @@ Console 新建表单默认勾选「更新远端 base」，Tab/Shift+Tab 在三�
 ## 2026-10-26：项目进入任务栏按列表顺序选择
 
 项目栏按 Enter 时清空任务筛选，并选中当前排序的第一项，不再固定选择 main；主工作目录参与原有最近使用排序，排第一时仍选中。只改变导航选择，不更新访问时间。PTY 排序测试覆盖普通任务排第一、重新进入清空筛选以及主目录排第一的情况。
+
+## 2026-10-25：Agent 正文与工具展示首版
+
+按用户确认，移植 OpenAI Codex 提交 `f1affbac5e5164b2bae825e9b39e9868bc4e0be2` 的 Markdown 渲染、表格布局和必要折行/链接辅助代码至 `src/agent/chat/render/`。来源及适配说明见 `third_party/codex/README.md`，附上游 LICENSE、NOTICE。未依赖整个 codex-tui；高亮使用 syntect 内置固定主题，不引入 Codex 配置、主题发现或 OSC 8 终端写入。
+
+主控回复支持标题、强调、列表、引用、行内代码、链接文本、语法高亮和自适应表格；窄屏表格可转为逐字段布局。输入消息、子任务回报和工具输出保留原始文本。现有消息来源、输入框、通信、复制和通知语义保持不变。
+
+命令和文件修改使用紧凑操作行，区分执行中/完成/失败/拒绝。命令默认预览两个终端行，输出预览三个终端行；失败显示末尾输出及可用退出码，取消重复错误条目。文件修改默认显示前三个路径、类型和总数；F4 展开全部。限制按实际列宽计算，省略提示可见。
+
+验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 通过，共 183 项 Rust 测试。包括移植的上游表格/折行用例，以及中文窄屏、Markdown 样式、代码高亮、未闭合围栏、工具失败尾部和文件摘要测试。正式 debug binary 与 Control Mode example 已构建；独立 Codex 0.164.0 服务、模拟模型/飞书及 tmux socket 下 check_agent.py、check_control_mode.py 全部通过。终端有限输出响应单样本为 0.226 秒，不代表吞吐保证。未安装、提交或推送；用户可用本 Worktree 的 target/debug/twig chat 体验首版。

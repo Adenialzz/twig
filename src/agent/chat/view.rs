@@ -1,4 +1,4 @@
-use super::{Draft, View};
+use super::{Draft, View, render};
 use crate::agent::{Delivery, MessageSource};
 use ratatui::{
     Frame,
@@ -23,12 +23,24 @@ pub(super) enum Kind {
     Error,
 }
 
+pub(super) enum Tool {
+    Command {
+        status: String,
+        exit_code: Option<i64>,
+    },
+    Files {
+        status: String,
+        changes: Vec<(String, String)>,
+    },
+}
+
 pub(super) struct Entry {
     pub id: Option<String>,
     pub kind: Kind,
     pub text: String,
     pub detail: String,
     pub source_label: Option<String>,
+    pub tool: Option<Tool>,
 }
 impl Entry {
     pub fn new(kind: Kind, text: impl Into<String>) -> Self {
@@ -38,6 +50,7 @@ impl Entry {
             text: clean(&text.into()),
             detail: String::new(),
             source_label: None,
+            tool: None,
         }
     }
     pub fn apply_source(&mut self, message: &Delivery) {
@@ -103,43 +116,41 @@ pub(super) fn transcript(value: &Value) -> Vec<Entry> {
                             Entry::new(Kind::Assistant, item["text"].as_str().unwrap_or_default())
                         }
                         Some("commandExecution") => {
-                            let status = match item["status"].as_str() {
-                                Some("completed") => "完成",
-                                Some("inProgress") => "执行中",
-                                Some("failed") => "失败",
-                                Some("declined") => "已拒绝",
-                                _ => "待确认",
-                            };
                             let mut entry = Entry::new(
                                 Kind::Tool,
-                                format!(
-                                    "{status} · {}",
-                                    item["command"].as_str().unwrap_or_default()
-                                ),
+                                item["command"].as_str().unwrap_or_default(),
                             );
                             entry.detail =
                                 clean(item["aggregatedOutput"].as_str().unwrap_or_default());
-                            entries.push(entry);
-                            if item["status"] == "failed" {
-                                entries.push(Entry::new(
-                                    Kind::Error,
-                                    item["aggregatedOutput"].as_str().unwrap_or("命令执行失败"),
-                                ));
-                            }
-                            continue;
+                            entry.tool = Some(Tool::Command {
+                                status: item["status"].as_str().unwrap_or_default().to_owned(),
+                                exit_code: item["exitCode"].as_i64(),
+                            });
+                            entry
                         }
                         Some("fileChange") => {
-                            let paths = item["changes"]
+                            let changes = item["changes"]
                                 .as_array()
-                                .map(|changes| {
-                                    changes
-                                        .iter()
-                                        .filter_map(|c| c["path"].as_str())
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
+                                .into_iter()
+                                .flatten()
+                                .map(|change| {
+                                    let kind = match change["kind"]["type"].as_str() {
+                                        Some("add") => "新增",
+                                        Some("delete") => "删除",
+                                        _ => "修改",
+                                    };
+                                    (
+                                        kind.to_owned(),
+                                        clean(change["path"].as_str().unwrap_or_default()),
+                                    )
                                 })
-                                .unwrap_or_default();
-                            Entry::new(Kind::Tool, format!("文件修改\n{paths}"))
+                                .collect();
+                            let mut entry = Entry::new(Kind::Tool, "文件修改");
+                            entry.tool = Some(Tool::Files {
+                                status: item["status"].as_str().unwrap_or_default().to_owned(),
+                                changes,
+                            });
+                            entry
                         }
                         _ => continue,
                     };
@@ -160,43 +171,108 @@ pub(super) fn transcript(value: &Value) -> Vec<Entry> {
     entries
 }
 
-fn markdown(text: &str) -> Vec<Line<'static>> {
-    let mut code = false;
-    text.lines()
-        .map(|line| {
-            if line.trim_start().starts_with("```") {
-                code = !code;
-                return Line::styled(
-                    if code {
-                        format!("  代码 · {}", line.trim_start().trim_start_matches('`'))
-                    } else {
-                        "  ─────".into()
-                    },
-                    Style::default().fg(Color::DarkGray),
-                );
+fn tool_lines(entry: &Entry, expanded: bool, width: usize) -> Vec<Line<'static>> {
+    let Some(tool) = &entry.tool else {
+        return render::plain(&entry.text, width, Style::default());
+    };
+    let status = match tool {
+        Tool::Command { status, .. } | Tool::Files { status, .. } => status.as_str(),
+    };
+    let (symbol, label, color) = match status {
+        "completed" => ("✓", "完成", Color::DarkGray),
+        "inProgress" => ("●", "执行中", Color::Cyan),
+        "failed" => ("×", "失败", Color::Red),
+        "declined" => ("−", "已拒绝", Color::Yellow),
+        _ => ("○", "待确认", Color::DarkGray),
+    };
+    let style = Style::default().fg(color);
+    let mut lines = Vec::new();
+    match tool {
+        Tool::Command { exit_code, .. } => {
+            let exit = exit_code
+                .map(|code| format!(" · 退出码 {code}"))
+                .unwrap_or_default();
+            lines.extend(render::plain(
+                &format!("{symbol} {label} · 命令{exit}"),
+                width,
+                style,
+            ));
+            let command = render::plain(&entry.text, width.saturating_sub(2), Style::default());
+            append_preview(&mut lines, command, expanded, 2, false);
+            if !entry.detail.is_empty() {
+                let output = render::plain(&entry.detail, width.saturating_sub(2), style);
+                append_preview(&mut lines, output, expanded, 3, status == "failed");
             }
-            if code {
-                Line::styled(
-                    format!("  {line}"),
-                    Style::default().fg(Color::White).bg(Color::Indexed(235)),
-                )
-            } else if line.starts_with('#') {
-                Line::styled(
-                    line.trim_start_matches('#').trim_start().to_owned(),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Line::from(line.to_owned())
+        }
+        Tool::Files { changes, .. } => {
+            lines.extend(render::plain(
+                &format!("{symbol} {label} · 文件修改 · {} 个文件", changes.len()),
+                width,
+                style,
+            ));
+            for (kind, path) in changes
+                .iter()
+                .take(if expanded { changes.len() } else { 3 })
+            {
+                lines.extend(render::plain(
+                    &format!("  {kind} {path}"),
+                    width,
+                    Style::default(),
+                ));
             }
-        })
-        .collect()
+            if !expanded && changes.len() > 3 {
+                lines.extend(render::plain(
+                    &format!("  … 另 {} 个文件 · F4 展开", changes.len() - 3),
+                    width,
+                    style,
+                ));
+            }
+        }
+    }
+    lines
 }
 
-fn history(view: &View, draft: &Draft) -> Text<'static> {
+fn append_preview(
+    lines: &mut Vec<Line<'static>>,
+    content: Vec<Line<'static>>,
+    expanded: bool,
+    limit: usize,
+    tail: bool,
+) {
+    let hidden = if expanded {
+        0
+    } else {
+        content.len().saturating_sub(limit)
+    };
+    let marker = || {
+        Line::styled(
+            format!("  … 省略 {hidden} 行 · F4 展开"),
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    if tail && hidden > 0 {
+        lines.push(marker());
+    }
+    let skip = if tail { hidden } else { 0 };
+    let take = content.len() - hidden;
+    for line in content.into_iter().skip(skip).take(take) {
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(line.spans);
+        lines.push(Line::from(spans).style(line.style));
+    }
+    if !tail && hidden > 0 {
+        lines.push(marker());
+    }
+}
+
+fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
     let mut lines = Vec::new();
     for entry in &view.entries {
+        if entry.kind == Kind::Tool {
+            lines.extend(tool_lines(entry, draft.details, width));
+            lines.push(Line::from(""));
+            continue;
+        }
         let (label, color) = match entry.kind {
             Kind::User => ("你", Color::Cyan),
             Kind::Assistant => ("主控", Color::Green),
@@ -211,25 +287,17 @@ fn history(view: &View, draft: &Draft) -> Text<'static> {
             format!("▎ {label}"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
-        if entry.kind == Kind::Tool && !draft.details {
-            let summary = entry.text.lines().next().unwrap_or_default();
-            let shortened: String = summary.chars().take(90).collect();
-            lines.push(Line::styled(
-                format!(
-                    "{shortened}{}",
-                    if summary.chars().count() > 90 {
-                        "…"
-                    } else {
-                        ""
-                    }
-                ),
+        if entry.kind == Kind::Assistant {
+            lines.extend(render::markdown(&entry.text, width));
+        } else {
+            lines.extend(render::plain(&entry.text, width, Style::default()));
+        }
+        if draft.details && !entry.detail.is_empty() {
+            lines.extend(render::plain(
+                &entry.detail,
+                width,
                 Style::default().fg(Color::DarkGray),
             ));
-        } else {
-            lines.extend(markdown(&entry.text));
-            if draft.details && !entry.detail.is_empty() {
-                lines.extend(markdown(&format!("```\n{}\n```", entry.detail)));
-            }
         }
         lines.push(Line::from(""));
     }
@@ -242,7 +310,7 @@ fn history(view: &View, draft: &Draft) -> Text<'static> {
                 label,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ));
-            lines.extend(markdown(&clean(text)));
+            lines.extend(render::plain(&clean(text), width, Style::default()));
             lines.push(Line::from(""));
         }
     }
@@ -372,7 +440,12 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
         ])),
         Rect::new(body.x, screen.y + crate::tabs::HEADER_HEIGHT - 1, width, 1),
     );
-    let transcript = Paragraph::new(history(view, draft)).wrap(Wrap { trim: false });
+    let transcript = Paragraph::new(history(
+        view,
+        draft,
+        usize::from(rows[0].width.saturating_sub(2)),
+    ))
+    .wrap(Wrap { trim: false });
     let height = transcript
         .line_count(rows[0].width.saturating_sub(2))
         .min(u16::MAX as usize) as u16;
@@ -455,6 +528,62 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn command_failure_is_one_entry_with_literal_tail_and_expandable_output() {
+        let output = "first\nsecond\nthird\nfourth\n**actual error**";
+        let entries = transcript(&json!({"thread":{"turns":[{"items":[{
+            "type":"commandExecution", "status":"failed", "command":"cargo test", "exitCode":101, "aggregatedOutput":output
+        }]}]}}));
+        assert_eq!(entries.len(), 1);
+        let compact = tool_lines(&entries[0], false, 60)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(compact.contains("失败") && compact.contains("101"));
+        assert!(compact.contains("**actual error**") && compact.contains("省略 2 行"));
+        assert!(!compact.contains("first"));
+        let full = tool_lines(&entries[0], true, 60)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(full.contains("first") && !full.contains("省略"));
+    }
+
+    #[test]
+    fn file_changes_show_paths_and_status_without_opening_details() {
+        let entries = transcript(&json!({"thread":{"turns":[{"items":[{
+            "type":"fileChange", "status":"completed", "changes":[
+                {"path":"src/new.rs", "kind":{"type":"add"}},
+                {"path":"src/old.rs", "kind":{"type":"delete"}}
+            ]
+        }]}]}}));
+        let text = tool_lines(&entries[0], false, 60)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>();
+        assert!(
+            text.contains("2 个文件")
+                && text.contains("新增 src/new.rs")
+                && text.contains("删除 src/old.rs")
+        );
+    }
+
+    #[test]
+    fn command_preview_uses_available_width_instead_of_fixed_char_count() {
+        let mut entry = Entry::new(Kind::Tool, "中".repeat(100));
+        entry.tool = Some(Tool::Command {
+            status: "inProgress".into(),
+            exit_code: None,
+        });
+        let wide = tool_lines(&entry, false, 120);
+        let narrow = tool_lines(&entry, false, 40);
+        assert!(!wide.iter().any(|line| line.to_string().contains("省略")));
+        assert!(narrow.iter().any(|line| line.to_string().contains("省略")));
+        assert!(narrow.iter().all(|line| line.width() <= 40));
+    }
+
+    #[test]
     fn roles_follow_persisted_source_and_message_id_not_text() {
         let mut messages = Vec::new();
         for (id, source) in [
@@ -498,7 +627,7 @@ mod tests {
             entries,
             ..View::default()
         };
-        let rendered = history(&view, &Draft::default()).to_string();
+        let rendered = history(&view, &Draft::default(), 80).to_string();
         for label in [
             "▎ 你",
             "▎ 子任务 · 项目/任务",
@@ -545,7 +674,8 @@ mod tests {
                     connected: true,
                     ..View::default()
                 },
-                &Draft::default()
+                &Draft::default(),
+                80
             )
             .lines
             .is_empty()
