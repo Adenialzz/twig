@@ -702,13 +702,16 @@ fn find_message(value: &Value, id: &str) -> Option<String> {
         .map(str::to_owned)
 }
 pub(crate) fn message_id() -> String {
+    // 系统时间不保证每次读取都变化；并发计划和消息还需进程内唯一序号。
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     format!(
-        "twig-{}-{}",
+        "twig-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     )
 }
 fn write_new(path: &Path, text: &str) -> Result<()> {
@@ -859,6 +862,21 @@ fn notify(message: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn concurrent_ids_have_unique_sequences_even_when_clock_samples_repeat() {
+        let workers: Vec<_> = (0..4)
+            .map(|_| std::thread::spawn(|| (0..256).map(|_| message_id()).collect::<Vec<_>>()))
+            .collect();
+        let ids: Vec<_> = workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap())
+            .collect();
+        let sequences: std::collections::HashSet<_> = ids
+            .iter()
+            .map(|id| id.rsplit('-').next().unwrap().parse::<u64>().unwrap())
+            .collect();
+        assert_eq!(sequences.len(), ids.len());
+    }
     #[test]
     fn unknown_delivery_matches_client_id_not_text() {
         let data = json!({"thread":{"turns":[{"id":"turn","items":[{"type":"userMessage","clientId":"one","content":[{"text":"same"}]}]}]}});
