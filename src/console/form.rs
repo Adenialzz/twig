@@ -18,6 +18,7 @@ pub struct Form {
     pub project: Option<String>,
     pub fields: [String; 2],
     pub field: usize,
+    pub fetch_base: bool,
     pub error: Option<String>,
     pub scroll: u16,
     pub directories: Vec<String>,
@@ -87,6 +88,7 @@ impl Form {
             project: None,
             fields: Default::default(),
             field: 0,
+            fetch_base: true,
             error: None,
             scroll: 0,
             directories: Vec::new(),
@@ -327,6 +329,9 @@ impl Form {
                 }
             }
             command.args(["--base", &self.fields[1], "--no-open"]);
+            if !self.fetch_base {
+                command.arg("--no-fetch");
+            }
         } else {
             crate::config::name(&self.fields[1])?;
             command.args([

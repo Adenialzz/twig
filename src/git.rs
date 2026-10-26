@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     ffi::OsStr,
     path::Path,
@@ -34,6 +34,40 @@ pub fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         &args.iter().map(OsStr::new).collect::<Vec<_>>(),
         Some(cwd),
     )
+}
+
+/// 只获取 base 配置的远端分支；返回固定提交，不移动本地 base 或工作目录。
+pub fn fetch_base(cwd: &Path, base: &str) -> Result<String> {
+    let upstream = git(
+        cwd,
+        &[
+            "for-each-ref",
+            "--format=%(upstream:remotename) %(upstream:remoteref)",
+            &format!("refs/heads/{base}"),
+        ],
+    )?;
+    let (remote, reference) = upstream.split_once(' ').unwrap_or(("", ""));
+    ensure!(
+        !remote.is_empty() && remote != "." && reference.starts_with("refs/heads/"),
+        "基础分支 {base} 未配置远端 upstream；请配置 upstream 或使用 --no-fetch 从本地创建"
+    );
+    git(
+        cwd,
+        &[
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--",
+            remote,
+            reference,
+        ],
+    )
+    .with_context(|| {
+        format!(
+            "更新基础分支 {base} 的远端 upstream 失败；尚未创建任务，可修复后重试或使用 --no-fetch"
+        )
+    })?;
+    git(cwd, &["rev-parse", "--verify", "FETCH_HEAD^{commit}"])
 }
 
 pub fn exists(cwd: &Path, branch: &str) -> Result<bool> {

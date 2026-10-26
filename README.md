@@ -100,7 +100,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 - Twig 不运行自有后台服务，也不启动、重启或停止共享 Codex daemon；服务不可用时提示用户启动。
 - 受管任务通过 `new --agent` 新建，不自动迁移或接管旧任务。普通任务的已有 Codex session 是否可通信，需核对当前 daemon 中的会话并取得用户授权。
 - 消息送达和一轮回复完成都不代表任务通过验收。投递结果未知时按消息 ID 核对，不自动重发。
-- 任务管理不隐式 fetch、pull 或 push；不自动合并，清理仍执行文件、进程和归属检查。
+- 新建分支默认 fetch base 的远端 upstream，从最新远端提交创建，不改动本地 base 或工作目录；`--no-fetch` 使用本地 base。复用已有分支不 fetch，其他任务管理不联网，不自动 pull、push 或合并。
 
 ## 完整文档
 

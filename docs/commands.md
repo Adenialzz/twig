@@ -56,7 +56,7 @@ twig new myapp auth
 twig new myapp feat/login --base develop --no-open
 ```
 
-PROJECT 和 NAME 必填。`--base BRANCH` 选择已有本地起点，默认项目 base；不会 fetch。`--no-open` 仅跳过进入，仍创建窗口并执行启动配置。默认成功后打开 Twig 内置终端工作台，Ctrl-W d 返回 Console 并选中该任务；非交互环境进入失败时已经创建的资源仍保留。
+PROJECT 和 NAME 必填。`--base BRANCH` 选择已有本地基础分支，默认项目 base。新建任务分支前默认 fetch 所选 base 的远端 upstream，并从取得的远端提交创建；不更新本地 base 或主工作目录，也不包含本地 base 独有的未推送提交。缺少远端 upstream 或 fetch 失败时停止，不创建任务记录、分支或窗口。`--no-fetch` 使用本地 base，适用于离线、纯本地仓库或需要本地提交的情况。复用已有分支时保留原提交，不执行 fetch。 `--no-open` 仅跳过进入，仍创建窗口并执行启动配置。默认成功后打开 Twig 内置终端工作台，Ctrl-W d 返回 Console 并选中该任务；非交互环境进入失败时已经创建的资源仍保留。
 
 同名本地分支或远端跟踪分支存在时，new 询问是否使用它创建任务，默认取消。本地同名分支优先；只有远端跟踪分支时，使用本机已 fetch 的引用，多个 remote 同名则输入编号选择，再确认。远端来源确认后创建本地分支并建立 upstream 跟踪关系；本地来源直接复用。两者均保留已有提交并忽略 --base。不自动 fetch，不保证引用反映远端实时状态；需要更新时先自行 git fetch。分支被其他 Worktree 占用时显示路径并拒绝；非交互环境请改用交互终端或 Console 确认。已登记同名任务时直接报错，包括创建失败留下记录、窗口或 Worktree 缺失的情况；不复用、不恢复、不修改已有资源。已有任务用 `twig open PROJECT NAME` 或 Console 任务列表进入；Worktree 缺失时先按故障排查指南处理。不会接管外部目录或窗口。任务路径不能与已有任务相互包含，中间目录不能是符号链接或其他仓库。创建失败不强制回滚；恢复方式见 `twig guide troubleshooting`。
 

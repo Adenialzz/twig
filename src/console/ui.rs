@@ -1125,6 +1125,7 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
         Constraint::Length(2),
         Constraint::Min(1),
         Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(2),
     ])
     .split(inner);
@@ -1139,8 +1140,10 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
         .any(|branch| branch.name == form.fields[0])
     {
         "起点分支（复用时忽略）"
-    } else {
+    } else if !form.fetch_base {
         "起点分支（本地）"
+    } else {
+        "起点分支（读取其 upstream）"
     };
     for (i, (label, area)) in [("任务名", sections[2]), (base_label, sections[4])]
         .into_iter()
@@ -1174,7 +1177,7 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
         let message = match &form.error {
             Some(error) if form.operation_started => {
                 format!(
-                    "操作失败：{}。已创建资源和记录保留；同名任务不能再次新建，请查看 twig guide troubleshooting。",
+                    "操作失败：{}。若已有资源和记录则保留；已登记任务请使用 open，尚未创建时可修复后重试。",
                     safe(error)
                 )
             }
@@ -1199,15 +1202,27 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
         );
     }
     frame.render_widget(
+        Paragraph::new(format!(
+            "[{}] 更新远端 base（复用已有分支时忽略）",
+            if form.fetch_base { "x" } else { " " }
+        ))
+        .style(Style::default().fg(if form.field == 2 {
+            Color::Cyan
+        } else {
+            Color::Gray
+        })),
+        sections[5],
+    );
+    frame.render_widget(
         Paragraph::new(if form.busy() {
             "执行期间请等待，避免中断写操作。"
         } else if form.completing_branch() {
             "↑↓ 选择 · Tab 填入\nEnter 选中并确认 · Esc 取消"
         } else {
-            "Tab 切字段 · Enter 创建\nEsc 取消 · PgUp/PgDn 滚动"
+            "Tab 切字段 · 空格勾选 · Enter 创建\nEsc 取消 · PgUp/PgDn 滚动"
         })
         .wrap(Wrap { trim: false }),
-        sections[5],
+        sections[6],
     );
 }
 

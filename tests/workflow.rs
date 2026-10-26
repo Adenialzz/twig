@@ -164,7 +164,7 @@ fn startup_mixed_modes_keep_process_output_and_close_shell() {
         toml::to_string(&layout).unwrap(),
     )
     .unwrap();
-    f.ok(&["new", "local", "mixed", "--no-open"]);
+    f.ok(&["new", "local", "--no-fetch", "mixed", "--no-open"]);
     let target = format!("{}:mixed", f.session());
     let output = f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"]);
     let panes: Vec<_> = output.lines().collect();
@@ -257,7 +257,10 @@ fn startup_mixed_modes_keep_process_output_and_close_shell() {
             .collect::<Vec<_>>(),
         panes[1..]
     );
-    f.fail(&["new", "local", "mixed", "--no-open"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "mixed", "--no-open"],
+        "已存在",
+    );
     assert_eq!(
         f.mux(&["list-panes", "-t", &target, "-F", "#{pane_dead}"])
             .lines()
@@ -299,7 +302,7 @@ fn startup_commands_return_to_shell_and_ctrl_d_closes_panes() {
         ("zsh", "/bin/zsh"),
     ] {
         f.mux(&["set-option", "-t", &f.session(), "default-shell", shell]);
-        f.ok(&["new", "local", task, "--no-open"]);
+        f.ok(&["new", "local", "--no-fetch", task, "--no-open"]);
         let target = format!("{}:{task}", f.session());
         let output = f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"]);
         let panes: Vec<_> = output.lines().collect();
@@ -376,7 +379,7 @@ fn startup_shells_inherit_global_options_and_honor_session_overrides() {
         if task == "override" {
             f.mux(&["set-option", "-t", &f.session(), "default-shell", shell]);
         }
-        f.ok(&["new", "local", task, "--no-open"]);
+        f.ok(&["new", "local", "--no-fetch", task, "--no-open"]);
         let panes = f.mux(&[
             "list-panes",
             "-t",
@@ -426,7 +429,7 @@ fn startup_layout_precedence_commands_and_reopen() {
         ),
     )
     .unwrap();
-    success(f.registered(&["new", "local", "global", "--no-open"]));
+    success(f.registered(&["new", "local", "--no-fetch", "global", "--no-open"]));
     let target = format!("{}:global", f.session());
     assert_eq!(
         f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
@@ -455,7 +458,7 @@ fn startup_layout_precedence_commands_and_reopen() {
     fs::create_dir(f.repo.join(".twig")).unwrap();
     let local = f.repo.join(".twig/config.toml");
     fs::write(&local, "[tmux]\npanes = [{ command = ['/bin/echo', 'literal $(touch unwanted) ;'], focus = true }, { split = 'down', percent = 30 }]\n").unwrap();
-    success(f.registered(&["new", "local", "configured", "--no-open"]));
+    success(f.registered(&["new", "local", "--no-fetch", "configured", "--no-open"]));
     let target = format!("{}:configured", f.session());
     let panes = f.mux(&[
         "list-panes",
@@ -493,7 +496,10 @@ fn startup_layout_precedence_commands_and_reopen() {
     );
     assert!(!f.root.join("configured/unwanted").exists());
     fs::write(&local, "[tmux]\npanes = []\n").unwrap();
-    f.fail(&["new", "local", "configured", "--no-open"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "configured", "--no-open"],
+        "已存在",
+    );
     assert_eq!(
         f.mux(&["list-panes", "-t", &target, "-F", "#{pane_id}"])
             .lines()
@@ -509,7 +515,7 @@ fn startup_layout_precedence_commands_and_reopen() {
         1
     );
     fs::write(&local, "# 未定义 tmux，继承用户配置\n").unwrap();
-    f.ok(&["new", "local", "fallback", "--no-open"]);
+    f.ok(&["new", "local", "--no-fetch", "fallback", "--no-open"]);
     assert_eq!(
         f.mux(&[
             "list-panes",
@@ -541,7 +547,10 @@ fn startup_rejects_invalid_configuration_without_creating_window() {
     {
         fs::write(f.repo.join(".twig/config.toml"), text).unwrap();
         if index == 0 {
-            f.fail(&["new", "local", "invalid", "--no-open"], "配置");
+            f.fail(
+                &["new", "local", "--no-fetch", "invalid", "--no-open"],
+                "配置",
+            );
         } else {
             f.fail(&["open", "local", "invalid"], "配置");
         }
@@ -570,9 +579,15 @@ fn startup_partial_failure_keeps_window_and_does_not_run_commands() {
         format!("[tmux]\npanes = [{}]", panes.join(",")),
     )
     .unwrap();
-    f.fail(&["new", "local", "partial", "--no-open"], "初始化失败");
+    f.fail(
+        &["new", "local", "--no-fetch", "partial", "--no-open"],
+        "初始化失败",
+    );
     assert!(!f.root.join("partial/must-not-run").exists());
-    f.fail(&["new", "local", "partial", "--no-open"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "partial", "--no-open"],
+        "已存在",
+    );
     f.fail(&["open", "local", "partial"], "初始化未完成");
     fs::write(f.repo.join(".twig/config.toml"), "[tmux]\npanes = []").unwrap();
     f.ok(&["stop", "local", "partial", "-y"]);
@@ -582,7 +597,7 @@ fn startup_partial_failure_keeps_window_and_does_not_run_commands() {
 #[test]
 fn duplicate_new_preserves_state_branches_windows_and_usage() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "auth", "--no-open"]);
+    f.ok(&["new", "local", "--no-fetch", "auth", "--no-open"]);
     let state_path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
     for stopped in [false, true] {
         if stopped {
@@ -593,8 +608,16 @@ fn duplicate_new_preserves_state_branches_windows_and_usage() {
         let refs = f.git(&["show-ref"]);
         let windows = f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"]);
         for args in [
-            vec!["new", "local", "auth"],
-            vec!["new", "local", "auth", "--no-open", "--base", "absent"],
+            vec!["new", "local", "--no-fetch", "auth"],
+            vec![
+                "new",
+                "local",
+                "--no-fetch",
+                "auth",
+                "--no-open",
+                "--base",
+                "absent",
+            ],
             vec![
                 "new",
                 "local",
@@ -620,9 +643,12 @@ fn duplicate_new_preserves_state_branches_windows_and_usage() {
 fn lifecycle_and_recovery() {
     let f = Fixture::new();
     f.ok(&["add", "local", "--path", f.repo.to_str().unwrap()]);
-    f.ok(&["new", "local", "--no-open", "auth"]);
-    f.fail(&["new", "local", "--no-open", "auth"], "已存在");
-    f.ok(&["new", "local", "--no-open", "search"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "auth"]);
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "auth"],
+        "已存在",
+    );
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "search"]);
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
             .matches("worktree ")
@@ -644,7 +670,10 @@ fn lifecycle_and_recovery() {
     f.ok(&["stop", "local", "auth", "-y"]);
     assert!(f.root.join("auth").is_dir());
     assert!(f.ok(&["ls", "local"]).contains("Closed"));
-    f.fail(&["new", "local", "--no-open", "auth"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "auth"],
+        "已存在",
+    );
     // open 的非交互工作台会失败，但必须已经重建窗口。
     f.ok(&["stop", "local", "auth", "-y"]);
     let _ = f.run(&["open", "local", "auth"]);
@@ -660,13 +689,16 @@ fn lifecycle_and_recovery() {
     assert!(f.root.join("search").is_dir());
     f.mux(&["kill-server"]);
     assert!(f.ok(&["ls", "local"]).contains("Closed"));
-    f.fail(&["new", "local", "--no-open", "search"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "search"],
+        "已存在",
+    );
 }
 
 #[test]
 fn refuses_dirty_unmerged_and_busy_removal() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "--no-open", "auth"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "auth"]);
     let path = f.root.join("auth");
     fs::write(path.join("notes"), "unsaved").unwrap();
     f.fail(&["rm", "local", "auth", "-y"], "未提交");
@@ -698,19 +730,31 @@ fn refuses_dirty_unmerged_and_busy_removal() {
 fn detects_conflicts_and_preserves_partial_creation() {
     let f = Fixture::new();
     f.git(&["branch", "existing"]);
-    f.fail(&["new", "local", "--no-open", "existing"], "分支已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "existing"],
+        "分支已存在",
+    );
     fs::create_dir(f.root.join("occupied")).unwrap();
-    f.fail(&["new", "local", "--no-open", "occupied"], "路径已存在");
-    f.fail(&["new", "local", "--no-open", "../escape"], "名称须");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "occupied"],
+        "路径已存在",
+    );
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "../escape"],
+        "名称须",
+    );
     let out = f
         .command(&f.repo)
         .env("TWIG_FAIL_TMUX", "1")
-        .args(["new", "local", "--no-open", "partial"])
+        .args(["new", "local", "--no-fetch", "--no-open", "partial"])
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(f.root.join("partial").is_dir());
-    f.fail(&["new", "local", "--no-open", "partial"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "partial"],
+        "已存在",
+    );
     f.fail(&["open", "local", "partial"], "工作台需要交互式终端");
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
@@ -733,24 +777,30 @@ fn detects_conflicts_and_preserves_partial_creation() {
 #[test]
 fn ignored_files_and_missing_directory_are_protected() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "--no-open", "ignored"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "ignored"]);
     fs::write(f.repo.join(".git/info/exclude"), "cache/\n").unwrap();
     fs::create_dir(f.root.join("ignored/cache")).unwrap();
     fs::write(f.root.join("ignored/cache/file"), "data").unwrap();
     f.fail(&["rm", "local", "ignored", "-y"], "被忽略");
-    f.ok(&["new", "local", "--no-open", "lost"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "lost"]);
     f.ok(&["stop", "local", "lost", "-y"]);
     fs::remove_dir_all(f.root.join("lost")).unwrap();
-    f.fail(&["new", "local", "--no-open", "lost"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "lost"],
+        "已存在",
+    );
     f.git(&["worktree", "prune"]);
-    f.fail(&["new", "local", "--no-open", "lost"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "lost"],
+        "已存在",
+    );
     assert!(!f.root.join("lost").exists());
 }
 
 #[test]
 fn merged_branch_cleanup_and_confirmation() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "--no-open", "done"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "done"]);
     success(
         Command::new("git")
             .current_dir(f.root.join("done"))
@@ -768,7 +818,7 @@ fn merged_branch_cleanup_and_confirmation() {
 #[test]
 fn numeric_names_renamed_windows_and_background_jobs() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "--no-open", "0"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "0"]);
     let windows = f.mux(&[
         "list-windows",
         "-t",
@@ -784,7 +834,7 @@ fn numeric_names_renamed_windows_and_background_jobs() {
         .next()
         .unwrap();
     f.mux(&["rename-window", "-t", id, "renamed"]);
-    f.fail(&["new", "local", "--no-open", "0"], "已存在");
+    f.fail(&["new", "local", "--no-fetch", "--no-open", "0"], "已存在");
     assert_eq!(
         f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"])
             .lines()
@@ -802,7 +852,7 @@ fn numeric_names_renamed_windows_and_background_jobs() {
 fn upstream_and_foreign_window_protection() {
     let f = Fixture::new();
     f.git(&["branch", "upstream"]);
-    f.ok(&["new", "local", "--no-open", "unpushed"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "unpushed"]);
     f.git(&["branch", "--set-upstream-to=upstream", "unpushed"]);
     success(
         Command::new("git")
@@ -814,7 +864,10 @@ fn upstream_and_foreign_window_protection() {
     f.git(&["merge", "--ff-only", "unpushed"]);
     f.fail(&["rm", "local", "unpushed", "-y"], "未推送提交");
     f.mux(&["new-window", "-d", "-t", &f.session(), "-n", "foreign"]);
-    f.fail(&["new", "local", "--no-open", "foreign"], "同名非 twig");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "foreign"],
+        "同名非 twig",
+    );
     assert!(f.root.join("foreign").is_dir());
     f.mux(&[
         "rename-window",
@@ -822,7 +875,10 @@ fn upstream_and_foreign_window_protection() {
         &format!("{}:foreign", f.session()),
         "personal",
     ]);
-    f.fail(&["new", "local", "--no-open", "foreign"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "foreign"],
+        "已存在",
+    );
     f.fail(&["open", "local", "foreign"], "工作台需要交互式终端");
 }
 
@@ -831,7 +887,7 @@ fn rechecks_files_after_confirmation_prompt() {
     use std::io::{Read, Write};
     use std::process::Stdio;
     let f = Fixture::new();
-    f.ok(&["new", "local", "--no-open", "race"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "race"]);
     f.ok(&["stop", "local", "race", "-y"]);
     fs::write(f.repo.join(".git/info/exclude"), "late-file\n").unwrap();
     let mut child = f
@@ -859,7 +915,7 @@ fn rechecks_files_after_confirmation_prompt() {
 fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
     use std::process::Stdio;
     let f = Fixture::new();
-    f.ok(&["new", "local", "auth", "--no-open"]);
+    f.ok(&["new", "local", "--no-fetch", "auth", "--no-open"]);
     f.mux(&["new-session", "-d", "-s", "driver", "-x", "140", "-y", "36"]);
     let mut client = Command::new(&f.tmux)
         .args(["-L", &f.socket, "-C", "attach-session", "-t", "driver"])
@@ -882,9 +938,13 @@ fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
             f.mux(&["capture-pane", "-p", "-t", "driver:"])
         );
     };
-    for (i, action) in ["open local auth", "new local fresh", "open local fresh"]
-        .iter()
-        .enumerate()
+    for (i, action) in [
+        "open local auth",
+        "new local fresh --no-fetch",
+        "open local fresh",
+    ]
+    .iter()
+    .enumerate()
     {
         let command = format!(
             "'{}' --config '{}' {action}; printf 'RETURN_{i}_%s\\n' DONE",
@@ -906,7 +966,7 @@ fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
         f.mux(&["send-keys", "-t", "driver:", "q"]);
         wait_screen(&format!("RETURN_{i}_DONE"));
     }
-    f.ok(&["new", "local", "background", "--no-open"]);
+    f.ok(&["new", "local", "--no-fetch", "background", "--no-open"]);
     assert_eq!(
         f.mux(&["list-clients", "-F", "#{session_name}"]).trim(),
         "driver"
@@ -918,14 +978,20 @@ fn new_and_open_inside_tmux_keep_the_outer_client_in_its_session() {
 #[test]
 fn new_preserves_environment_when_workbench_requires_a_terminal() {
     let f = Fixture::new();
-    f.fail(&["new", "local", "auth"], "工作台需要交互式终端");
+    f.fail(
+        &["new", "local", "--no-fetch", "auth"],
+        "工作台需要交互式终端",
+    );
     assert!(f.root.join("auth/.git").exists());
     assert!(
         !support::project_dir(&f.repo, &f.registry_path())
             .join("lock")
             .exists()
     );
-    f.fail(&["new", "local", "--no-open", "auth"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "auth"],
+        "已存在",
+    );
     assert!(f.ok(&["ls", "local"]).contains("Open"));
 }
 
@@ -933,8 +999,8 @@ fn new_preserves_environment_when_workbench_requires_a_terminal() {
 fn slash_task_names_and_legacy_branches() {
     let f = Fixture::new();
     for name in ["feat/login", "fix/bug"] {
-        f.ok(&["new", "local", "--no-open", name]);
-        f.fail(&["new", "local", "--no-open", name], "已存在");
+        f.ok(&["new", "local", "--no-fetch", "--no-open", name]);
+        f.fail(&["new", "local", "--no-fetch", "--no-open", name], "已存在");
         let state: serde_json::Value = serde_json::from_slice(
             &fs::read(support::project_dir(&f.repo, &f.registry_path()).join("state.json"))
                 .unwrap(),
@@ -957,13 +1023,16 @@ fn slash_task_names_and_legacy_branches() {
         assert!(!f.root.join(name).exists());
         assert!(f.git(&["branch", "--list", name]).is_empty());
     }
-    f.ok(&["new", "local", "--no-open", "legacy"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "legacy"]);
     f.git(&["branch", "-m", "legacy", "feature/legacy"]);
     let path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
     let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     state["legacy"]["branch"] = "feature/legacy".into();
     fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
-    f.fail(&["new", "local", "--no-open", "legacy"], "已存在");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "legacy"],
+        "已存在",
+    );
     assert!(f.ok(&["ls", "local"]).contains("feature/legacy"));
     f.ok(&["stop", "local", "legacy", "-y"]);
     f.ok(&["rm", "local", "legacy", "-y"]);
@@ -981,16 +1050,22 @@ fn slash_tasks_reject_unsafe_paths_before_recording() {
         "feat/",
         "feat/.hidden",
     ] {
-        f.fail(&["new", "local", "--no-open", name], "名称须");
+        f.fail(&["new", "local", "--no-fetch", "--no-open", name], "名称须");
     }
-    f.fail(&["new", "local", "--no-open", "HEAD"], "not a valid branch");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "HEAD"],
+        "not a valid branch",
+    );
     symlink(f._temp.path(), f.root.join("escape")).unwrap();
     f.fail(
-        &["new", "local", "--no-open", "escape/task"],
+        &["new", "local", "--no-fetch", "--no-open", "escape/task"],
         "不是普通目录",
     );
     fs::create_dir_all(f.root.join("nested/.git")).unwrap();
-    f.fail(&["new", "local", "--no-open", "nested/task"], "已有仓库");
+    f.fail(
+        &["new", "local", "--no-fetch", "--no-open", "nested/task"],
+        "已有仓库",
+    );
     assert!(
         !support::project_dir(&f.repo, &f.registry_path())
             .join("state.json")
@@ -1002,7 +1077,7 @@ fn slash_tasks_reject_unsafe_paths_before_recording() {
 #[test]
 fn delete_ignored_is_explicit_and_still_protects_other_files() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "--no-open", "cache-task"]);
+    f.ok(&["new", "local", "--no-fetch", "--no-open", "cache-task"]);
     let path = f.root.join("cache-task");
     fs::write(f.repo.join(".git/info/exclude"), "cache/\n").unwrap();
     fs::create_dir(path.join("cache")).unwrap();
@@ -1052,7 +1127,7 @@ fn delete_ignored_is_explicit_and_still_protects_other_files() {
 #[test]
 fn global_state_shares_worktrees_and_isolates_data_roots_and_clones() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "shared", "--no-open"]);
+    f.ok(&["new", "local", "--no-fetch", "shared", "--no-open"]);
     let dir = support::project_dir(&f.repo, &f.registry_path());
     assert!(dir.join("state.json").is_file());
     assert!(!f.repo.join(".git/twig").exists());
@@ -1151,7 +1226,7 @@ fn default_global_storage_ignores_and_preserves_old_files() {
 #[test]
 fn global_commands_ignore_cwd_and_project_removal_preserves_resources() {
     let f = Fixture::new();
-    success(f.registered(&["new", "local", "auth", "--no-open"]));
+    success(f.registered(&["new", "local", "--no-fetch", "auth", "--no-open"]));
     assert!(success(f.registered(&["ls"])).contains("local"));
     assert!(success(f.registered(&["ls", "local"])).contains("auth"));
     let state_path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
@@ -1189,7 +1264,7 @@ fn global_commands_ignore_cwd_and_project_removal_preserves_resources() {
 #[test]
 fn add_reuses_alias_and_rejects_conflicts_without_overwriting() {
     let f = Fixture::new();
-    f.ok(&["new", "local", "auth", "--no-open"]);
+    f.ok(&["new", "local", "--no-fetch", "auth", "--no-open"]);
     let before = fs::read(f.registry_path()).unwrap();
     success(f.registered(&[
         "add",
@@ -1265,7 +1340,7 @@ fn add_resolves_relative_paths_and_can_retry_partial_initialization() {
     fs::write(&wrapper, original).unwrap();
     success(f.registered(&["add", "other", "--path", "other"]));
     assert_eq!(fs::read(&config_path).unwrap(), saved);
-    success(f.registered(&["new", "other", "task", "--no-open"]));
+    success(f.registered(&["new", "other", "--no-fetch", "task", "--no-open"]));
     assert!(f._temp.path().join("other-tasks/task/.git").exists());
 }
 
@@ -1291,4 +1366,94 @@ fn listing_missing_registry_is_readonly_and_requires_no_repository() {
             .success()
     );
     assert!(!registry.parent().unwrap().exists());
+}
+
+#[test]
+fn new_fetches_selected_upstream_without_changing_local_base_or_files() {
+    let f = Fixture::new();
+    let remote = f._temp.path().join("remote.git");
+    let writer = f._temp.path().join("writer");
+    f.git(&[
+        "clone",
+        "--bare",
+        f.repo.to_str().unwrap(),
+        remote.to_str().unwrap(),
+    ]);
+    f.git(&["clone", remote.to_str().unwrap(), writer.to_str().unwrap()]);
+    f.git(&["-C", writer.to_str().unwrap(), "checkout", "-b", "trunk"]);
+    fs::write(writer.join("remote-only"), "latest remote").unwrap();
+    f.git(&["-C", writer.to_str().unwrap(), "add", "remote-only"]);
+    f.git(&[
+        "-C",
+        writer.to_str().unwrap(),
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "remote update",
+    ]);
+    f.git(&["-C", writer.to_str().unwrap(), "push", "origin", "trunk"]);
+    let remote_commit = f.git(&["-C", writer.to_str().unwrap(), "rev-parse", "HEAD"]);
+    f.git(&["remote", "add", "upstream", remote.to_str().unwrap()]);
+    // 远端分支名与本地 base 不同，且没有本地远端跟踪引用。
+    f.git(&["branch", "release"]);
+    f.git(&["config", "branch.release.remote", "upstream"]);
+    f.git(&["config", "branch.release.merge", "refs/heads/trunk"]);
+    f.git(&["commit", "--allow-empty", "-m", "local only"]);
+    fs::write(f.repo.join("unsaved"), "keep me").unwrap();
+    let local_head = f.git(&["rev-parse", "HEAD"]);
+    let local_base = f.git(&["rev-parse", "release"]);
+    success(f.run(&["new", "local", "fresh", "--base", "release", "--no-open"]));
+    assert_eq!(f.git(&["rev-parse", "fresh"]), remote_commit);
+    assert_eq!(f.git(&["rev-parse", "HEAD"]), local_head);
+    assert_eq!(f.git(&["rev-parse", "release"]), local_base);
+    assert_eq!(
+        fs::read_to_string(f.repo.join("unsaved")).unwrap(),
+        "keep me"
+    );
+    assert!(!f.repo.join("remote-only").exists());
+    assert!(f.root.join("fresh/remote-only").exists());
+    success(f.run(&["new", "local", "offline", "--no-fetch", "--no-open"]));
+    assert_eq!(f.git(&["rev-parse", "offline"]), local_head);
+}
+
+#[test]
+fn new_fetch_failure_leaves_no_task_record_and_can_retry_offline() {
+    let f = Fixture::new();
+    let state_path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
+    let before = fs::read(&state_path).ok();
+    for configured in [false, true] {
+        if configured {
+            f.git(&[
+                "remote",
+                "add",
+                "unavailable",
+                f._temp.path().join("missing.git").to_str().unwrap(),
+            ]);
+            f.git(&["config", "branch.main.remote", "unavailable"]);
+            f.git(&["config", "branch.main.merge", "refs/heads/main"]);
+        }
+        let out = f.run(&["new", "local", "retry", "--no-open"]);
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(if configured {
+                "更新基础分支 main"
+            } else {
+                "未配置远端 upstream"
+            })
+        );
+        assert_eq!(fs::read(&state_path).ok(), before);
+        assert!(!f.root.join("retry").exists());
+        assert!(
+            f.git(&["for-each-ref", "--format=%(refname)", "refs/heads/retry"])
+                .trim()
+                .is_empty()
+        );
+    }
+    success(f.run(&["new", "local", "retry", "--no-fetch", "--no-open"]));
+    assert!(f.root.join("retry/.git").exists());
 }
