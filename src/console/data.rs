@@ -790,14 +790,6 @@ fn collect(
                     for (id, path) in paths {
                         let result = (|| -> Result<()> {
                             if controller.is_some_and(|c| c.thread == id) {
-                                // 空会话还没有 rollout；建立空基线，避免查询不存在的轮次存储。
-                                if !watched.contains_key(&id)
-                                    && threads.iter().any(|t| t.id == id && t.preview.is_empty())
-                                {
-                                    watched.entry(id.clone()).or_insert((path, None));
-                                    catchup.remove(&id);
-                                    return Ok(());
-                                }
                                 let (latest, turns) = client
                                     .completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
                                 for turn in turns {

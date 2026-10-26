@@ -176,6 +176,15 @@ impl Client {
                         continue;
                     }
                     if let Some(error) = value.get("error") {
+                        // 新线程在首条用户消息前尚无轮次存储，协议以此错误表示空历史。
+                        if method == "thread/turns/list"
+                            && error["code"] == -32600
+                            && params["threadId"].as_str().is_some_and(|thread| {
+                                error["message"] == format!("thread {thread} is not materialized yet; thread/turns/list is unavailable before first user message")
+                            })
+                        {
+                            return Ok(json!({"data":[],"nextCursor":null}));
+                        }
                         bail!("Codex {method}：{error}");
                     }
                     return value
@@ -377,6 +386,61 @@ mod tests {
         assert!(
             client
                 .completed_turns("thread", Some(&newest))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        drop(client);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn unmaterialized_thread_stays_empty_until_first_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut calls = 0;
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                let response = match v["method"].as_str().unwrap() {
+                    "initialize" => json!({"id":v["id"],"result":{}}),
+                    "initialized" => continue,
+                    "thread/turns/list" => {
+                        calls += 1;
+                        if calls <= 5 {
+                            let thread = if calls == 4 { "another" } else { "thread" };
+                            let code = if calls == 5 { -32603 } else { -32600 };
+                            json!({"id":v["id"],"error":{"code":code,"message":format!(
+                                "thread {thread} is not materialized yet; thread/turns/list is unavailable before first user message"
+                            )}})
+                        } else {
+                            json!({"id":v["id"],"result":{"data":[{"id":"first","status":"completed"}]}})
+                        }
+                    }
+                    other => panic!("不允许的请求：{other}"),
+                };
+                ws.send(Message::Text(response.to_string().into())).unwrap();
+            }
+            assert_eq!(calls, 7);
+        });
+        let mut client = Client::connect(&path).unwrap();
+        let (empty, events) = client.completed_turns("thread", None).unwrap();
+        assert!(empty.is_none() && events.is_empty());
+        let (empty, events) = client.completed_turns("thread", Some(&empty)).unwrap();
+        assert!(empty.is_none() && events.is_empty());
+        assert_eq!(client.latest_turn("thread").unwrap(), "尚无轮次记录");
+        // 其他线程或错误码不能被当作空历史，重试仍沿用之前的基线。
+        assert!(client.completed_turns("thread", Some(&empty)).is_err());
+        assert!(client.completed_turns("thread", Some(&empty)).is_err());
+        let (latest, events) = client.completed_turns("thread", Some(&empty)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "first");
+        assert!(
+            client
+                .completed_turns("thread", Some(&latest))
                 .unwrap()
                 .1
                 .is_empty()
