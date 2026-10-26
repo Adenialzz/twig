@@ -341,6 +341,8 @@ supports_websockets = false
         original = state()["bindings"]["controller"]["thread"]
         server.terminate()
         server.wait(timeout=10)
+        # 等 Chat 实际观察到断连，再恢复服务并按 F5；不能把旧画面的“空闲”当作已重连。
+        frontend.wait("未连接 · F5 重试")
         socket.unlink(missing_ok=True)
         server = start_server()
         wait_for(socket.exists, "有历史会话服务重启失败")
