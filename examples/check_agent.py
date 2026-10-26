@@ -597,13 +597,23 @@ supports_websockets = false
         model.release["controller"].clear()
         frontend.send(b"navigation-follow hold-controller\r")
         assert model.entered["controller"].wait(10)
+        navigation_reply = f"probe complete {model.count + 1}"
         frontend.send(b"\t")
         frontend.wait("个项目")
         model.release["controller"].set()
         frontend.wait("主控有新消息")
         frontend.wait("Ctrl-W f 查看 Agent")
         frontend.send(b"\x17f")
-        frontend.wait("navigation-follow hold-controller", history=True)
+        frontend.wait(navigation_reply, history=True)
+        # “消息送达”和“轮次完成”是两个事件；两者采集并清除后才具备“无卡片”前提。
+        def navigation_read():
+            message = next(m for m in state()["messages"] if m["text"] == "navigation-follow hold-controller")
+            if not message.get("turn"):
+                return False
+            saved = json.loads((root / "notifications.json").read_text())
+            expected = {f"message:{message['id']}", f"turn:{message['thread']}:{message['turn']}"}
+            return expected.issubset(saved["seen"]) and not any(e["thread"] == message["thread"] for e in saved["unread"])
+        wait_for(navigation_read, "导航测试轮次的送达/完成事件尚未采集并清除")
         frontend.absent_for("Agent*", 1)
         frontend.send(b"\t")
         frontend.wait("个项目")
