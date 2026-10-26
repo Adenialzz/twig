@@ -8,6 +8,7 @@
 不会连接真实用户 daemon、读取认证或向飞书发送消息。
 """
 import base64
+import errno
 import re
 import fcntl
 import http.server
@@ -88,7 +89,7 @@ class Frontend:
                 return base64.b64decode(matches[-1]).decode()
         raise AssertionError("没有收到 OSC 52 复制请求")
 
-    def wait(self, text, timeout=15, history=False):
+    def wait(self, text, timeout=15, history=False, absent=False):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if select.select([self.master], [], [], 0.05)[0]:
@@ -101,7 +102,8 @@ class Frontend:
                 # PTY 分片可能停在宽字符差分重绘中间，等待后续字节完成该帧。
                 continue
             history_end = next((y for y, line in enumerate(display) if "滚轮 / PgUp" in line or "Ctrl-End 回到最新" in line), len(display))
-            if text in "\n".join(display[5:history_end] if history else display):
+            found = text in "\n".join(display[5:history_end] if history else display)
+            if found != absent:
                 return
             assert self.process.poll() is None, self.screen.display
         raise AssertionError((text, self.screen.display))
@@ -120,10 +122,29 @@ class Frontend:
             assert text not in display, display
             assert self.process.poll() is None
 
+    def wait_exit(self, timeout=10):
+        deadline = time.monotonic() + timeout
+        while True:
+            # 退出期间继续消费 PTY，避免终端还原输出填满缓冲区后阻塞子进程。
+            if select.select([self.master], [], [], 0.05)[0]:
+                try:
+                    data = os.read(self.master, 65536)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    data = b""  # Linux PTY 从端关闭时报告 EIO。
+                self.output.extend(data)
+                self.stream.feed(data)
+            code = self.process.poll()
+            if code is not None:
+                return code
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"PTY 退出超时：PID={self.process.pid}\n{self.output[-8000:].decode(errors='replace')}")
+
     def close(self):
         if self.process.poll() is None:
             self.process.kill()
-            self.process.wait(timeout=5)
+            self.wait_exit(timeout=5)
         os.close(self.master)
         os.close(self.slave)
 
@@ -256,7 +277,7 @@ supports_websockets = false
         skill_content = skill_file.read_bytes()
         (workspace / "state.md").write_text("用户保留的全局计划")
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=5)
+        frontend.wait_exit(timeout=5)
         frontend.close()
         frontend = None
         server.terminate()
@@ -356,7 +377,7 @@ supports_websockets = false
         print("PASS: Chat 拖选复制、完整回复复制、诊断展开和中文长输入光标跟随", flush=True)
         print("PASS: Chat 中有历史会话被卸载后恢复原 ID 并继续对话", flush=True)
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=5)
+        frontend.wait_exit(timeout=5)
         frontend.close()
         frontend = None
         print("PASS: 全新主控首次打开 Chat，连续两轮输入及回复实际显示", flush=True)
@@ -435,7 +456,7 @@ supports_websockets = false
         frontend.absent_for("Agent*", 1)
         print("PASS: 工作台 Ctrl-W f 直达主控、清除未读并保留 Pane 进程", flush=True)
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=5)
+        frontend.wait_exit(timeout=5)
         assert frontend.process.returncode == 0
         assert termios.tcgetattr(frontend.slave) == frontend.before
         frontend.close()
@@ -535,7 +556,7 @@ supports_websockets = false
         frontend.send(b"\t")
         frontend.wait("before-tab-two", history=True)
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         print("PASS: 连续发送后立即切回 Console，全部持久化并各投递一次", flush=True)
@@ -557,7 +578,7 @@ supports_websockets = false
         frontend.wait("rejected-while-hidden")
         assert not any(m["text"] == "rejected-while-hidden" for m in state()["messages"])
         frontend.send(b"\x15\x03")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         with (state_file.parent / "lock").open("a") as lock:
@@ -584,11 +605,13 @@ supports_websockets = false
         frontend.absent_for("Agent*", 1)
         frontend.send(b"\t")
         frontend.wait("个项目")
+        # 导航文字可能先于整帧刷新到达；等旧 Agent 标题消失后再测试无卡片快捷键。
+        frontend.wait("YOLO", absent=True)
         frontend.send(b"\x17f")
         frontend.absent_for("YOLO", 1)
         frontend.wait("个项目")
         frontend.send(b"q")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         print("PASS: 导航 Ctrl-W f 跳主控并清除未读，无卡片时不跳转", flush=True)
@@ -621,7 +644,7 @@ supports_websockets = false
         failed_record = next(m for m in state()["messages"] if m["id"] == failed)
         assert failed_record["status"] == "queued" and failed_record["error"]
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         print("PASS: 失效子任务明确报错，主控仍可连接和投递，不重发异常消息", flush=True)

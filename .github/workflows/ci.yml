@@ -154,6 +154,7 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2
         with:
           enable-cache: false
+          python-version: '3.11'
       - uses: actions/setup-node@v7.1.0
         with:
           node-version: '22'
@@ -164,7 +165,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y git curl build-essential libevent-dev libncurses-dev bison pkg-config
+          sudo apt-get install -y git curl bubblewrap build-essential libevent-dev libncurses-dev bison pkg-config
       - name: 构建并安装 tmux 3.8
         if: runner.os == 'Linux'
         run: |
@@ -195,6 +196,8 @@ jobs:
         id: agent_check
         shell: bash
         timeout-minutes: 5
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: uv run examples/check_agent.py 2>&1 | tee "$RUNNER_TEMP/agent-check.log"
       - name: 保存失败验收日志
         if: failure() && steps.agent_check.outcome == 'failure'

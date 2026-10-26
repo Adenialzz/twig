@@ -16,7 +16,7 @@
 
 已运行：完整 Rust 测试；Codex 0.164.0 独立 app-server、固定本地模型与模拟飞书的 Agent 验收；Control Mode 的 Vim/Zsh PTY 验收。系统服务样例和更新后的用户手册见 [后台指南](docs/daemon.md)。平台 CI 结果以当前 PR 提交为准；本机测试不代表生产飞书、真实 SSH 或 macOS 的人工验证。
 
-CI 新增独立 Agent 验收矩阵（Linux/macOS）：固定 Codex 0.164.0，构建正式 binary 后运行 check_agent.py，失败日志保留 7 天；不使用真实用户服务或凭证。各平台实际结果以本 PR 检查页为准。
+CI 新增独立 Agent 验收矩阵（Linux/macOS）：固定 Python 3.11 与 Codex 0.164.0，构建正式 binary 后运行 check_agent.py，失败日志保留 7 天；不使用真实用户服务或凭证。各平台实际结果以本 PR 检查页为准。跨平台验收同时修复了 BSD 接入连接继承非阻塞标记的问题；PTY 验收退出期间持续读取输出，并等待完整页面切换后再断言快捷键行为。
 
 下文保留历次设计演变和交接证据，其中“无 Twig 后台”“进程内采集”等描述属于旧阶段；发生冲突以本节、DAEMON_DESIGN 与当前用户手册为准，历史候选不自动成为待办。开始新工作仍须重新检查代码、工作区和测试。
 
