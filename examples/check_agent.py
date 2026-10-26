@@ -78,6 +78,12 @@ class Frontend:
     def send(self, data):
         os.write(self.master, data)
 
+    def drain(self):
+        if select.select([self.master], [], [], 0.05)[0]:
+            data = os.read(self.master, 65536)
+            self.output.extend(data)
+            self.stream.feed(data)
+
     def copied(self):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -608,6 +614,7 @@ supports_websockets = false
         frontend.wait(navigation_reply, history=True)
         # “消息送达”和“轮次完成”是两个事件；两者采集并清除后才具备“无卡片”前提。
         def navigation_read():
+            frontend.drain()
             message = next(m for m in state()["messages"] if m["text"] == "navigation-follow hold-controller")
             if not message.get("turn"):
                 return False
@@ -729,6 +736,9 @@ supports_websockets = false
         print("PASS: 飞书最近一轮补齐、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
 
     except BaseException:
+        notifications = root / "notifications.json"
+        if notifications.exists():
+            print(notifications.read_text(), file=sys.stderr)
         twig_log.flush()
         twig_log.seek(0)
         print(twig_log.read()[-8000:], file=sys.stderr)
