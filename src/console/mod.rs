@@ -678,7 +678,7 @@ fn open_chat(
     worker: &Worker,
 ) -> Result<bool> {
     worker.chat.lock().unwrap().set_viewing(true)?;
-    let result = crate::agent::chat::run(terminal, registry.to_owned(), draft);
+    let result = crate::agent::chat::run(terminal, registry.to_owned(), draft, &worker.inbox);
     worker.chat.lock().unwrap().set_viewing(false)?;
     result
 }

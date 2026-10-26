@@ -362,6 +362,7 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     registry: PathBuf,
     draft: &mut Draft,
+    inbox: &crate::console::inbox::Inbox,
 ) -> Result<bool> {
     execute!(std::io::stdout(), EnableBracketedPaste)?;
     let mut runtime = draft
@@ -369,7 +370,7 @@ pub fn run(
         .take()
         .unwrap_or_else(|| Runtime::start(registry));
     runtime.tx.send(Command::Viewing(true))?;
-    let result = run_ui(terminal, &mut runtime, draft);
+    let result = run_ui(terminal, &mut runtime, draft, inbox);
     let _ = runtime.tx.send(Command::Viewing(false));
     draft.runtime = Some(runtime);
     execute!(std::io::stdout(), DisableBracketedPaste)?;
@@ -381,6 +382,7 @@ fn run_ui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     runtime: &mut Runtime,
     draft: &mut Draft,
+    inbox: &crate::console::inbox::Inbox,
 ) -> Result<bool> {
     let Runtime {
         tx, updates, view, ..
@@ -392,6 +394,9 @@ fn run_ui(
     let mut areas = view::Areas::default();
     let mut copy_notice = None;
     loop {
+        // 进入页面之后才同步到缓存的事件也要确认；只清除 UI 已观察到的水位。
+        inbox.load()?;
+        inbox.read_controller()?;
         let (update, rejected) = {
             let mut updates = updates.lock().unwrap();
             (updates.latest.take(), std::mem::take(&mut updates.rejected))

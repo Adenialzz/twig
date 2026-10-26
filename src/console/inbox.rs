@@ -75,6 +75,26 @@ mod tests {
     }
 
     #[test]
+    fn controller_view_acknowledges_late_events_without_clearing_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let inbox = Inbox::remote(&temp.path().join("config.toml"), "client".into()).unwrap();
+        let remote = inbox.remote.as_ref().unwrap();
+        remote.cache.lock().unwrap().target = serde_json::json!("controller");
+        inbox.load().unwrap();
+        inbox.read_controller().unwrap();
+        // 进入 Agent 后才拉到完成事件；只在进入时清除会漏掉它。
+        remote.cache.lock().unwrap().state.unread = vec![event("late", false), event("task", true)];
+        inbox.read_controller().unwrap();
+        assert!(remote.cache.lock().unwrap().read.is_empty());
+        inbox.load().unwrap();
+        inbox.read_controller().unwrap();
+        let cache = remote.cache.lock().unwrap();
+        assert_eq!(cache.read, HashSet::from(["late".into()]));
+        assert_eq!(cache.state.unread.len(), 1);
+        assert_eq!(cache.state.unread[0].id, "task");
+    }
+
+    #[test]
     fn restart_preserves_unread_and_read_receipts_without_replaying_cards() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("config.toml");
