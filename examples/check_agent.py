@@ -9,6 +9,7 @@
 """
 import base64
 import errno
+import faulthandler
 import re
 import fcntl
 import http.server
@@ -756,5 +757,8 @@ supports_websockets = false
 
 
 if __name__ == "__main__":
+    # CI 的外层超时会直接取消进程；提前输出线程栈，保留阻塞位置供诊断。
+    faulthandler.dump_traceback_later(180, repeat=True)
     with tempfile.TemporaryDirectory(prefix="twig-agent-check-") as directory:
         check(Path(directory))
+    faulthandler.cancel_dump_traceback_later()
