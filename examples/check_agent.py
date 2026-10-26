@@ -31,7 +31,7 @@ import time
 
 import pyte
 sys.dont_write_bytecode = True
-from check_controller import Client, Model as ProbeModel, wait_for
+from check_controller import Client, Model as ProbeModel, wait_for as wait_until
 from feishu_mock import Feishu
 
 
@@ -260,6 +260,14 @@ supports_websockets = false
 
     server = start_server()
     frontend = None
+
+    def wait_for(predicate, description):
+        def ready():
+            if frontend:
+                frontend.drain()
+            return predicate()
+        wait_until(ready, description)
+
     twig_log = (root / "twig-daemon.log").open("w+")
     twig_daemon = subprocess.Popen(
         [str(binary), "--config", str(config), "daemon", "run", "--detached"], cwd=cwd, env=env,
@@ -335,13 +343,14 @@ supports_websockets = false
             frontend.wait("hold-controller", timeout=1, history=True)
             assert not any(m["text"] == "hold-controller" for m in state()["messages"])
             fcntl.flock(lock, fcntl.LOCK_UN)
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
         frontend.send(b"\t")
         frontend.wait("个项目")
         model.release["controller"].set()
         frontend.wait("主控有新消息")
         frontend.wait("Agent*")
-        time.sleep(8.5)
+        card_expires = time.monotonic() + 8.5
+        wait_for(lambda: time.monotonic() >= card_expires, "通知卡片等待未完成")
         frontend.wait("Tab 切换标签")
         frontend.absent_for("主控有新消息", 1)
         frontend.send(b"\x17f")
@@ -424,9 +433,9 @@ supports_websockets = false
         assert "已存在" in twig("new", "demo", "--no-fetch", "test", "--agent", "--no-open", success=False)
         first = twig("agent", "send", "--from-project", "demo", "--from-task", "test", "--message", "hold-controller").strip()
         assert next(m for m in state()["messages"] if m["id"] == first)["source"] == {"kind": "task", "project": "demo", "task": "test"}
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
         twig("agent", "send", "--project", "demo", "--task", "test", "--message", "hold-worker")
-        assert model.entered["worker"].wait(10)
+        wait_for(model.entered["worker"].is_set, "子任务未收到请求")
         assert "会话仍活动" in twig("rm", "demo", "test", "--delete-ignored", "-y", success=False)
         model.release["worker"].set()
         wait_for(lambda: any(m["status"] == "queued" and m["thread"] == main["thread"] for m in state()["messages"]), "完成反馈未排队")
@@ -464,7 +473,7 @@ supports_websockets = false
         model.entered["controller"].clear()
         model.release["controller"].clear()
         frontend.send(b"chat-test hold-controller\r")
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
         frontend.send(b"\t")
         frontend.wait("个项目")
         frontend.send(b"2\r")
@@ -510,7 +519,7 @@ supports_websockets = false
         model.entered["worker"].clear()
         model.release["worker"].clear()
         twig("agent", "send", "--project", "demo", "--task", "test", "--message", "hold-worker")
-        assert model.entered["worker"].wait(10)
+        wait_for(model.entered["worker"].is_set, "子任务未收到请求")
         queued = twig("agent", "send", "--project", "demo", "--task", "test", "--message", "queued-before-stop").strip()
         twig("stop", "demo", "test", "-y")
         assert next(m for m in state()["messages"] if m["id"] == queued)["status"] == "cancelled"
@@ -619,7 +628,7 @@ supports_websockets = false
         model.entered["controller"].clear()
         model.release["controller"].clear()
         frontend.send(b"navigation-follow hold-controller\r")
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
         navigation_reply = f"probe complete {model.count + 1}"
         frontend.send(b"\t")
         frontend.wait("个项目")
@@ -630,7 +639,6 @@ supports_websockets = false
         frontend.wait(navigation_reply, history=True)
         # “消息送达”和“轮次完成”是两个事件；两者采集并清除后才具备“无卡片”前提。
         def navigation_read():
-            frontend.drain()
             message = next(m for m in state()["messages"] if m["text"] == "navigation-follow hold-controller")
             if not message.get("turn"):
                 return False
@@ -752,6 +760,8 @@ supports_websockets = false
         print("PASS: 飞书最近一轮补齐、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
 
     except BaseException:
+        if frontend:
+            print(frontend.output[-8000:].decode(errors="replace"), file=sys.stderr)
         notifications = root / "notifications.json"
         if notifications.exists():
             print(notifications.read_text(), file=sys.stderr)
