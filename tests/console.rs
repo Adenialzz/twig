@@ -549,8 +549,11 @@ fn navigation_batches_worktree_and_window_queries() {
             "#!/bin/sh\nprintf 'tmux %s\\n' \"$*\" >> \"$TWIG_QUERY_LOG\"\nexec \"$TWIG_REAL_TMUX\" -L \"$TWIG_TEST_SOCKET\" -f /dev/null \"$@\"\n",
         ),
     ] {
-        fs::write(f.bin.join(name), script).unwrap();
-        fs::set_permissions(f.bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        // 后台可能仍在执行旧脚本，不能原地截断可执行文件。
+        let replacement = f.bin.join(format!("{name}.new"));
+        fs::write(&replacement, script).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(replacement, f.bin.join(name)).unwrap();
     }
     let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
     f.env(&mut command);
