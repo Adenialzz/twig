@@ -103,10 +103,7 @@ class Frontend:
     def copied(self):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if select.select([self.master], [], [], 0.05)[0]:
-                data = os.read(self.master, 65536)
-                self.output.extend(data)
-                self.stream.feed(data)
+            self.drain()
             matches = re.findall(rb"\x1b\]52;c;([^\x07]+)\x07", self.output)
             if matches:
                 return base64.b64decode(matches[-1]).decode()
@@ -115,10 +112,7 @@ class Frontend:
     def wait(self, text, timeout=15, history=False, absent=False):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if select.select([self.master], [], [], 0.05)[0]:
-                data = os.read(self.master, 65536)
-                self.output.extend(data)
-                self.stream.feed(data)
+            self.drain()
             try:
                 display = self.screen.display
             except IndexError:
@@ -134,10 +128,7 @@ class Frontend:
     def absent_for(self, text, seconds=3):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            if select.select([self.master], [], [], 0.05)[0]:
-                data = os.read(self.master, 65536)
-                self.output.extend(data)
-                self.stream.feed(data)
+            self.drain()
             try:
                 display = "\n".join(self.screen.display)
             except IndexError:

@@ -240,7 +240,6 @@ fn compact_entries(
     if let Some(turns) = value["thread"]["turns"].as_array() {
         for turn in turns {
             let mut current = transcript(&json!({"thread":{"turns":[turn]}}));
-            apply_sources(&mut current, messages, thread);
             let final_id = if turn["status"] == "completed" {
                 turn["items"]
                     .as_array()
@@ -268,6 +267,14 @@ fn compact_entries(
             entries.extend(current);
         }
     }
+    apply_sources(&mut entries, messages, thread);
+    entries.retain(|entry| {
+        let visible = matches!(entry.kind, Kind::User | Kind::Unknown | Kind::Assistant);
+        if !visible {
+            latest.remove(&entry.key);
+        }
+        visible
+    });
     (entries, latest)
 }
 

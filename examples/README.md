@@ -68,3 +68,5 @@ CI 在 Ubuntu 24.04（tmux 3.8）和 macOS Tahoe 26（Homebrew tmux）上执行�
 主控验收还覆盖后台回复的浮动提醒与 Chat 未读、工作台提醒、卡片到期保留未读、进入 Chat 清除和不重复提醒。
 
 后台系统托管示例见 [services/twig.service](services/twig.service) 与 [services/com.twig.daemon.plist](services/com.twig.daemon.plist)，安装步骤见 [后台指南](../docs/daemon.md)。Agent 验收同时启动隔离 Twig 后台；`feishu_mock.py` 提供本机应用机器人 HTTP/WebSocket，验证全部 UI 退出后的双向收发及重启去重，不使用真实凭证。
+
+Agent CI 在 Ubuntu 24.04 与 macOS 26 上固定 Python 3.11、Codex 0.164.0，构建正式二进制后执行上述脚本。验收步骤限时 5 分钟，失败日志保留 7 天；长输入、后台等待和退出期间持续读取 PTY，超时前输出线程栈。
