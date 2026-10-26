@@ -218,7 +218,7 @@ supports_websockets = false
     frontend = None
     twig_log = (root / "twig-daemon.log").open("w+")
     twig_daemon = subprocess.Popen(
-        [str(binary), "--config", str(config), "daemon", "run"], cwd=cwd, env=env,
+        [str(binary), "--config", str(config), "daemon", "run", "--detached"], cwd=cwd, env=env,
         stdin=subprocess.DEVNULL, stdout=twig_log, stderr=twig_log,
     )
     try:
@@ -679,16 +679,18 @@ supports_websockets = false
         assert "\nhold-worker\n" not in synced_text()
         assert "\nnew-instance\n" not in synced_text()
         replies_before_restart = list(model.feishu.replies)
-        twig_daemon.terminate()
-        twig_daemon.wait(timeout=30)
-        twig_daemon = subprocess.Popen([str(binary), "--config", str(config), "daemon", "run"], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=twig_log, stderr=twig_log)
-        wait_for(lambda: '"instance"' in twig("daemon", "status"), "Twig 重启未就绪")
+        previous_instance = json.loads(twig("daemon", "status"))["instance"]
+        twig("daemon", "restart")
+        restarted = json.loads(twig("daemon", "status"))
+        assert restarted["instance"] != previous_instance
+        assert restarted["pid"] == twig_daemon.pid
+        assert restarted["feishu"]["enabled"]
         model.feishu.event("om_offline")
         wait_for(lambda: len(model.feishu.acks) >= 5, "重连事件未确认")
         time.sleep(3)
         assert len([m for m in state()["messages"] if m["text"] == "offline-feishu-request"]) == 1
         assert model.feishu.replies == replies_before_restart
-        print("PASS: 飞书最近一轮补齐、跨入口输入与最终回复、子任务回报过滤及重启去重", flush=True)
+        print("PASS: 飞书最近一轮补齐、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
 
     except BaseException:
         twig_log.flush()

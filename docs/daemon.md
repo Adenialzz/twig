@@ -8,6 +8,7 @@ Twig 后台统一执行项目登记、任务生命周期、Agent 消息和飞书
 
 ```sh
 twig daemon start           # 显式后台启动，等待就绪
+twig daemon restart         # 手动后台保留原环境，有序重启并等待新版就绪
 twig daemon status          # JSON：实例、采集时间/错误、客户端、队列、飞书
 twig daemon stop            # 有序退出，保留任务和 Codex 进程
 twig daemon run             # 前台运行，供调试或系统服务托管
@@ -15,7 +16,7 @@ twig daemon run             # 前台运行，供调试或系统服务托管
 
 首次使用先启动后台，再执行 `add/new` 或打开 Console。普通任务不需要 Codex；主控需要用户另行启动已有 Codex daemon。Twig 从不启动、重启或停止共享 Codex 服务。
 
-后台使用启动时的 PATH、SHELL、CODEX_HOME 和飞书环境变量；客户端的新 `export` 不会改变它。更新环境后有序停止并重新启动 Twig 后台。业务命令不将客户端环境通过 RPC 传入；`add` 的相对路径由客户端解析。
+后台使用启动时的 PATH、SHELL、CODEX_HOME 和飞书环境变量；客户端的新 `export` 不会改变它。`daemon restart` 保留这些原环境变量，不读取 `.env` 或采用调用者的新 export。需要更新环境时，仍须有序 stop、等待退出、加载新环境后 start；托管实例修改服务配置后由服务管理器重启。业务命令不将客户端环境通过 RPC 传入；`add` 的相对路径由客户端解析。
 
 `status` 中的 `collection` 展示登记、Codex 与任务采集的年龄和错误；`agent_queue` 为投递状态计数，`operations` 为排队数量和运行/待核对阶段；`feishu` 展示连接、待处理请求、未知回复数和按消息 ID 记录的错误；`history_pending` 是待发主控历史分段，`history_error` 为历史采集错误，`history_errors` 为各单聊同步错误；`worker_errors` 记录飞书接收/发送线程的异常退出，接收线程异常也会将 connected 置为 false 并设置 error。未启用 Codex 时其采集失败不影响普通任务管理。
 
@@ -82,7 +83,18 @@ launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.twig.daemon.plist
 
 手动 `start` 的启动诊断在运行目录 `daemon.log`，达到 1 MiB 后下次启动保留一份 `.1`。运行连接/操作故障写 `events.log`，达到 1 MiB 时保留一份 `.1`。系统托管的启动错误由服务管理器接收。普通诊断不记录消息正文或密钥；`operations.json`、Agent runtime 和 飞书接收/历史同步记录是受限业务数据，可能含用户消息，不能当作脱敏日志公开。
 
-升级步骤：
+日常源码更新，已通过 `daemon start` 启动且支持 restart 的后台只需：
+
+```sh
+make install-restart
+# 使用其他配置：make install-restart CONFIG="$HOME/.twig/work.toml"
+```
+
+`twig daemon restart` 向旧后台提交一次重启请求。旧后台处理完已接受的操作、停止并回收工作线程、释放 socket 与实例锁，再以调用命令所在的新版可执行文件替换自身，保留 PID、原环境和日志输出；新实例 ID 确认就绪后才报告成功。会话、消息队列、未读、任务与共享 Codex 服务保留。请求确认丢失时只按这次实例 ID 核对，不重发重启命令。等待约 30 秒仍未确认时，显示 status 与日志位置；不会强杀正在执行的操作，也不会自动再启动一个实例。安装/启动失败不删除状态或任务。
+
+未运行时 restart 不隐式启动，以免丢失原凭证；先从所需环境 start。前台 `daemon run` 和系统托管实例拒绝该命令，使用原启动方式、systemd 或 launchd 完成重启。首次安装此功能时，运行中的旧后台无法继承新能力，需要从原环境 stop/start 一次。普通 `make install` 仍只安装；修改环境变量不使用保留旧环境的 restart。
+
+涉及协议不兼容、首次升级或回退时，完整切换步骤：
 
 1. 退出旧 Console/CLI，停止 Twig 后台或托管服务，等待退出。保留 tmux 与 Codex 服务，不并行运行新旧写入者。
 2. 备份配置目录中的登记、projects、controller、notifications 与 daemon 记录；不要删除旧投递记录来消除报错。

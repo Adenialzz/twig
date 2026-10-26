@@ -112,6 +112,12 @@ fn lifecycle_singleton_and_config_isolation() {
 }
 
 fn rpc(daemon: &Daemon, method: &str, params: serde_json::Value) -> serde_json::Value {
+    let reply = rpc_response(daemon, method, params);
+    assert!(reply["error"].is_null(), "{reply}");
+    reply["result"].clone()
+}
+
+fn rpc_response(daemon: &Daemon, method: &str, params: serde_json::Value) -> serde_json::Value {
     use std::io::{BufRead, BufReader, Write};
     let status = daemon
         .command()
@@ -132,9 +138,7 @@ fn rpc(daemon: &Daemon, method: &str, params: serde_json::Value) -> serde_json::
     .unwrap();
     let mut line = String::new();
     BufReader::new(socket).read_line(&mut line).unwrap();
-    let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
-    assert!(reply["error"].is_null(), "{reply}");
-    reply["result"].clone()
+    serde_json::from_str(&line).unwrap()
 }
 #[test]
 fn two_clients_share_unread_and_refresh_snapshots_across_instances() {
@@ -229,4 +233,168 @@ fn management_protocol_stays_stable_while_business_versions_are_rejected() {
         assert!(Instant::now() < deadline, "管理协议 stop 未生效");
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn restart_refuses_foreground_and_missing_daemons_without_starting_another() {
+    let daemon = Daemon::start();
+    let before = daemon
+        .command()
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let before: serde_json::Value = serde_json::from_slice(&before.stdout).unwrap();
+    let result = daemon
+        .command()
+        .args(["daemon", "restart"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("服务管理器"));
+    let after = daemon
+        .command()
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&after.stdout).unwrap();
+    assert_eq!(before["instance"], after["instance"]);
+    assert_eq!(after["stopping"], false);
+    let absent = daemon.temp.path().join("absent/config.toml");
+    let result = Command::new(env!("CARGO_BIN_EXE_twig"))
+        .arg("--config")
+        .arg(&absent)
+        .args(["daemon", "restart"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!absent.parent().unwrap().exists());
+}
+
+#[test]
+fn restart_loads_installed_executable_and_preserves_original_environment_and_state() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let temp = tempfile::tempdir().unwrap();
+    let bin = temp.path().join("original bin");
+    fs::create_dir(&bin).unwrap();
+    let capture = temp.path().join("environment");
+    fs::write(bin.join("codex"), "#!/bin/sh\nprintf '%s\\n' \"$PATH\" \"$SHELL\" \"$CODEX_HOME\" \"$TWIG_FEISHU_WEBHOOK_URL\" > \"$TWIG_TEST_CAPTURE\"\nprintf '%s\\n' '{\"status\":\"stopped\"}'\n").unwrap();
+    fs::set_permissions(bin.join("codex"), fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = temp.path().join("installed twig");
+    fs::copy(env!("CARGO_BIN_EXE_twig"), &executable).unwrap();
+    let child = Command::new(&executable)
+        .arg("--config")
+        .arg(temp.path().join("config.toml"))
+        .args(["daemon", "run", "--detached"])
+        .env("PATH", &bin)
+        .env("SHELL", "/original/shell")
+        .env("CODEX_HOME", temp.path().join("original-codex"))
+        .env("TWIG_FEISHU_WEBHOOK_URL", "test-secret-not-real")
+        .env_remove("TWIG_FEISHU_APP_ID")
+        .env_remove("TWIG_FEISHU_APP_SECRET")
+        .env_remove("TWIG_FEISHU_ALLOWED_USERS")
+        .env("TWIG_TEST_CAPTURE", &capture)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut daemon = Daemon { temp, child };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let before: serde_json::Value = loop {
+        let out = daemon
+            .command()
+            .args(["daemon", "status"])
+            .output()
+            .unwrap();
+        if let Ok(value) = serde_json::from_slice(&out.stdout) {
+            break value;
+        }
+        assert!(daemon.child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(20));
+    };
+    // 拒绝过期实例或不可执行目标时，原后台必须继续运行。
+    for (previous, target) in [
+        (serde_json::json!("stale-instance"), executable.clone()),
+        (
+            before["instance"].clone(),
+            daemon.temp.path().join("missing-binary"),
+        ),
+    ] {
+        let refused = rpc_response(
+            &daemon,
+            "restart",
+            serde_json::json!({
+                "previous":previous,"id":"invalid-restart","executable":target
+            }),
+        );
+        assert!(refused["error"].is_string());
+        let status = daemon
+            .command()
+            .args(["daemon", "status"])
+            .output()
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(status["instance"], before["instance"]);
+        assert_eq!(status["stopping"], false);
+    }
+    // 模拟 cargo install 原子替换正在运行的可执行文件；新版由调用者路径指定。
+    let replacement = daemon.temp.path().join("replacement");
+    fs::copy(env!("CARGO_BIN_EXE_twig"), &replacement).unwrap();
+    fs::rename(&replacement, &executable).unwrap();
+    fs::write(daemon.temp.path().join("config.toml"), "[projects]\n").unwrap();
+    let original_config = fs::read(daemon.temp.path().join("config.toml")).unwrap();
+    let output = Command::new(&executable)
+        .arg("--config")
+        .arg(daemon.temp.path().join("config.toml"))
+        .args(["daemon", "restart"])
+        .env("PATH", "")
+        .env("SHELL", "/wrong/shell")
+        .env("CODEX_HOME", "/wrong/home")
+        .env_remove("TWIG_FEISHU_WEBHOOK_URL")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("test-secret"));
+    let status = daemon
+        .command()
+        .args(["daemon", "status"])
+        .output()
+        .unwrap();
+    let after: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_ne!(before["instance"], after["instance"]);
+    assert_eq!(
+        before["pid"], after["pid"],
+        "应 exec 新版本并保持原进程归属"
+    );
+    assert_eq!(after["detached"], true);
+    assert_eq!(
+        fs::read(daemon.temp.path().join("config.toml")).unwrap(),
+        original_config
+    );
+    let _ = fs::remove_file(&capture);
+    let _ = daemon.command().args(["agent", "init"]).output().unwrap();
+    let values = fs::read_to_string(&capture).unwrap();
+    assert_eq!(
+        values.lines().collect::<Vec<_>>(),
+        vec![
+            bin.to_str().unwrap(),
+            "/original/shell",
+            daemon.temp.path().join("original-codex").to_str().unwrap(),
+            "test-secret-not-real"
+        ]
+    );
+    // 同一入口可连续重启，不会因上次 restart-id 或旧环境丢失而失败。
+    assert!(
+        daemon
+            .command()
+            .args(["daemon", "restart"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
 }

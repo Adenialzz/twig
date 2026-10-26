@@ -51,9 +51,16 @@ pub struct Cli {
 #[derive(Subcommand, Clone)]
 pub enum Action {
     /// 前台运行 Twig 后台；供 systemd/launchd 托管
-    Run,
+    Run {
+        #[arg(long, hide = true)]
+        detached: bool,
+        #[arg(long, hide = true, requires = "detached")]
+        restart_id: Option<String>,
+    },
     /// 显式后台启动并等待就绪；不启动 Codex daemon
     Start,
+    /// 有序重启手动启动的后台，保留原环境；托管实例请使用服务管理器
+    Restart,
     /// 查询 Twig 后台健康状态；不启动服务
     Status,
     /// 有序停止 Twig 后台；保留任务和 Codex 进程
@@ -217,10 +224,10 @@ pub fn call<T: DeserializeOwned>(registry: &Path, method: &str, params: Value) -
         if method == "status" || status.error.is_some() {
             status
         } else {
-            let response = exchange(registry, "stop", Value::Null, status.version)?;
+            let response = exchange(registry, method, params, status.version)?;
             ensure!(
                 response.version == status.version,
-                "Twig 后台协议在停止期间变化，请核对 daemon status"
+                "Twig 后台协议在管理请求期间变化，请核对 daemon status"
             );
             response
         }
@@ -241,13 +248,28 @@ pub fn call<T: DeserializeOwned>(registry: &Path, method: &str, params: Value) -
 }
 
 fn control_method(method: &str) -> bool {
-    matches!(method, "status" | "stop")
+    matches!(method, "status" | "stop" | "restart")
 }
 
 pub fn execute(registry: &Path, action: Action) -> Result<()> {
     match action {
-        Action::Run => run(registry),
+        Action::Run {
+            detached,
+            restart_id,
+        } => {
+            // run 返回前所有工作线程、socket 和实例锁均已释放，之后才替换进程。
+            if let Some(plan) = run(registry, detached, restart_id)? {
+                let error = Command::new(&plan.executable)
+                    .arg("--config")
+                    .arg(Paths::new(registry)?.registry)
+                    .args(["daemon", "run", "--detached", "--restart-id", &plan.id])
+                    .exec();
+                return Err(error).context("新版 Twig 启动失败；原任务保留，请查看 daemon.log");
+            }
+            Ok(())
+        }
         Action::Start => start(registry),
+        Action::Restart => restart(registry),
         Action::Status => {
             let paths = Paths::new(registry)?;
             if !paths.socket.try_exists()? {
@@ -291,7 +313,7 @@ fn start(registry: &Path) -> Result<()> {
     command
         .arg("--config")
         .arg(&paths.registry)
-        .args(["daemon", "run"])
+        .args(["daemon", "run", "--detached"])
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
@@ -326,7 +348,77 @@ fn start(registry: &Path) -> Result<()> {
     }
 }
 
-fn run(registry: &Path) -> Result<()> {
+#[derive(Serialize, Deserialize)]
+struct RestartPlan {
+    executable: PathBuf,
+    id: String,
+    previous: String,
+}
+
+fn restart(registry: &Path) -> Result<()> {
+    let status: Value = call(registry, "status", Value::Null)?;
+    ensure!(
+        status["restart_supported"] == true,
+        "当前后台尚不支持保留环境重启；首次升级须从原环境执行 daemon stop/start，之后可使用 daemon restart"
+    );
+    ensure!(
+        status["detached"] == true,
+        "当前后台由 daemon run 前台运行或系统服务托管；请通过原启动方式或服务管理器重启（systemctl --user restart twig.service / launchd），不会另起后台"
+    );
+    ensure!(
+        status["stopping"] == false,
+        "后台已在退出，请先核对 daemon status，不重复发起重启"
+    );
+    let plan = RestartPlan {
+        executable: std::env::current_exe()?.canonicalize()?,
+        id: crate::agent::message_id(),
+        previous: status["instance"]
+            .as_str()
+            .context("后台缺少实例 ID")?
+            .into(),
+    };
+    // 只发送一次；即使确认响应丢失，也只按本次实例 ID 查询结果，不重发。
+    let accepted = exchange(
+        registry,
+        "restart",
+        serde_json::to_value(&plan)?,
+        CONTROL_VERSION,
+    );
+    if let Ok(response) = &accepted {
+        ensure!(
+            response.version == CONTROL_VERSION,
+            "重启管理协议不兼容，请核对 daemon status"
+        );
+        if let Some(error) = &response.error {
+            bail!("{error}");
+        }
+    }
+    let log_path = Paths::new(registry)?.dir.join("daemon.log");
+    println!("正在有序重启 Twig 后台，保留原环境与任务进程…");
+    wait_restart(registry, &plan.id, Duration::from_secs(30)).with_context(|| {
+        let response = accepted.err().map(|e| format!("；请求确认失败：{e:#}")).unwrap_or_default();
+        format!("重启尚未确认完成{response}；请查看 daemon status 和 {}，不要重复发起重启；未强制终止任何任务", log_path.display())
+    })?;
+    println!("Twig 后台已重启并就绪，原环境变量保留");
+    Ok(())
+}
+
+fn wait_restart(registry: &Path, id: &str, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(status) = call::<Value>(registry, "status", Value::Null)
+            && status["instance"] == id
+            && status["version"] == VERSION
+            && status["stopping"] == false
+        {
+            return Ok(());
+        }
+        ensure!(Instant::now() < deadline, "等待新版后台就绪超时");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Option<RestartPlan>> {
     let paths = Paths::new(registry)?;
     let _instance = Instance::acquire(&paths)?;
     log::init(paths.dir.join("events.log"));
@@ -369,7 +461,8 @@ fn run(registry: &Path) -> Result<()> {
     };
     let feishu = feishu::Runtime::start(&paths.registry, &paths.dir)?;
     let started = Instant::now();
-    let instance = crate::agent::message_id();
+    let instance = restart_id.unwrap_or_else(crate::agent::message_id);
+    let restart_plan = Mutex::new(None::<RestartPlan>);
     let (tx, rx) = mpsc::sync_channel::<UnixStream>(32);
     let input = Arc::new(Mutex::new(rx));
     let result = thread::scope(|scope| -> Result<()> {
@@ -377,6 +470,7 @@ fn run(registry: &Path) -> Result<()> {
             let input = input.clone();
             let stopping = stopping.clone();
             let instance = &instance;
+            let restart_plan = &restart_plan;
             let paths = &paths;
             let operations = &operations;
             let state = &state;
@@ -395,8 +489,23 @@ fn run(registry: &Path) -> Result<()> {
                         let result = (|| -> Result<Value> {
                             ensure!(request.version == VERSION || (control_method(&request.method) && request.version == CONTROL_VERSION), "Twig 后台协议不兼容，请统一更新并重启");
                             match request.method.as_str() {
-                                "status" => Ok(json!({"instance":instance,"version":VERSION,"pid":std::process::id(),"uptime_seconds":started.elapsed().as_secs(),"config":paths.registry,"socket":paths.socket,"stopping":stopping.load(Ordering::Relaxed),"agent_error":*agent_error.lock().unwrap(),"agent_queue":agent_queue(&paths.registry),"collection":state.lock().unwrap().health(),"operations":operations.health(),"feishu":*feishu.lock().unwrap()})),
-                                "stop" => { stopping.store(true, Ordering::Relaxed); Ok(json!({"stopping":true})) },
+                                "status" => Ok(json!({"instance":instance,"version":VERSION,"restart_supported":true,"detached":detached,"pid":std::process::id(),"uptime_seconds":started.elapsed().as_secs(),"config":paths.registry,"socket":paths.socket,"stopping":stopping.load(Ordering::Relaxed),"agent_error":*agent_error.lock().unwrap(),"agent_queue":agent_queue(&paths.registry),"collection":state.lock().unwrap().health(),"operations":operations.health(),"feishu":*feishu.lock().unwrap()})),
+                                "stop" => {
+                                    *restart_plan.lock().unwrap() = None;
+                                    stopping.store(true, Ordering::Relaxed);
+                                    Ok(json!({"stopping":true}))
+                                },
+                                "restart" => {
+                                    ensure!(detached, "前台或托管后台请通过原启动方式或服务管理器重启");
+                                    let plan: RestartPlan = serde_json::from_value(request.params)?;
+                                    let mut pending = restart_plan.lock().unwrap();
+                                    ensure!(!stopping.load(Ordering::Relaxed) && plan.previous == *instance, "后台实例已变化或正在退出，请核对 daemon status");
+                                    ensure!(plan.executable.is_absolute() && plan.executable.is_file() && fs::metadata(&plan.executable)?.permissions().mode() & 0o111 != 0, "新版 Twig 可执行文件不存在或不可执行");
+                                    let result = json!({"restarting":true,"instance":plan.id});
+                                    *pending = Some(plan);
+                                    stopping.store(true, Ordering::Relaxed);
+                                    Ok(result)
+                                },
                                 method if method.starts_with("form.") => queries::handle(&paths.registry,method,request.params),
                                 "details" => {
                                     let snapshot=state.lock().unwrap().snapshot();
@@ -458,7 +567,8 @@ fn run(registry: &Path) -> Result<()> {
     operation_worker
         .join()
         .map_err(|_| anyhow::anyhow!("操作执行线程异常退出"))?;
-    result
+    result?;
+    Ok(restart_plan.into_inner().unwrap())
 }
 
 fn agent_queue(registry: &Path) -> Value {
@@ -585,6 +695,88 @@ mod tests {
         });
         assert!(call::<Value>(&registry, "stop", Value::Null).is_err());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn restart_reconciles_lost_ack_and_rejects_unsupported_or_refused_requests() {
+        for mode in ["lost", "refused", "unsupported"] {
+            let temp = tempfile::tempdir().unwrap();
+            let registry = temp.path().join("config.toml");
+            let paths = Paths::new(&registry).unwrap();
+            let _instance = Instance::acquire(&paths).unwrap();
+            let listener = UnixListener::bind(&paths.socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let server = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut methods = Vec::new();
+                let mut id = "before".to_owned();
+                loop {
+                    let mut stream = match listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "restart 模拟服务等待超时");
+                            thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(e) => panic!("{e}"),
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let request: Request =
+                        read_frame(&mut BufReader::new(stream.try_clone().unwrap())).unwrap();
+                    methods.push(request.method.clone());
+                    let mut error = None;
+                    let result = match request.method.as_str() {
+                        "status" => {
+                            json!({"version":VERSION,"instance":id,"restart_supported":mode != "unsupported","detached":true,"stopping":false})
+                        }
+                        "restart" => {
+                            assert_eq!(request.params["previous"], "before");
+                            assert_eq!(
+                                request.params.as_object().unwrap().len(),
+                                3,
+                                "请求不能携带后台凭证或环境"
+                            );
+                            id = request.params["id"].as_str().unwrap().into();
+                            if mode == "lost" {
+                                continue;
+                            } // 丢失确认，只允许随后查询状态。
+                            error = Some("新版文件不可执行".to_owned());
+                            Value::Null
+                        }
+                        other => panic!("意外请求 {other}"),
+                    };
+                    write_frame(
+                        &Response {
+                            version: CONTROL_VERSION,
+                            id: request.id,
+                            result: Some(result),
+                            error,
+                        },
+                        &mut stream,
+                    )
+                    .unwrap();
+                    if mode == "unsupported"
+                        || mode == "refused" && methods.len() == 2
+                        || mode == "lost" && methods.len() == 3
+                    {
+                        return methods;
+                    }
+                }
+            });
+            let result = restart(&registry);
+            match mode {
+                "lost" => assert!(result.is_ok(), "{result:?}"),
+                "refused" => assert!(result.unwrap_err().to_string().contains("不可执行")),
+                _ => assert!(result.unwrap_err().to_string().contains("首次升级")),
+            }
+            let methods = server.join().unwrap();
+            assert_eq!(
+                methods.iter().filter(|method| *method == "restart").count(),
+                usize::from(mode != "unsupported")
+            );
+        }
     }
 
     #[test]

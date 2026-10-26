@@ -177,7 +177,7 @@ twig daemon status
 
 系统托管负责进程生命周期，不保证休眠、断电、断网期间可用。Linux 用户服务如需注销后继续运行，应按本机策略配置 linger；macOS 用户 LaunchAgent 在登录后运行，不等于无登录常驻服务。Codex 服务也需保持可用。
 
-重新安装二进制不会替换已运行进程中的代码，需要有序重启 Twig 后台；变更 App Secret、允许用户或其他环境也需要重启。无需仅因飞书配置变化重启共享 Codex。完整升级、备份和停止顺序见后台指南。
+重新安装二进制不会替换已运行进程中的代码。手动后台日常更新可用 `make install-restart`，仅重启可用 `twig daemon restart`，保留原飞书环境，不必重新加载 `.env`。变更 App Secret、允许用户或其他环境时，须 stop 并等待退出，加载新环境再 start；restart 不会重新读取 `.env`。托管实例使用服务管理器。首次升级到支持 restart 的版本仍需从原环境 stop/start 一次。无需仅因飞书配置变化重启共享 Codex。完整升级、备份和停止顺序见后台指南。
 
 ## 故障排查
 

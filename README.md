@@ -23,6 +23,8 @@ Twig 提供两个可切换的页面：**Console** 管理项目、任务和终端
 make install
 ```
 
+已有手动启动的后台，日常更新可用 `make install-restart` 一次完成安装和保留环境重启；仅重启用 `twig daemon restart`。首次升级到支持此命令的版本需先从原环境 stop/start 一次。托管实例使用服务管理器重启，详见 [后台指南](docs/daemon.md)。
+
 确保 `~/.cargo/bin` 在 `PATH` 中。此命令安装 Twig，并将主控 skill 复制更新到 `~/.twig/controller/workspace/.agents/skills/twig-controller/`，不写入 Codex 主目录。
 
 | 可选能力 | 额外依赖 |

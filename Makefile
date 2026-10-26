@@ -1,4 +1,6 @@
-.PHONY: build install check
+.PHONY: build install install-restart check
+
+TWIG_BIN ?= $(if $(CARGO_INSTALL_ROOT),$(CARGO_INSTALL_ROOT),$(if $(CARGO_HOME),$(CARGO_HOME),$(HOME)/.cargo))/bin/twig
 
 build:
 	cargo build --release --locked
@@ -8,6 +10,9 @@ install:
 	install -d "$(HOME)/.twig/controller/workspace/.agents/skills/twig-controller"
 	install -m 644 skills/twig-controller/SKILL.md "$(HOME)/.twig/controller/workspace/.agents/skills/twig-controller/SKILL.md"
 	@printf '%s\n' '安装完成。请确保 ~/.cargo/bin 在 PATH 中。' '启用 Zsh 补全：在 ~/.zshrc 的 compinit 初始化之后加入：' 'source <(COMPLETE=zsh twig)' '已配置过补全时，重新打开终端即可。'
+
+install-restart: install
+	"$(TWIG_BIN)" $(if $(CONFIG),--config "$(CONFIG)") daemon restart
 
 check:
 	cargo fmt --check
