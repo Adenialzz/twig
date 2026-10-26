@@ -714,6 +714,14 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
     let mut p = f.terminal(false);
     p.wait_screen("主工作目录");
     order(&p, &["second", "auth", "主工作目录"]);
+    p.send(b"\r");
+    p.wait_screen("› second");
+    // 返回项目再进入时，清空任务筛选并重新选中排序第一项。
+    p.send(b"/auth\r");
+    p.wait_screen("任务 / auth");
+    p.send(b"1\r");
+    p.wait_screen("› second");
+    assert_eq!(fs::read(&f.registry).unwrap(), created);
     p.send(b"2/main\r");
     p.wait_screen("任务 / main");
     assert_eq!(fs::read(&f.registry).unwrap(), created);
@@ -751,6 +759,9 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
     let mut p = f.terminal(false);
     p.wait_screen("主工作目录");
     order(&p, &["主工作目录", "second", "auth"]);
+    // 主目录排第一时仍按列表顺序选中它。
+    p.send(b"\r");
+    p.wait_screen("› 主工作目录");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.wait_exit().success());
@@ -1602,7 +1613,7 @@ fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
     ]);
     let mut p = f.terminal(false);
     p.wait("auth");
-    p.send(b"\r\r");
+    p.send(b"\r/main\r\r");
     p.wait("无法确认归属");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");

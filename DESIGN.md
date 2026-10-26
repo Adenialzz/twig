@@ -852,3 +852,8 @@ Console 新建表单默认勾选「更新远端 base」，Tab/Shift+Tab 在三�
 只 fetch upstream 配置指向的 remote 和分支，禁止递归拉取子模块与自动标签拉取，使用 FETCH_HEAD 对应的提交作为 Worktree 起点；任务仍保存所选 base 名。任务归属、名称与路径校验在 fetch 前完成，创建意图和受管初始化在 fetch 成功后执行。
 
 验证：`cargo fmt --check`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo test --locked` 全部通过。新增覆盖指定 base 与异名 upstream、从远端提交创建且保留主目录改动、缺失 upstream/远端不可达时无任务记录、离线重试及 Console 默认勾选/取消勾选；已有分支复用仍通过不可达远端测试。所有远端使用本地临时仓库，tmux 使用独立 socket。
+
+
+## 2026-10-26：项目进入任务栏按列表顺序选择
+
+项目栏按 Enter 时清空任务筛选，并选中当前排序的第一项，不再固定选择 main；主工作目录参与原有最近使用排序，排第一时仍选中。只改变导航选择，不更新访问时间。PTY 排序测试覆盖普通任务排第一、重新进入清空筛选以及主目录排第一的情况。

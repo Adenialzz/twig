@@ -1195,12 +1195,9 @@ fn run_inner(
             KeyCode::Enter if app.focus == 0 => {
                 if app.repo().is_some() {
                     app.filters[1].clear();
-                    app.task = app.repo().and_then(|r| {
-                        r.tasks
-                            .iter()
-                            .find(|t| t.name == "main")
-                            .map(|t| t.path.clone())
-                    });
+                    app.task = app
+                        .repo()
+                        .and_then(|r| r.tasks.first().map(|t| t.path.clone()));
                     app.focus = 1;
                     app.detail = false;
                     app.scroll = 0;
