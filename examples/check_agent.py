@@ -61,7 +61,7 @@ class Frontend:
         self.master, self.slave = pty.openpty()
         os.set_blocking(self.master, False)
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
-        self.before = termios.tcgetattr(self.slave)
+        self.before = termios.tcgetattr(self.master)
         self.output = bytearray()
         self.screen = pyte.Screen(120, 32)
         self.stream = pyte.ByteStream(self.screen)
@@ -492,7 +492,7 @@ supports_websockets = false
         frontend.send(b"\x03")
         frontend.wait_exit(timeout=5)
         assert frontend.process.returncode == 0
-        assert termios.tcgetattr(frontend.slave) == frontend.before
+        assert termios.tcgetattr(frontend.master) == frontend.before
         frontend.close()
         frontend = None
         assert server.poll() is None
