@@ -176,9 +176,6 @@ struct RemoveOptions {
     delete_ignored: bool,
     #[arg(long, hide = true)]
     expected_ignored: Option<String>,
-    /// Console 已确认在删除前拉取主工作目录
-    #[arg(long, hide = true, requires = "expected_task")]
-    console_pull_main: bool,
     /// 本次合并检查的已有本地目标分支；默认项目 target
     #[arg(long, add = ArgValueCompleter::new(completion::branches))]
     target: Option<String>,
@@ -231,7 +228,6 @@ fn execute(cli: Cli) -> Result<()> {
                 !options.keep_branch
                     && !options.console_delete_branch
                     && !options.delete_ignored
-                    && !options.console_pull_main
                     && options.target.is_none()
                     && options.expected_ignored.is_none()
                     && expected_task.is_none(),
@@ -931,29 +927,6 @@ fn remove(
         ),
         yes,
     )?;
-    if options.console_pull_main {
-        ensure!(
-            git(
-                &config.main,
-                &["status", "--porcelain", "--untracked-files=all"]
-            )?
-            .is_empty(),
-            "主工作目录有未提交或未跟踪文件；未删除任务，请先保存改动或取消勾选拉取"
-        );
-        git(
-            &config.main,
-            &[
-                "-c",
-                "merge.autostash=false",
-                "-c",
-                "rebase.autoStash=false",
-                "pull",
-                "--ff-only",
-                "--no-rebase",
-            ],
-        )
-        .context("主工作目录拉取失败；未删除任务，可修复后重试或取消勾选拉取")?;
-    }
     // 确认期间可能发生外部写入；再次验证，包括 Git remove 默认不保护的 ignored 文件。
     let (present, branch_exists) = validate(false)?;
     ensure!(

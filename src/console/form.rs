@@ -64,7 +64,6 @@ pub struct Deletion {
     pub expected: String,
     pub delete_branch: bool,
     pub delete_ignored: bool,
-    pub pull_main: bool,
     pub ignored: Vec<String>,
     pub confirm: bool,
     pub option: usize,
@@ -191,7 +190,6 @@ impl Form {
                 expected,
                 delete_branch: true,
                 delete_ignored: true,
-                pull_main: true,
                 ignored,
                 confirm: false,
                 option: 0,
@@ -270,9 +268,6 @@ impl Form {
                 command.arg("--keep-branch");
             } else {
                 command.arg("--console-delete-branch");
-            }
-            if deletion.pull_main {
-                command.arg("--console-pull-main");
             }
             if deletion.delete_ignored {
                 command

@@ -36,7 +36,7 @@
 - CLI 使用顶层 add/ls/new/open/stop/rm；任务操作显式指定项目别名和任务名，不按当前目录推断。ls 不带项目列项目，带项目列任务；rm PROJECT 仅取消登记，rm PROJECT TASK 才删除任务。任务删除选项必须指定任务名。
 - 用户配置默认在 `~/.twig/config.toml`，`[projects]` 保存项目别名与路径，`[tmux]` 保存默认任务窗口启动配置；登记变更必须保留启动配置。add 同时初始化并登记已有仓库，同路径复用、别名冲突不覆盖；已有配置可补登记，冲突初始化参数拒绝。不提供 init/config/clone/--repo 或旧登记字段兼容，克隆与 remote 管理由 Git 负责。
 - 项目配置、任务状态和锁存于登记表同目录的 `projects/<仓库 ID>/`，ID 为规范化共享 Git 目录路径的稳定哈希；所有入口遵循 `--config`，不读取或迁移旧 `.git/twig/` 数据。
-- 登记与普通任务命令不联网，不隐式 fetch、pull 或 push。Console 删除弹窗经用户确认的拉取选项为例外：「主分支目录拉取远端最新」默认勾选；确认后先在项目登记的主工作目录执行 `git pull --ff-only`，使用当前分支的 upstream，不切换分支、不自动 stash。有未提交或未跟踪文件、缺少 upstream、网络失败或历史分叉时停止并保留任务；取消勾选即可仅删除。拉取成功后重新检查删除保护，再清理任务；若后续清理失败，已拉取的主目录更新不会撤销。PR/MR 交由 Codex 或用户直接使用平台 CLI 处理，Twig 不提供封装。
+- 登记与普通任务命令不联网，不隐式 fetch、pull 或 push。PR/MR 交由 Codex 或用户直接使用平台 CLI 处理，Twig 不提供封装。
 - Shell 补全必须只读，不创建配置/锁、不调用 tmux；复用 CLI 定义解析参数，不执行正在补全的命令。
 - 任务启动配置优先读取主仓库 `.twig/config.toml` 的 `[tmux]`，否则读取 `--config` 所选用户配置；整体覆盖、不合并 Pane。只创建任务窗口时执行，main 窗口不应用。配置错误直接报错，部分失败保留资源并标记，禁止重试时重复启动命令。Pane 的 mode 默认 shell，command 经参数引用后作为登录 Shell 的第一条输入；完成或 Ctrl-C 后回到提示符，Shell 退出关闭 Pane。process 模式必须提供 command，直接运行程序并按 Pane 保留退出输出/状态；允许混用，不把保留设置应用到同窗 Shell。交互测试须验证命令成功/失败、Ctrl-C 后可输入和 Ctrl-D 关闭。Console、new/open 的工作台快捷键与外观统一由 Twig 定义，不加载 tmux 状态栏或键绑定。用户配置命令的联网行为不属于 twig 隐式 Git 联网。
 - remote URL 以 Git 为准，不在 twig 登记表复制或管理。

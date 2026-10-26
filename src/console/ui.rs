@@ -812,7 +812,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         let compact = inner.height < 14;
         let rows = Layout::vertical([
             Constraint::Length(if compact { 2 } else { 4 }),
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(if compact { 2 } else { 3 }),
@@ -834,7 +834,6 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         for (i, (label, checked)) in [
             ("删除本地分支", deletion.delete_branch),
             ("同时删除被忽略文件", deletion.delete_ignored),
-            ("主分支目录拉取远端最新", deletion.pull_main),
         ]
         .iter()
         .enumerate()
@@ -886,12 +885,6 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             details.push("保留分支时跳过合并/推送检查。".into());
         } else {
             details.push("不检查合并和推送状态，未合并或未推送的本地提交也会随分支删除。".into());
-        }
-        if deletion.pull_main {
-            details.push(
-                "先在主工作目录按当前分支 upstream 拉取（仅快进）；有改动或拉取失败则保留任务。"
-                    .into(),
-            );
         }
         if !deletion.ignored.is_empty() {
             details.push(format!(

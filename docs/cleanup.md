@@ -43,8 +43,6 @@ twig rm myapp auth --delete-ignored
 
 Console 的 `/delete` 或 `dd` 提供相同清理能力，默认取消；「删除本地分支」默认勾选（取消勾选则保留分支），勾选后跳过合并和推送检查，以 `git branch -D` 删除本地分支，文件和活动进程保护仍生效，「同时删除被忽略文件」默认勾选；确认前须核对清单，详见 [Console](console.md)（`twig guide console`）。
 
-「主分支目录拉取远端最新」默认勾选；确认后先在项目登记的主工作目录执行 `git pull --ff-only`，使用当前分支的 upstream，不切换分支、不自动 stash。有未提交或未跟踪文件、缺少 upstream、网络失败或历史分叉时停止并保留任务；取消勾选即可仅删除。拉取成功后重新检查删除保护，再清理任务；若后续清理失败，已拉取的主目录更新不会撤销。
-
 清理不删除远端分支、不合并代码、不关闭 PR/MR。部分失败的处理见 [故障排查](troubleshooting.md)。
 
 ## 受管 Codex 任务
