@@ -209,6 +209,8 @@ fn management_protocol_stays_stable_while_business_versions_are_rejected() {
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
+        // 请求可能晚于 accept 到达，不能因继承非阻塞标记而提前断开。
+        thread::sleep(Duration::from_millis(100));
         writeln!(
             stream,
             "{}",

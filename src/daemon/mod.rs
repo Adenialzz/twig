@@ -483,6 +483,8 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
                     let stream = input.lock().unwrap().recv();
                     let Ok(mut stream) = stream else { break; };
                     let result = (|| -> Result<()> {
+                        // BSD 的 accept 可能继承监听器的非阻塞模式；RPC 使用阻塞读取与超时。
+                        stream.set_nonblocking(false)?;
                         stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                         stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                         let request: Request = read_frame(&mut BufReader::new(stream.try_clone()?))?;
@@ -609,6 +611,7 @@ mod tests {
                         }
                         Err(error) => panic!("{error}"),
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
@@ -720,6 +723,7 @@ mod tests {
                         }
                         Err(e) => panic!("{e}"),
                     };
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
