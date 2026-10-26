@@ -978,13 +978,19 @@ fn run_inner(
                     KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
                         deletion.confirm = !deletion.confirm
                     }
-                    KeyCode::Up | KeyCode::Char('k') => deletion.option = 0,
-                    KeyCode::Down | KeyCode::Char('j') => deletion.option = 1,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        deletion.option = deletion.option.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        deletion.option = (deletion.option + 1).min(2);
+                    }
                     KeyCode::Char(' ') => {
                         if deletion.option == 0 {
                             deletion.delete_branch = !deletion.delete_branch;
-                        } else {
+                        } else if deletion.option == 1 {
                             deletion.delete_ignored = !deletion.delete_ignored;
+                        } else {
+                            deletion.pull_main = !deletion.pull_main;
                         }
                         deletion.confirm = false;
                     }

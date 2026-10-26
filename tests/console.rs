@@ -2476,9 +2476,13 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     assert!(path.is_dir());
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
     fs::remove_file(path.join("unsaved")).unwrap();
+    p.clear_output();
+    p.send(b"\t\r");
+    p.wait("主工作目录拉取失败");
+    assert!(path.is_dir());
     // 失败后回到取消，取消勾选删除分支，再明确选择确认。
     p.clear_output();
-    p.send(b" \t\r");
+    p.send(b" jj \t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -2521,7 +2525,8 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     p.send(b"d");
     p.wait("确认删除");
-    // 默认勾选删除本地分支，确认后执行。
+    // 本场景没有 remote，关闭拉取；默认仍删除本地分支。
+    p.send(b"jj ");
     state["auth"]["branch"] = "changed".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
     p.send(b"\t\r");
@@ -2577,12 +2582,94 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     p.wait("主工作目录");
     assert!(path.join(".venv/data").exists());
     p.clear_output();
-    p.send(b"dd\t\r");
+    p.send(b"ddjj \t\r");
     p.wait("已选中 demo / main");
     assert!(!path.exists());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.wait_exit().success());
+}
+
+#[test]
+fn delete_pulls_main_before_removing_task_and_preserves_on_failure() {
+    for diverged in [false, true] {
+        let f = Fixture::new();
+        f.init();
+        let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+        let remote = f.temp.path().join("remote.git");
+        let writer = f.temp.path().join("writer");
+        f.git(&[
+            "clone",
+            "--bare",
+            f.repo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ]);
+        f.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        f.git(&["fetch", "origin"]);
+        f.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+        f.git(&["clone", remote.to_str().unwrap(), writer.to_str().unwrap()]);
+        fs::write(writer.join("latest"), "remote update").unwrap();
+        f.git(&["-C", writer.to_str().unwrap(), "add", "latest"]);
+        f.git(&[
+            "-C",
+            writer.to_str().unwrap(),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "remote update",
+        ]);
+        f.git(&["-C", writer.to_str().unwrap(), "push", "origin", "main"]);
+        if diverged {
+            f.git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "local divergence",
+            ]);
+        }
+        fs::write(f.repo.join("unsaved"), "keep main changes").unwrap();
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"\r/auth\rdd");
+        p.wait_screen("[x] 主分支目录拉取远端最新");
+        p.send(b"\t\r");
+        p.wait("主工作目录有未提交或未跟踪文件");
+        assert!(path.is_dir());
+        assert!(!f.repo.join("latest").exists());
+        fs::remove_file(f.repo.join("unsaved")).unwrap();
+        p.clear_output();
+        p.send(b"\t\r");
+        if diverged {
+            p.wait("主工作目录拉取失败");
+            assert!(path.is_dir());
+            assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
+            f.git(&["show-ref", "--verify", "refs/heads/auth"]);
+            assert!(!f.repo.join("latest").exists());
+            // 取消拉取后可继续删除，不合并主目录的分叉历史。
+            p.clear_output();
+            p.send(b"jj \t\r");
+        }
+        p.wait("已选中 demo / main");
+        assert!(!path.exists());
+        assert_eq!(f.repo.join("latest").exists(), !diverged);
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+        assert!(p.wait_exit().success());
+    }
 }
 
 #[test]
