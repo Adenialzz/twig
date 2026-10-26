@@ -35,7 +35,7 @@ twig operation resolve OPERATION_ID --yes
 
 状态为 `queued/running/succeeded/failed/needs_inspection/resolved`。`stages` 记录已经进入的阶段，最后一项不表示该阶段已完成。失败保留输出与错误；部分成功保留任务资源。提交响应丢失时按原请求 ID 查询，不能盲目重发。计划五分钟有效，执行前持锁复查资源；变化后重新确认。
 
-正常停止等待已接受操作结束，不给写操作套用浏览超时。强制退出后，未完成操作标为 `needs_inspection` 并阻止冲突操作；核对后才能解除。停止过程可能需要等待 Git、tmux 或 Agent 请求完成。操作记录和可靠投递记录不自动清理。
+正常停止等待已接受操作结束，不给写操作套用浏览超时。强制退出后，未完成操作标为 `needs_inspection` 并阻止冲突操作；核对后才能解除。停止过程可能需要等待 Git、tmux 或 Agent 请求完成。操作记录和可靠投递记录不自动清理。提交记录保存失败时操作未接受；已接受操作的进度或结果保存失败时进入 `needs_inspection`，不继续报告运行中或成功。先恢复存储、核对资源，再 resolve；解除标记保存失败会保留阻塞。
 
 ## 多窗口与断连
 

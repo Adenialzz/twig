@@ -83,6 +83,17 @@ fn save(file: &Path, records: &BTreeMap<String, Operation>) -> Result<()> {
     temp.persist(file)?;
     Ok(())
 }
+
+// 已接受的操作不能因存储故障一直显示为运行中，或把未持久化的终态当作成功。
+fn save_accepted(file: &Path, records: &mut BTreeMap<String, Operation>, id: &str) -> Result<()> {
+    if let Err(error) = save(file, records) {
+        let operation = records.get_mut(id).context("操作记录不存在")?;
+        operation.status = "needs_inspection".into();
+        operation.error = Some(format!("操作记录保存失败，请恢复存储后核对资源：{error:#}"));
+        return Err(error);
+    }
+    Ok(())
+}
 impl Service {
     pub fn start(registry: &Path, directory: &Path) -> Result<(Self, thread::JoinHandle<()>)> {
         let file = directory.join("operations.json");
@@ -120,10 +131,22 @@ impl Service {
                 let run = || -> Result<()> {
                     let plan = {
                         let mut records = records.lock().unwrap();
+                        let target = resource(&records[&id].plan.action);
+                        if records.values().any(|other| {
+                            other.id != id
+                                && other.status == "needs_inspection"
+                                && resource(&other.plan.action) == target
+                        }) {
+                            let operation = records.get_mut(&id).unwrap();
+                            operation.status = "needs_inspection".into();
+                            operation.error = Some("同目标前序操作需核对，本操作未执行".into());
+                            save_accepted(&file, &mut records, &id)?;
+                            return Ok(());
+                        }
                         let operation = records.get_mut(&id).context("操作记录不存在")?;
                         operation.status = "running".into();
                         let plan = operation.plan.clone();
-                        save(&file, &records)?;
+                        save_accepted(&file, &mut records, &id)?;
                         plan
                     };
                     let progress_records = records.clone();
@@ -135,7 +158,7 @@ impl Service {
                             let operation =
                                 records.get_mut(&progress_id).context("操作记录不存在")?;
                             operation.stages.push(stage.into());
-                            save(&progress_file, &records)
+                            save_accepted(&progress_file, &mut records, &progress_id)
                         }))
                     });
                     let (output, result) = super::output::capture(|| {
@@ -152,18 +175,20 @@ impl Service {
                     let mut records = records.lock().unwrap();
                     let operation = records.get_mut(&id).unwrap();
                     operation.output = output;
-                    operation.status = if result.is_ok() {
-                        "succeeded"
-                    } else {
-                        "failed"
+                    if operation.status != "needs_inspection" {
+                        operation.status = if result.is_ok() {
+                            "succeeded"
+                        } else {
+                            "failed"
+                        }
+                        .into();
+                        operation.error = result.err().map(|e| format!("{e:#}"));
                     }
-                    .into();
-                    operation.error = result.err().map(|e| format!("{e:#}"));
-                    save(&file, &records)
+                    save_accepted(&file, &mut records, &id)
                 };
                 if let Err(error) = run() {
                     super::log::error(&format!("操作 {id} 记录失败，需核对：{error:#}"));
-                    // 保留 running 状态，绝不继续自动重跑这一操作。
+                    // 内存保留待核对状态；磁盘故障恢复前也不允许继续派发同目标操作。
                 }
             }
         });
@@ -346,12 +371,15 @@ impl Service {
                         error: None,
                     },
                 );
-                save(&self.file, &records)?;
+                if let Err(error) = save(&self.file, &records) {
+                    records.remove(&id);
+                    return Err(error).context("操作未接受：无法保存提交记录");
+                }
                 if let Err(error) = self.queue.try_send(id.clone()) {
                     let record = records.get_mut(&id).unwrap();
                     record.status = "failed".into();
                     record.error = Some(format!("未执行：操作队列不可用：{error}"));
-                    save(&self.file, &records)?;
+                    save_accepted(&self.file, &mut records, &id)?;
                 }
                 Ok(json!(id))
             }
@@ -374,9 +402,13 @@ impl Service {
                     record.status == "needs_inspection",
                     "只有待核对操作可解除标记"
                 );
+                let previous = record.clone();
                 record.status = "resolved".into();
                 record.error = Some("用户已核对资源并解除阻塞；此标记不表示原操作成功".into());
-                save(&self.file, &records)?;
+                if let Err(error) = save(&self.file, &records) {
+                    records.insert(id.into(), previous);
+                    return Err(error);
+                }
                 Ok(Value::Null)
             }
             "operation.list" => Ok(serde_json::to_value(&*self.records.lock().unwrap())?),
@@ -571,6 +603,15 @@ mod tests {
         )
         .unwrap();
         let params = json!({"plan":plan.id,"request":"stable-request","confirmed":true});
+        fs::create_dir(&service.file).unwrap();
+        assert!(service.handle("operation.submit", params.clone()).is_err());
+        assert!(
+            service
+                .handle("operation.get", json!("stable-request"))
+                .is_err()
+        );
+        assert!(service.records.lock().unwrap().is_empty());
+        fs::remove_dir(&service.file).unwrap();
         let id = service.handle("operation.submit", params.clone()).unwrap();
         assert_eq!(id, service.handle("operation.submit", params).unwrap());
         assert!(
@@ -634,6 +675,19 @@ mod tests {
                 )
                 .is_err()
         );
+        // 解除标记保存失败时，不得在内存提前放开同目标操作。
+        fs::remove_file(&service.file).unwrap();
+        fs::create_dir(&service.file).unwrap();
+        assert!(
+            service
+                .handle(
+                    "operation.resolve",
+                    json!({"id":"operation","confirmed":true})
+                )
+                .is_err()
+        );
+        assert_eq!(finished(&service, "operation").status, "needs_inspection");
+        fs::remove_dir(&service.file).unwrap();
         service
             .handle(
                 "operation.resolve",
@@ -641,6 +695,92 @@ mod tests {
             )
             .unwrap();
         assert_eq!(finished(&service, "operation").status, "resolved");
+        drop(service);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn accepted_save_failures_require_inspection_and_block_new_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let (service, worker) =
+            Service::start(&temp.path().join("config.toml"), temp.path()).unwrap();
+        let plan: Plan = serde_json::from_value(
+            service
+                .handle(
+                    "operation.prepare",
+                    serde_json::to_value(Action::Ls { project: None }).unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let record = Operation {
+            id: "accepted".into(),
+            request: "original".into(),
+            plan: plan.clone(),
+            status: "queued".into(),
+            stages: vec![],
+            output: Output::default(),
+            error: None,
+        };
+        service
+            .records
+            .lock()
+            .unwrap()
+            .insert(record.id.clone(), record);
+        save(&service.file, &service.records.lock().unwrap()).unwrap();
+        fs::remove_file(&service.file).unwrap();
+        fs::create_dir(&service.file).unwrap();
+        service.queue.send("accepted".into()).unwrap();
+        assert_eq!(finished(&service, "accepted").status, "needs_inspection");
+        // 进度与最终结果写入失败使用同一失败语义，不保留运行中或宣称成功。
+        for status in ["running", "succeeded", "failed"] {
+            let mut records = service.records.lock().unwrap();
+            records.get_mut("accepted").unwrap().status = status.into();
+            assert!(save_accepted(&service.file, &mut records, "accepted").is_err());
+            assert_eq!(records["accepted"].status, "needs_inspection");
+            assert!(
+                records["accepted"]
+                    .error
+                    .as_ref()
+                    .unwrap()
+                    .contains("保存失败")
+            );
+        }
+        let mut other = plan;
+        other.id = "other-plan".into();
+        service
+            .plans
+            .lock()
+            .unwrap()
+            .insert(other.id.clone(), other.clone());
+        assert!(
+            service
+                .handle("operation.submit", json!({"plan":other.id,"request":"new"}))
+                .unwrap_err()
+                .to_string()
+                .contains("待核对")
+        );
+        fs::remove_dir(&service.file).unwrap();
+        // 已排队的同目标操作也要在执行前检查，不能只拦截新提交。
+        let mut queued = service.records.lock().unwrap()["accepted"].clone();
+        queued.id = "queued-next".into();
+        queued.request = "queued-request".into();
+        queued.status = "queued".into();
+        service
+            .records
+            .lock()
+            .unwrap()
+            .insert(queued.id.clone(), queued);
+        service.queue.send("queued-next".into()).unwrap();
+        let blocked = finished(&service, "queued-next");
+        assert_eq!(blocked.status, "needs_inspection");
+        assert!(blocked.error.unwrap().contains("本操作未执行"));
+        service
+            .handle(
+                "operation.resolve",
+                json!({"id":"accepted","confirmed":true}),
+            )
+            .unwrap();
         drop(service);
         worker.join().unwrap();
     }

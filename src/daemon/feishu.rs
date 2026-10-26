@@ -173,7 +173,11 @@ impl Inbox {
                 error: None,
             },
         );
-        self.save()
+        if let Err(error) = self.save() {
+            self.messages.remove(id);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -477,7 +481,7 @@ fn dispatch(registry: &Path, config: &Config, inbox: &Mutex<Inbox>, id: &str) ->
             {
                 match turn["status"].as_str() {
                     Some("completed") => {
-                        // 文本及工具输出由完整历史同步发送，不再另外发送最终回复。
+                        // 最终回复由精简历史同步发送，此处只更新接收请求状态。
                         incoming.finished = true;
                     }
                     Some("failed" | "interrupted") => {
@@ -793,6 +797,13 @@ mod tests {
         };
         let event = json!({"header":{"event_type":"im.message.receive_v1"},"event":{"sender":{"sender_type":"user","sender_id":{"open_id":"ou_user"}},"message":{"message_id":"om_message","chat_id":"oc_chat","chat_type":"p2p","message_type":"text","content":"{\"text\":\"执行任务\"}"}}});
         let mut inbox = Inbox::open(file.clone()).unwrap();
+        // 模拟原子替换失败；失败消息不能留在去重表中，也不能被发送线程取走。
+        fs::create_dir(&file).unwrap();
+        for _ in 0..2 {
+            assert!(inbox.receive(&config, &event).is_err());
+            assert!(inbox.messages.is_empty());
+        }
+        fs::remove_dir(&file).unwrap();
         inbox.receive(&config, &event).unwrap();
         let delivery = inbox.messages["om_message"].delivery.clone();
         let mut inbox = Inbox::open(file).unwrap();
