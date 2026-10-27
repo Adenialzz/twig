@@ -96,7 +96,7 @@ pub struct Page {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Turn {
     pub id: String,
     pub status: String,
@@ -263,49 +263,57 @@ impl Client {
         id: &str,
         previous: Option<&Option<Turn>>,
     ) -> Result<(Option<Turn>, Vec<Turn>)> {
-        let anchor = previous.and_then(Option::as_ref);
-        let mut cursor: Option<String> = None;
-        let mut cursors = HashSet::new();
-        let mut newest = None;
-        let mut completed = Vec::new();
-        loop {
-            let result = self.request(
-                "thread/turns/list",
-                json!({"threadId":id,"limit":if previous.is_none() {1} else {50},
+        completed_turns(id, previous, |method, params| self.request(method, params))
+    }
+}
+
+pub(crate) fn completed_turns(
+    id: &str,
+    previous: Option<&Option<Turn>>,
+    mut request: impl FnMut(&str, Value) -> Result<Value>,
+) -> Result<(Option<Turn>, Vec<Turn>)> {
+    let anchor = previous.and_then(Option::as_ref);
+    let mut cursor: Option<String> = None;
+    let mut cursors = HashSet::new();
+    let mut newest = None;
+    let mut completed = Vec::new();
+    loop {
+        let result = request(
+            "thread/turns/list",
+            json!({"threadId":id,"limit":if previous.is_none() {1} else {50},
                     "cursor":cursor,"sortDirection":"desc","itemsView":"notLoaded"}),
-            )?;
-            let turns: Vec<Turn> =
-                serde_json::from_value(result["data"].clone()).context("Codex 轮次格式不兼容")?;
-            for turn in turns {
-                if newest.is_none() {
-                    newest = Some(turn.clone());
-                }
-                let at_anchor = anchor.is_some_and(|old| old.id == turn.id);
-                if previous.is_some()
-                    && turn.status == "completed"
-                    && (!at_anchor || anchor.is_some_and(|old| old.status != "completed"))
-                {
-                    completed.push(turn);
-                }
-                if at_anchor {
-                    completed.reverse();
-                    return Ok((newest, completed));
-                }
+        )?;
+        let turns: Vec<Turn> =
+            serde_json::from_value(result["data"].clone()).context("Codex 轮次格式不兼容")?;
+        for turn in turns {
+            if newest.is_none() {
+                newest = Some(turn.clone());
             }
-            if previous.is_none() {
+            let at_anchor = anchor.is_some_and(|old| old.id == turn.id);
+            if previous.is_some()
+                && turn.status == "completed"
+                && (!at_anchor || anchor.is_some_and(|old| old.status != "completed"))
+            {
+                completed.push(turn);
+            }
+            if at_anchor {
+                completed.reverse();
                 return Ok((newest, completed));
             }
-            cursor = serde_json::from_value(result["nextCursor"].clone())?;
-            match &cursor {
-                Some(c) => ensure!(cursors.insert(c.clone()), "Codex 返回重复分页游标"),
-                None => {
-                    // 历史被回退/裁剪后，不能将找不到锚点的旧轮次当作新完成。
-                    if anchor.is_some() {
-                        completed.clear();
-                    }
-                    completed.reverse();
-                    return Ok((newest, completed));
+        }
+        if previous.is_none() {
+            return Ok((newest, completed));
+        }
+        cursor = serde_json::from_value(result["nextCursor"].clone())?;
+        match &cursor {
+            Some(c) => ensure!(cursors.insert(c.clone()), "Codex 返回重复分页游标"),
+            None => {
+                // 历史被回退/裁剪后，不能将找不到锚点的旧轮次当作新完成。
+                if anchor.is_some() {
+                    completed.clear();
                 }
+                completed.reverse();
+                return Ok((newest, completed));
             }
         }
     }

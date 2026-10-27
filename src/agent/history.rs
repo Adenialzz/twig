@@ -12,7 +12,7 @@ pub(crate) enum Kind {
     Error,
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Tool {
     Command {
         status: String,
@@ -24,7 +24,7 @@ pub(crate) enum Tool {
     },
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Entry {
     pub id: Option<String>,
     pub key: String,

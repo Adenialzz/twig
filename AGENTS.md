@@ -113,3 +113,5 @@
 - CI 的 agent job 在 Linux/macOS 使用 Node 22、Python 3.11、固定 Codex 0.164.0，构建正式 binary 后运行 check_agent.py；本地模型和模拟飞书，不配置真实密钥。失败日志上传为 agent-check-<平台>，保留 7 天；升级 Codex 版本需同时验证两个平台。
 
 - `examples/check_agent.py` 现在同时启动隔离 Twig 后台和 Codex app-server，并验收无 Console 飞书双向收发及重启去重；`examples/feishu_mock.py` 仅供该隔离测试。系统托管示例位于 examples/services，不自动安装或修改用户服务。
+
+- 后台 Agent 完成补查使用不含 items 的轮次分页和持久化水位；网络查询不得持 runtime 状态锁，提交前复查绑定与旧水位，未变化不得落盘。投递保留串行与未知结果核对。Agent 历史 worker 由多客户端可见租约控制，隐藏/退出与异常失联均须停止无查看者的轮询；聊天快照按实例和内容版本去重。回归覆盖慢查询下并发状态变更、水位恢复、空闲不写盘、多窗口隐藏/退出、租约到期和同版本不传历史。飞书首次只建立历史基线，成功持久化后才投递首条输入，后续跨入口新消息照常同步。

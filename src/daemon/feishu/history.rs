@@ -20,6 +20,8 @@ pub(super) struct History {
     destinations: BTreeMap<String, Destination>,
     #[serde(skip)]
     file: PathBuf,
+    #[serde(skip)]
+    dirty: bool,
 }
 impl History {
     pub fn open(file: PathBuf) -> Result<Self> {
@@ -44,7 +46,6 @@ impl History {
         inbox: &Inbox,
         thread: &str,
         entries: &[Entry],
-        latest: &HashSet<String>,
     ) -> Result<()> {
         let texts: Vec<_> = entries
             .iter()
@@ -81,11 +82,10 @@ impl History {
                 ..Default::default()
             });
             if !destination.compact {
-                // 升级只丢弃尚未发送的旧展示队列；未知发送必须保留并阻塞，不能重试。
+                // 首次只建立基线，不补发历史；旧格式的未知发送仍须保留并阻塞。
                 destination.outbox.retain(|reply| reply.status != "queued");
                 destination.seen = texts
                     .iter()
-                    .filter(|(key, _)| !latest.contains(*key))
                     .map(|(key, text)| ((*key).clone(), text.clone()))
                     .collect();
                 destination.compact = true;
@@ -118,8 +118,10 @@ impl History {
             }
         }
         // 观察水位与全部待发分段在同一次原子替换中提交，然后才允许发送。
-        if changed {
+        self.dirty |= changed;
+        if self.dirty {
             self.save()?;
+            self.dirty = false;
         }
         Ok(())
     }
@@ -140,23 +142,19 @@ impl History {
             return Ok(());
         }
         let store = crate::agent::Store::new(registry)?;
-        let state = store.load()?;
-        let Some(binding) = state.bindings.get("controller") else {
-            return Ok(());
-        };
+        let mut state = store.load()?;
+        if !state.bindings.contains_key("controller") {
+            store.initialize()?;
+            state = store.load()?;
+        }
+        let binding = state.bindings.get("controller").context("主控绑定缺失")?;
         ensure!(
             binding.project.is_none() && binding.task.is_none(),
             "飞书历史只能同步主控绑定"
         );
         let value = store.read(binding)?;
-        let (entries, latest) = compact_entries(&value, &state.messages, &binding.thread);
-        self.observe(
-            config,
-            &inbox.lock().unwrap(),
-            &binding.thread,
-            &entries,
-            &latest,
-        )?;
+        let entries = compact_entries(&value, &state.messages, &binding.thread);
+        self.observe(config, &inbox.lock().unwrap(), &binding.thread, &entries)?;
         let keys: Vec<_> = self
             .destinations
             .iter()
@@ -230,13 +228,8 @@ impl History {
 }
 
 /// 只投影用户输入及已完成轮次的最终回答，不改动 Console 的完整历史。
-fn compact_entries(
-    value: &Value,
-    messages: &[Delivery],
-    thread: &str,
-) -> (Vec<Entry>, HashSet<String>) {
+fn compact_entries(value: &Value, messages: &[Delivery], thread: &str) -> Vec<Entry> {
     let mut entries = Vec::new();
-    let mut latest = HashSet::new();
     if let Some(turns) = value["thread"]["turns"].as_array() {
         for turn in turns {
             let mut current = transcript(&json!({"thread":{"turns":[turn]}}));
@@ -263,19 +256,12 @@ fn compact_entries(
                     entry.key = json!(["message", id]).to_string();
                 }
             }
-            latest = current.iter().map(|entry| entry.key.clone()).collect();
             entries.extend(current);
         }
     }
     apply_sources(&mut entries, messages, thread);
-    entries.retain(|entry| {
-        let visible = matches!(entry.kind, Kind::User | Kind::Unknown | Kind::Assistant);
-        if !visible {
-            latest.remove(&entry.key);
-        }
-        visible
-    });
-    (entries, latest)
+    entries.retain(|entry| matches!(entry.kind, Kind::User | Kind::Unknown | Kind::Assistant));
+    entries
 }
 
 fn chunks(text: &str) -> Vec<String> {
@@ -297,6 +283,37 @@ fn chunks(text: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::agent::{Delivery, MessageSource};
+
+    #[test]
+    fn failed_initial_baseline_must_be_saved_before_sync_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config();
+        let mut inbox = Inbox::open(dir.path().join("inbox.json")).unwrap();
+        inbox.receive(&config, &event("ou_one", "oc_one")).unwrap();
+        let file = dir.path().join("history.json");
+        let mut history = History::open(file.clone()).unwrap();
+        let entries = compact_entries(&snapshot("tool"), &[], "controller");
+        fs::create_dir(&file).unwrap();
+        assert!(
+            history
+                .observe(&config, &inbox, "controller", &entries)
+                .is_err()
+        );
+        assert!(
+            history
+                .observe(&config, &inbox, "controller", &entries)
+                .is_err()
+        );
+        fs::remove_dir(&file).unwrap();
+        history
+            .observe(&config, &inbox, "controller", &entries)
+            .unwrap();
+        let restored = History::open(file).unwrap();
+        assert_eq!(restored.destinations.len(), 1);
+        let destination = restored.destinations.values().next().unwrap();
+        assert!(!destination.seen.is_empty());
+        assert!(destination.outbox.is_empty());
+    }
 
     fn config() -> Config {
         Config {
@@ -339,11 +356,11 @@ mod tests {
             error: None,
         }];
         value["thread"]["turns"][0]["status"] = json!("inProgress");
-        let (active, _) = compact_entries(&value, &messages, "controller");
+        let active = compact_entries(&value, &messages, "controller");
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].text, "Console 中的旧消息");
         value["thread"]["turns"][0]["status"] = json!("completed");
-        let (done, _) = compact_entries(&value, &messages, "controller");
+        let done = compact_entries(&value, &messages, "controller");
         assert_eq!(done.len(), 2);
         assert_eq!(done[1].text, "done");
         // 旧协议没有 phase 时，仅使用已完成轮次最后一条回答。
@@ -351,12 +368,12 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .pop();
-        let (done, _) = compact_entries(&value, &messages, "controller");
+        let done = compact_entries(&value, &messages, "controller");
         assert_eq!(done[1].text, "之前的主控回复");
     }
 
     #[test]
-    fn latest_backfill_incremental_sync_upgrade_and_restart() {
+    fn initial_baseline_incremental_sync_upgrade_and_restart() {
         let dir = tempfile::tempdir().unwrap();
         let config = config();
         let mut inbox = Inbox::open(dir.path().join("inbox.json")).unwrap();
@@ -373,37 +390,34 @@ mod tests {
                     {"id":"a","type":"agentMessage","text":"partial"}
                 ]
             }));
-        let (entries, latest) = compact_entries(&value, &[], "controller");
+        let entries = compact_entries(&value, &[], "controller");
         history
-            .observe(&config, &inbox, "controller", &entries, &latest)
+            .observe(&config, &inbox, "controller", &entries)
             .unwrap();
         let key = history.destinations.keys().next().unwrap().clone();
-        assert_eq!(history.destinations[&key].outbox.len(), 1);
-        assert_eq!(
-            history.destinations[&key].outbox[0].text,
-            "【User】\nnew input"
-        );
-        history.destinations.get_mut(&key).unwrap().outbox[0].status = "sent".into();
+        assert!(history.destinations[&key].outbox.is_empty());
+        // 已观察的输入不补发，但接入后完成的回复需要投递。
+
         history.save().unwrap();
         let mut history = History::open(file.clone()).unwrap();
         value["thread"]["turns"][1]["status"] = json!("completed");
         value["thread"]["turns"][1]["items"][1]["text"] = json!("final reply");
-        let (entries, latest) = compact_entries(&value, &[], "controller");
+        let entries = compact_entries(&value, &[], "controller");
         history
-            .observe(&config, &inbox, "controller", &entries, &latest)
+            .observe(&config, &inbox, "controller", &entries)
             .unwrap();
-        assert_eq!(history.destinations[&key].outbox.len(), 2);
+        assert_eq!(history.destinations[&key].outbox.len(), 1);
         assert_eq!(
-            history.destinations[&key].outbox[1].text,
+            history.destinations[&key].outbox[0].text,
             "【Codex】\nfinal reply"
         );
         history
-            .observe(&config, &inbox, "controller", &entries, &latest)
+            .observe(&config, &inbox, "controller", &entries)
             .unwrap();
-        assert_eq!(history.destinations[&key].outbox.len(), 2);
-        // 迁移旧持久化格式：保留成功/未知，清掉旧待发工具，再仅补最近一轮。
+        assert_eq!(history.destinations[&key].outbox.len(), 1);
+        // 迁移旧持久化格式：保留未知，清掉旧待发工具，不补发历史。
         let d = history.destinations.get_mut(&key).unwrap();
-        d.outbox[1].status = "sending".into();
+        d.outbox[0].status = "sending".into();
         d.outbox.push(Reply {
             text: "old tool".into(),
             status: "queued".into(),
@@ -416,25 +430,24 @@ mod tests {
         fs::write(&file, serde_json::to_vec(&disk).unwrap()).unwrap();
         let mut history = History::open(file).unwrap();
         history
-            .observe(&config, &inbox, "controller", &entries, &latest)
+            .observe(&config, &inbox, "controller", &entries)
             .unwrap();
         let d = &history.destinations[&key];
-        assert_eq!(d.outbox[0].status, "sent");
-        assert_eq!(d.outbox[1].status, "sending");
+        assert_eq!(d.outbox[0].status, "sending");
         assert!(!d.outbox.iter().any(|r| r.text == "old tool"));
         history
             .send(&config, &key, &AtomicBool::new(false))
             .unwrap();
         inbox.receive(&config, &event("ou_two", "oc_two")).unwrap();
         history
-            .observe(&config, &inbox, "controller", &entries, &latest)
+            .observe(&config, &inbox, "controller", &entries)
             .unwrap();
         let second = history
             .destinations
             .values()
             .find(|d| d.user == "ou_two")
             .unwrap();
-        assert_eq!(second.outbox.len(), 2);
+        assert!(second.outbox.is_empty());
         // 已接入者重启后补齐所有离线新轮次，不再次裁成最近一轮。
         let mut history = History::open(dir.path().join("history.json")).unwrap();
         let config = Config {
@@ -453,9 +466,9 @@ mod tests {
                     ]
                 }));
         }
-        let (mut entries, latest) = compact_entries(&value, &[], "controller");
+        let mut entries = compact_entries(&value, &[], "controller");
         history
-            .observe(&config, &inbox, "controller", &entries, &latest)
+            .observe(&config, &inbox, "controller", &entries)
             .unwrap();
         assert_eq!(history.destinations[&key].outbox.len(), first_count);
         let second = history
@@ -463,17 +476,17 @@ mod tests {
             .values()
             .find(|d| d.user == "ou_two")
             .unwrap();
-        assert_eq!(second.outbox.len(), 6);
+        assert_eq!(second.outbox.len(), 4);
         entries.last_mut().unwrap().text = "corrected reply".into();
         history
-            .observe(&config, &inbox, "controller", &entries, &latest)
+            .observe(&config, &inbox, "controller", &entries)
             .unwrap();
         let second = history
             .destinations
             .values()
             .find(|d| d.user == "ou_two")
             .unwrap();
-        assert_eq!(second.outbox.len(), 7);
+        assert_eq!(second.outbox.len(), 5);
         assert!(second.outbox.last().unwrap().text.contains("【更新】"));
     }
     #[test]
@@ -507,16 +520,11 @@ mod tests {
         inbox.receive(&config, &event("ou_two", "oc_two")).unwrap();
         let file = dir.path().join("history.json");
         let mut history = History::open(file.clone()).unwrap();
+        history.observe(&config, &inbox, "controller", &[]).unwrap();
         let mut entry = Entry::new(crate::agent::history::Kind::Assistant, "完整回复");
         entry.key = "item".into();
         history
-            .observe(
-                &config,
-                &inbox,
-                "controller",
-                &[entry],
-                &HashSet::from(["item".into()]),
-            )
+            .observe(&config, &inbox, "controller", &[entry])
             .unwrap();
         let keys: Vec<_> = history.destinations.keys().cloned().collect();
         assert!(

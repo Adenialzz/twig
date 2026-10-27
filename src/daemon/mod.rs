@@ -33,7 +33,7 @@ use std::{
 };
 
 pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 // 生命周期协议独立于业务视图，更新客户端后仍能有序停止旧后台。
 const CONTROL_VERSION: u32 = 1;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;
@@ -547,6 +547,12 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
         while !stopping.load(Ordering::Relaxed) && !TERMINATE.load(Ordering::Relaxed) {
             if let Ok(mut state) = state.try_lock() {
                 state.expire();
+            }
+            if let Ok(mut chat) = chat.try_lock()
+                && let Some(chat) = chat.as_mut()
+                && let Err(error) = chat.expire()
+            {
+                log::error(&format!("Agent 查看租约清理失败：{error:#}"));
             }
             match listener.accept() {
                 Ok((stream, _)) => {

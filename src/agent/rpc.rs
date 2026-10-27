@@ -29,6 +29,15 @@ fn matches_error(error: &anyhow::Error, method: &str, message: &str) -> bool {
 pub fn thread_not_loaded(error: &anyhow::Error, id: &str) -> bool {
     matches_error(error, "thread/read", &format!("thread not loaded: {id}"))
 }
+pub fn unmaterialized(error: &anyhow::Error, id: &str) -> bool {
+    matches_error(
+        error,
+        "thread/turns/list",
+        &format!(
+            "thread {id} is not materialized yet; thread/turns/list is unavailable before first user message"
+        ),
+    )
+}
 pub fn no_rollout(error: &anyhow::Error, id: &str) -> bool {
     matches_error(
         error,

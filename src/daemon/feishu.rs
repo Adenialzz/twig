@@ -253,24 +253,27 @@ impl Runtime {
                             .filter(|(_, m)| config.users.contains(&m.user))
                             .map(|(id, _)| id.clone())
                             .collect();
-                        for id in ids {
-                            if tx_stop.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            if let Err(error) = dispatch(&registry, &config, &inbox, &id) {
-                                let mut inbox = inbox.lock().unwrap();
-                                inbox.messages.get_mut(&id).unwrap().error =
-                                    Some(format!("{error:#}"));
-                                if let Err(error) = inbox.save() {
-                                    tx_health.lock().unwrap().error =
-                                        Some(format!("飞书状态保存失败：{error:#}"));
-                                }
-                            }
-                        }
                         let history_error = history
                             .sync(&registry, &config, &inbox, &tx_stop)
                             .err()
                             .map(|error| format!("{error:#}"));
+                        // 首次基线必须先于输入投递，避免快速回复被归入旧历史。
+                        if history_error.is_none() {
+                            for id in ids {
+                                if tx_stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                if let Err(error) = dispatch(&registry, &config, &inbox, &id) {
+                                    let mut inbox = inbox.lock().unwrap();
+                                    inbox.messages.get_mut(&id).unwrap().error =
+                                        Some(format!("{error:#}"));
+                                    if let Err(error) = inbox.save() {
+                                        tx_health.lock().unwrap().error =
+                                            Some(format!("飞书状态保存失败：{error:#}"));
+                                    }
+                                }
+                            }
+                        }
                         let inbox = inbox.lock().unwrap();
                         let mut health = tx_health.lock().unwrap();
                         health.history_error = history_error;

@@ -706,7 +706,7 @@ supports_websockets = false
             return (expected and all(value in text for value in expected)
                     and not health["history_pending"] and not health["pending"])
 
-        # 首次仅补最近一轮；等待完成后的最终回复与队列清空。
+        # 首次不补历史；等待接入后首条输入的最终回复与队列清空。
         def wait_history():
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
@@ -748,7 +748,7 @@ supports_websockets = false
         time.sleep(3)
         assert len([m for m in state()["messages"] if m["text"] == "offline-feishu-request"]) == 1
         assert model.feishu.replies == replies_before_restart
-        print("PASS: 飞书最近一轮补齐、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
+        print("PASS: 飞书首次不补历史、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
 
     except BaseException:
         if frontend:

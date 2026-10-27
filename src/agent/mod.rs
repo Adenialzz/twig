@@ -75,7 +75,7 @@ pub struct Target {
     #[arg(long, requires = "project")]
     task: Option<String>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Binding {
     pub thread: String,
     pub cwd: PathBuf,
@@ -83,7 +83,7 @@ pub struct Binding {
     pub task: Option<String>,
     pub stopped: bool,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MessageSource {
     User,
@@ -91,7 +91,7 @@ pub enum MessageSource {
     Task { project: String, task: String },
     Completion { project: String, task: String },
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Delivery {
     pub id: String,
     pub thread: String,
@@ -108,6 +108,8 @@ pub struct State {
     pub bindings: BTreeMap<String, Binding>,
     pub messages: Vec<Delivery>,
     pub seen: Vec<String>,
+    #[serde(default)]
+    pub observed_turns: BTreeMap<String, Option<crate::codex::Turn>>,
 }
 
 pub struct Store {
@@ -396,39 +398,64 @@ impl Store {
         self.save(&state)
     }
     pub fn drain(&self) -> Result<()> {
-        let _lock = self.lock()?;
-        let mut state = self.load()?;
-        let mut client = self.client(&state)?;
+        // 网络查询不持状态锁；提交时重新核对绑定与水位，避免覆盖并发输入和补查。
+        let observed = self.load()?;
+        if observed.bindings.values().all(|binding| binding.stopped) {
+            return Ok(());
+        }
+        let mut client = self.client(&observed)?;
+        let scan = self.scan_completions(&observed, &mut client);
+        let flush = self.flush();
+        match (scan, flush) {
+            (Err(scan), Err(flush)) => anyhow::bail!("{scan:#}\n{flush:#}"),
+            (scan, flush) => scan.and(flush),
+        }
+    }
+    fn scan_completions(&self, observed: &State, client: &mut rpc::Client) -> Result<()> {
         let mut errors = Vec::new();
-        // 显式恢复时补查漏掉的完成回调；所有绑定均由本功能从新 session 建立。
-        for binding in state.bindings.values().cloned().collect::<Vec<_>>() {
-            if binding.stopped || self.validate(&binding).is_err() {
+        for (key, binding) in &observed.bindings {
+            if binding.stopped || self.validate(binding).is_err() {
                 continue;
             }
-            let result = match client.thread(&binding.thread).and_then(|result| {
-                check_thread(&binding, &result)?;
-                Ok(result)
-            }) {
-                Ok(result) => result,
-                Err(error) => {
-                    errors.push(format!("会话 {}：{error:#}", binding.thread));
-                    continue;
+            let result = (|| -> Result<()> {
+                let metadata = client.call(
+                    "thread/read",
+                    json!({"threadId":binding.thread,"includeTurns":false}),
+                )?;
+                check_thread(binding, &metadata)?;
+                // 首次补查所有完成状态（不读 items），后续仅追到上次轮次。
+                let previous = observed.observed_turns.get(&binding.thread);
+                let (latest, completed) = crate::codex::completed_turns(
+                    &binding.thread,
+                    Some(previous.unwrap_or(&None)),
+                    |method, params| match client.call(method, params) {
+                        Err(error) if rpc::unmaterialized(&error, &binding.thread) => {
+                            Ok(json!({"data":[],"nextCursor":null}))
+                        }
+                        result => result,
+                    },
+                )?;
+                let _lock = self.lock()?;
+                let mut state = self.load()?;
+                if state.socket != observed.socket
+                    || state.bindings.get(key) != Some(binding)
+                    || state.observed_turns.get(&binding.thread) != previous
+                {
+                    return Ok(());
                 }
-            };
-            if let Some(turns) = result["thread"]["turns"].as_array() {
-                for turn in turns.iter().filter(|turn| turn["status"] == "completed") {
-                    record_completion(
-                        &mut state,
-                        &binding,
-                        turn["id"].as_str().context("轮次缺少 ID")?,
-                    )?;
+                let before = state.seen.len();
+                for turn in completed {
+                    record_completion(&mut state, binding, &turn.id)?;
                 }
+                if previous != Some(&latest) || before != state.seen.len() {
+                    state.observed_turns.insert(binding.thread.clone(), latest);
+                    self.save(&state)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                errors.push(format!("会话 {}：{error:#}", binding.thread));
             }
-        }
-        self.save(&state)?;
-        drop(_lock);
-        if let Err(error) = self.flush() {
-            errors.push(format!("{error:#}"));
         }
         ensure!(errors.is_empty(), "{}", errors.join("\n"));
         Ok(())
@@ -436,17 +463,29 @@ impl Store {
     fn flush(&self) -> Result<()> {
         let _lock = self.lock()?;
         let mut state = self.load()?;
+        if !state.messages.iter().any(|m| {
+            matches!(m.status.as_str(), "queued" | "sending")
+                && state
+                    .bindings
+                    .values()
+                    .any(|b| b.thread == m.thread && !b.stopped)
+        }) {
+            return Ok(());
+        }
         let mut client = self.client(&state)?;
         let mut errors = Vec::new();
         for binding in state.bindings.values().cloned().collect::<Vec<_>>() {
             if let Err(error) = self.flush_binding(&mut state, &mut client, &binding) {
                 let error = format!("会话 {}：{error:#}", binding.thread);
+                let before = state.messages.clone();
                 for message in state.messages.iter_mut().filter(|m| {
                     m.thread == binding.thread && matches!(m.status.as_str(), "queued" | "sending")
                 }) {
                     message.error = Some(error.clone());
                 }
-                self.save(&state)?;
+                if state.messages != before {
+                    self.save(&state)?;
+                }
                 errors.push(error);
             }
         }
@@ -479,12 +518,29 @@ impl Store {
             self.save(state)?;
             return Ok(());
         }
-        let mut result = client.thread(&binding.thread)?;
+        let mut result = client.call(
+            "thread/read",
+            json!({"threadId":binding.thread,"includeTurns":false}),
+        )?;
         check_thread(binding, &result)?;
         if result["thread"]["status"]["type"] == "notLoaded" {
             client.call("thread/resume", self.resume_params(binding)?)?;
-            result = client.thread(&binding.thread)?;
+            result = client.call(
+                "thread/read",
+                json!({"threadId":binding.thread,"includeTurns":false}),
+            )?;
+            check_thread(binding, &result)?;
         }
+        // 只有未知投递需要按 clientUserMessageId 核对正文；普通排队只检查忙闲。
+        if state
+            .messages
+            .iter()
+            .any(|m| m.thread == binding.thread && m.status == "sending")
+        {
+            result = client.thread(&binding.thread)?;
+            check_thread(binding, &result)?;
+        }
+        let before = state.messages.clone();
         for message in state
             .messages
             .iter_mut()
@@ -496,7 +552,9 @@ impl Store {
                 message.error = None;
             }
         }
-        self.save(state)?;
+        if state.messages != before {
+            self.save(state)?;
+        }
         // 结果未知时不越过它发送后续消息。
         if state
             .messages
@@ -862,6 +920,135 @@ fn notify(message: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn completion_scan_releases_lock_preserves_concurrent_state_and_skips_unchanged_save() {
+        use std::{
+            os::unix::{fs::MetadataExt, net::UnixListener},
+            sync::mpsc,
+            thread,
+        };
+        use tungstenite::Message;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::new(&root.path().join("config.toml")).unwrap();
+        let binding = Binding {
+            thread: "controller".into(),
+            cwd: root.path().to_owned(),
+            project: None,
+            task: None,
+            stopped: false,
+        };
+        let mut state = State::default();
+        state.bindings.insert("controller".into(), binding.clone());
+        {
+            let _lock = store.lock().unwrap();
+            store.save(&state).unwrap();
+        }
+        let path = root.path().join("codex.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (entered, waiting) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let cwd = binding.cwd.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut scans = 0;
+            while let Ok(Message::Text(text)) = ws.read() {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => json!({}),
+                    "initialized" => continue,
+                    "thread/read" => {
+                        assert_eq!(request["params"]["includeTurns"], false);
+                        json!({"thread":{"id":"controller","cwd":cwd}})
+                    }
+                    "thread/turns/list" => {
+                        assert_eq!(request["params"]["itemsView"], "notLoaded");
+                        scans += 1;
+                        if scans == 1 {
+                            entered.send(()).unwrap();
+                            resume
+                                .recv_timeout(std::time::Duration::from_secs(5))
+                                .unwrap();
+                        }
+                        json!({"data":[{"id":"turn", "status":if scans == 1 {"inProgress"} else {"completed"}}]})
+                    }
+                    method => panic!("不应调用 {method}"),
+                };
+                ws.send(Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
+            }
+            assert_eq!(scans, 4);
+        });
+        let registry = store.registry.clone();
+        let scan = thread::spawn(move || {
+            let store = Store::new(&registry).unwrap();
+            let mut client = rpc::Client::connect(&path).unwrap();
+            store
+                .scan_completions(&store.load().unwrap(), &mut client)
+                .unwrap();
+            client
+        });
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.dir.join("lock"))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "慢查询不应持状态锁"
+        );
+        let guard = Guard(file);
+        let mut concurrent = store.load().unwrap();
+        concurrent.messages.push(Delivery {
+            id: "concurrent".into(),
+            thread: "controller".into(),
+            text: "new input".into(),
+            source: None,
+            status: "queued".into(),
+            turn: None,
+            error: None,
+        });
+        store.save(&concurrent).unwrap();
+        drop(guard);
+        release.send(()).unwrap();
+        let mut client = scan.join().unwrap();
+        assert_eq!(store.load().unwrap().messages.len(), 1);
+        store
+            .scan_completions(&store.load().unwrap(), &mut client)
+            .unwrap();
+        assert_eq!(store.load().unwrap().seen, ["controller:turn"]);
+        let file = store.dir.join("runtime.json");
+        let before = fs::metadata(&file).unwrap().ino();
+        store
+            .scan_completions(&store.load().unwrap(), &mut client)
+            .unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().ino(), before);
+        // 查询期间绑定被替换的旧快照不能提交或推进新绑定水位。
+        let old = store.load().unwrap();
+        let mut replacement = store.load().unwrap();
+        replacement.bindings.get_mut("controller").unwrap().thread = "replacement".into();
+        {
+            let _lock = store.lock().unwrap();
+            store.save(&replacement).unwrap();
+        }
+        let before = fs::metadata(&file).unwrap().ino();
+        store.scan_completions(&old, &mut client).unwrap();
+        assert_eq!(fs::metadata(&file).unwrap().ino(), before);
+        drop(client);
+        server.join().unwrap();
+    }
+
     #[test]
     fn concurrent_ids_have_unique_sequences_even_when_clock_samples_repeat() {
         let workers: Vec<_> = (0..4)
