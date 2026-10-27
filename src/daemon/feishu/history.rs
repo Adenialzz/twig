@@ -9,8 +9,6 @@ struct Destination {
     user: String,
     chat: String,
     thread: String,
-    #[serde(default)]
-    compact: bool,
     seen: BTreeMap<String, String>,
     outbox: Vec<Reply>,
     error: Option<String>,
@@ -74,23 +72,20 @@ impl History {
             if !visited.insert(key.clone()) {
                 continue;
             }
-            let destination = self.destinations.entry(key).or_insert_with(|| Destination {
-                app: config.app.clone(),
-                user: incoming.user.clone(),
-                chat: incoming.chat.clone(),
-                thread: thread.into(),
-                ..Default::default()
-            });
-            if !destination.compact {
-                // 首次只建立基线，不补发历史；旧格式的未知发送仍须保留并阻塞。
-                destination.outbox.retain(|reply| reply.status != "queued");
-                destination.seen = texts
-                    .iter()
-                    .map(|(key, text)| ((*key).clone(), text.clone()))
-                    .collect();
-                destination.compact = true;
+            let destination = self.destinations.entry(key).or_insert_with(|| {
                 changed = true;
-            }
+                Destination {
+                    app: config.app.clone(),
+                    user: incoming.user.clone(),
+                    chat: incoming.chat.clone(),
+                    thread: thread.into(),
+                    seen: texts
+                        .iter()
+                        .map(|(key, text)| ((*key).clone(), text.clone()))
+                        .collect(),
+                    ..Default::default()
+                }
+            });
             for (entry_key, text) in &texts {
                 if destination.seen.get(*entry_key) == Some(text) {
                     continue;
@@ -373,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_baseline_incremental_sync_upgrade_and_restart() {
+    fn initial_baseline_and_new_messages_survive_restart() {
         let dir = tempfile::tempdir().unwrap();
         let config = config();
         let mut inbox = Inbox::open(dir.path().join("inbox.json")).unwrap();
@@ -415,26 +410,23 @@ mod tests {
             .observe(&config, &inbox, "controller", &entries)
             .unwrap();
         assert_eq!(history.destinations[&key].outbox.len(), 1);
-        // 迁移旧持久化格式：保留未知，清掉旧待发工具，不补发历史。
+        // 重启直接延续已有水位与队列，不重新初始化，也不丢弃待发/未知消息。
         let d = history.destinations.get_mut(&key).unwrap();
         d.outbox[0].status = "sending".into();
         d.outbox.push(Reply {
-            text: "old tool".into(),
+            text: "pending new reply".into(),
             status: "queued".into(),
         });
-        let mut disk = serde_json::to_value(&history).unwrap();
-        disk["destinations"][&key]
-            .as_object_mut()
-            .unwrap()
-            .remove("compact");
-        fs::write(&file, serde_json::to_vec(&disk).unwrap()).unwrap();
+        history.save().unwrap();
         let mut history = History::open(file).unwrap();
         history
             .observe(&config, &inbox, "controller", &entries)
             .unwrap();
         let d = &history.destinations[&key];
+        assert_eq!(d.outbox.len(), 2);
         assert_eq!(d.outbox[0].status, "sending");
-        assert!(!d.outbox.iter().any(|r| r.text == "old tool"));
+        assert_eq!(d.outbox[1].status, "queued");
+        assert_eq!(d.outbox[1].text, "pending new reply");
         history
             .send(&config, &key, &AtomicBool::new(false))
             .unwrap();
@@ -448,7 +440,7 @@ mod tests {
             .find(|d| d.user == "ou_two")
             .unwrap();
         assert!(second.outbox.is_empty());
-        // 已接入者重启后补齐所有离线新轮次，不再次裁成最近一轮。
+        // 已接入者重启后继续发送离线期间的新轮次。
         let mut history = History::open(dir.path().join("history.json")).unwrap();
         let config = Config {
             users: HashSet::from(["ou_two".into()]),
