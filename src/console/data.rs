@@ -187,8 +187,15 @@ impl Worker {
                             Ok(snapshot) => detail = snapshot,
                             Err(error) => {
                                 detail.query_error(&request, format!("{error:#}"));
-                                detail_retry_at = Some(Instant::now() + Duration::from_secs(2));
                             }
+                        }
+                        if detail.history_error.is_some()
+                            || detail
+                                .turn
+                                .as_ref()
+                                .is_some_and(|(_, result)| result.is_err())
+                        {
+                            detail_retry_at = Some(Instant::now() + Duration::from_secs(2));
                         }
                     }
                 }

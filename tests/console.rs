@@ -1218,9 +1218,11 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     fs::write(f.bin.join("codex"), script).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let offline = Arc::new(AtomicBool::new(false));
+    let turn_failure = Arc::new(AtomicBool::new(false));
     let methods = Arc::new(Mutex::new(Vec::new()));
     let done = stop.clone();
     let disconnected = offline.clone();
+    let failed_turn = turn_failure.clone();
     let seen = methods.clone();
     let cwd = f.repo.canonicalize().unwrap();
     let server = thread::spawn(move || {
@@ -1236,6 +1238,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
             };
             let done = done.clone();
             let disconnected = disconnected.clone();
+            let failed_turn = failed_turn.clone();
             let seen = seen.clone();
             let cwd = cwd.clone();
             connections.push(thread::spawn(move || {
@@ -1272,6 +1275,12 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                 if disconnected.load(Ordering::Relaxed) {
                     let _ = ws.close(None);
                     break;
+                }
+                if method == "thread/turns/list" && failed_turn.load(Ordering::Relaxed) {
+                    if ws.send(tungstenite::Message::Text(json!({"id":v["id"],"error":{"code":-32603,"message":"TURN_QUERY_FAILURE"}}).to_string().into())).is_err() {
+                        break;
+                    }
+                    continue;
                 }
                 let thread_value = |id: &str, status: Value| json!({"id":id,"cwd":cwd,"name":id,"status":status,"source":"cli","model":"mock-model"});
                 let result = match method {
@@ -1366,6 +1375,15 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     p.clear_output();
     offline.store(false, Ordering::Relaxed);
     // 同一详情页不改查询键、不手动刷新，连接恢复后也应重试并结束错误状态。
+    p.wait("本轮已完成");
+    turn_failure.store(true, Ordering::Relaxed);
+    p.clear_output();
+    p.send(b"r");
+    p.wait("TURN_QUERY_FAILURE");
+    p.wait("读取失败：");
+    p.clear_output();
+    turn_failure.store(false, Ordering::Relaxed);
+    // details RPC 成功但 snapshot.turn 为 Err，同样必须自动重试。
     p.wait("本轮已完成");
     let start = Instant::now();
     while methods
