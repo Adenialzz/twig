@@ -94,6 +94,8 @@ struct Reply {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Incoming {
+    #[serde(default)]
+    sequence: u64,
     message: String,
     user: String,
     chat: String,
@@ -109,6 +111,15 @@ struct Inbox {
     messages: BTreeMap<String, Incoming>,
 }
 impl Inbox {
+    fn ordered_ids(&self, config: &Config) -> Vec<String> {
+        let mut entries: Vec<_> = self
+            .messages
+            .iter()
+            .filter(|(_, m)| config.users.contains(&m.user))
+            .collect();
+        entries.sort_by_key(|(_, m)| m.sequence);
+        entries.into_iter().map(|(id, _)| id.clone()).collect()
+    }
     fn open(file: PathBuf) -> Result<Self> {
         let messages = match fs::read(&file) {
             Ok(data) => serde_json::from_slice(&data).context("飞书接收记录损坏")?,
@@ -156,6 +167,13 @@ impl Inbox {
         self.messages.insert(
             id.into(),
             Incoming {
+                sequence: self
+                    .messages
+                    .values()
+                    .map(|m| m.sequence)
+                    .max()
+                    .unwrap_or(0)
+                    + 1,
                 message: id.into(),
                 user: user.into(),
                 chat: message["chat_id"]
@@ -245,14 +263,7 @@ impl Runtime {
                 tx_health.clone(),
                 move || {
                     while !tx_stop.load(Ordering::Relaxed) {
-                        let ids: Vec<_> = inbox
-                            .lock()
-                            .unwrap()
-                            .messages
-                            .iter()
-                            .filter(|(_, m)| config.users.contains(&m.user))
-                            .map(|(id, _)| id.clone())
-                            .collect();
+                        let ids = inbox.lock().unwrap().ordered_ids(&config);
                         let subscribed =
                             outbox.subscribe(&registry, &config, &inbox.lock().unwrap());
                         // 先持久化订阅位置，再投递首次输入；接入前内容从不入队。
@@ -268,6 +279,10 @@ impl Runtime {
                                     if let Err(error) = inbox.save() {
                                         tx_health.lock().unwrap().error =
                                             Some(format!("飞书状态保存失败：{error:#}"));
+                                    }
+                                    // 入队失败阻止后续纠正越过；收条失败不阻塞已入队请求。
+                                    if !inbox.messages[&id].finished {
+                                        break;
                                     }
                                 }
                             }
@@ -433,6 +448,10 @@ fn token(config: &Config) -> Result<String> {
 }
 fn dispatch(registry: &Path, config: &Config, inbox: &Mutex<Inbox>, id: &str) -> Result<()> {
     let mut incoming = inbox.lock().unwrap().messages[id].clone();
+    ensure!(
+        incoming.finished || incoming.sequence > 0,
+        "旧飞书待投递记录缺少接收序号，无法恢复原顺序，请核对消息 {id}"
+    );
     if incoming.finished
         && !incoming
             .replies
@@ -786,6 +805,22 @@ mod tests {
         changed["event"]["sender"]["sender_id"]["open_id"] = json!("stranger");
         inbox.receive(&config, &changed).unwrap();
         assert_eq!(inbox.messages.len(), 1);
+        changed["event"]["sender"]["sender_id"]["open_id"] = json!("ou_user");
+        for id in ["z-last", "a-correction"] {
+            changed["event"]["message"]["message_id"] = json!(id);
+            inbox.receive(&config, &changed).unwrap();
+        }
+        let mut inbox = Inbox::open(inbox.file.clone()).unwrap();
+        inbox.receive(&config, &changed).unwrap();
+        assert_eq!(
+            inbox.ordered_ids(&config),
+            ["om_message", "z-last", "a-correction"]
+        );
+        assert_eq!(inbox.messages["a-correction"].sequence, 3);
+        inbox.messages.get_mut("z-last").unwrap().sequence = 0;
+        let inbox = Mutex::new(inbox);
+        let error = dispatch(temp.path(), &config, &inbox, "z-last").unwrap_err();
+        assert!(error.to_string().contains("缺少接收序号"));
     }
     #[test]
     fn frame_preserves_required_zero_fields_and_reply_headers() {
@@ -1039,6 +1074,7 @@ mod transport_tests {
         inbox.messages.insert(
             "om_message".into(),
             Incoming {
+                sequence: 1,
                 message: "om_message".into(),
                 user: "ou_allowed".into(),
                 chat: "oc_chat".into(),
