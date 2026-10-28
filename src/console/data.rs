@@ -850,6 +850,10 @@ fn collect(
                             Ok(())
                         })();
                         if let Err(error) = result {
+                            // 卸载不代表完成或空历史；保留水位，待重新加载后补查。
+                            if crate::codex::thread_not_loaded(&error, "thread/turns/list", &id) {
+                                continue;
+                            }
                             errors.push(format!("会话 {id}：{error:#}"));
                         }
                     }

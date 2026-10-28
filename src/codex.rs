@@ -12,6 +12,26 @@ use std::{
 };
 use tungstenite::{Message, WebSocket, protocol::WebSocketConfig};
 
+#[derive(Debug)]
+struct RpcError {
+    method: String,
+    value: Value,
+}
+impl std::fmt::Display for RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Codex {}：{}", self.method, self.value)
+    }
+}
+impl std::error::Error for RpcError {}
+
+pub fn thread_not_loaded(error: &anyhow::Error, method: &str, id: &str) -> bool {
+    error.downcast_ref::<RpcError>().is_some_and(|error| {
+        error.method == method
+            && error.value["code"] == -32600
+            && error.value["message"] == format!("thread not loaded: {id}")
+    })
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
@@ -185,7 +205,11 @@ impl Client {
                         {
                             return Ok(json!({"data":[],"nextCursor":null}));
                         }
-                        bail!("Codex {method}：{error}");
+                        return Err(RpcError {
+                            method: method.to_owned(),
+                            value: error.clone(),
+                        }
+                        .into());
                     }
                     return value
                         .get_mut("result")
@@ -212,8 +236,13 @@ impl Client {
                 if !ids.insert(id.to_owned()) {
                     continue;
                 }
-                let mut result =
-                    self.request("thread/read", json!({"threadId":id,"includeTurns":false}))?;
+                let mut result = match self
+                    .request("thread/read", json!({"threadId":id,"includeTurns":false}))
+                {
+                    Ok(result) => result,
+                    Err(error) if thread_not_loaded(&error, "thread/read", id) => continue,
+                    Err(error) => return Err(error),
+                };
                 let thread: Thread = serde_json::from_value(result["thread"].take())
                     .context("Codex 线程格式不兼容")?;
                 if !thread.ephemeral {
@@ -233,10 +262,16 @@ impl Client {
         serde_json::from_value(result).context("Codex 历史列表格式不兼容")
     }
     pub fn latest_turn(&mut self, id: &str) -> Result<String> {
-        let result = self.request(
+        let result = match self.request(
             "thread/turns/list",
             json!({"threadId":id,"limit":1,"sortDirection":"desc","itemsView":"notLoaded"}),
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(error) if thread_not_loaded(&error, "thread/turns/list", id) => {
+                return Ok("当前服务未加载此会话，轮次状态暂不可用".into());
+            }
+            Err(error) => return Err(error),
+        };
         let turns = result["data"]
             .as_array()
             .context("Codex 轮次列表缺少 data")?;
@@ -330,6 +365,84 @@ mod tests {
     fn mock_thread(id: &str, status: Value) -> Value {
         json!({"id":id,"cwd":"/tmp","status":status,"source":"cli","name":"测试会话"})
     }
+    #[test]
+    fn unloaded_threads_preserve_progress_and_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut polls = 0;
+            while let Ok(Message::Text(text)) = ws.read() {
+                let v: Value = serde_json::from_str(&text).unwrap();
+                let method = v["method"].as_str().unwrap();
+                let id = v["params"]["threadId"].as_str().unwrap_or("");
+                let result = match method {
+                    "initialize" => json!({}),
+                    "initialized" => continue,
+                    "thread/loaded/list" => json!({"data":["gone", "healthy"]}),
+                    "thread/read" if id == "healthy" => {
+                        json!({"thread":mock_thread(id, json!({"type":"idle"}))})
+                    }
+                    "thread/read" => {
+                        json!({"error":{"code":-32600,"message":"thread not loaded: gone"}})
+                    }
+                    "thread/turns/list" => {
+                        polls += 1;
+                        match polls {
+                            1 => json!({"data":[{"id":"run","status":"inProgress"}]}),
+                            2 | 3 => {
+                                json!({"error":{"code":-32600,"message":"thread not loaded: healthy"}})
+                            }
+                            _ => json!({"data":[{"id":"run","status":"completed"}]}),
+                        }
+                    }
+                    _ => panic!("不允许的请求：{method}"),
+                };
+                let response = match result.get("error") {
+                    Some(error) => json!({"id":v["id"],"error":error}),
+                    None => json!({"id":v["id"],"result":result}),
+                };
+                ws.send(Message::Text(response.to_string().into())).unwrap();
+            }
+            assert_eq!(polls, 5);
+        });
+        let mut client = Client::connect(&path).unwrap();
+        let threads = client.loaded().unwrap();
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].id, "healthy");
+        let (running, _) = client.completed_turns("healthy", None).unwrap();
+        let error = client
+            .completed_turns("healthy", Some(&running))
+            .unwrap_err();
+        assert!(thread_not_loaded(&error, "thread/turns/list", "healthy"));
+        assert!(!thread_not_loaded(&error, "thread/turns/list", "other"));
+        assert!(!thread_not_loaded(&error, "thread/read", "healthy"));
+        assert!(client.latest_turn("healthy").unwrap().contains("未加载"));
+        let (done, events) = client.completed_turns("healthy", Some(&running)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "run");
+        assert!(
+            client
+                .completed_turns("healthy", Some(&done))
+                .unwrap()
+                .1
+                .is_empty()
+        );
+        let wrong_code = RpcError {
+            method: "thread/turns/list".into(),
+            value: json!({"code":-32603,"message":"thread not loaded: healthy"}),
+        };
+        assert!(!thread_not_loaded(
+            &wrong_code.into(),
+            "thread/turns/list",
+            "healthy"
+        ));
+        drop(client);
+        server.join().unwrap();
+    }
+
     #[test]
     fn completion_baseline_pagination_and_retry_are_readonly() {
         let dir = tempfile::tempdir().unwrap();
