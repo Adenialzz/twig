@@ -103,7 +103,7 @@ fn canonical_location(path: &Path) -> Result<PathBuf> {
     Ok(canonical_location(parent)?.join(name))
 }
 
-fn private_directory(path: &Path) -> Result<()> {
+pub(crate) fn private_directory(path: &Path) -> Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -859,6 +859,20 @@ mod tests {
         assert!(read_frame::<Value>(&mut &b"{}"[..]).is_err());
         assert!(read_frame::<Value>(&mut &b"invalid\n"[..]).is_err());
         assert_eq!(read_frame::<Value>(&mut &b"{}\n"[..]).unwrap(), json!({}));
+    }
+    #[test]
+    fn private_directory_creates_secure_permissions_and_rejects_unsafe_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("socket-dir");
+        private_directory(&path).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o700);
+        private_directory(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_directory(&path).is_err());
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(private_directory(&link).is_err());
     }
     #[test]
     fn large_response_chunks_preserve_unicode_and_reject_incomplete_transfers() {

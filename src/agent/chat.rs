@@ -744,7 +744,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let registry = root.path().join("config.toml");
         let paths = crate::daemon::Paths::new(&registry).unwrap();
-        std::fs::create_dir_all(paths.socket.parent().unwrap()).unwrap();
+        crate::daemon::private_directory(paths.socket.parent().unwrap()).unwrap();
         let listener = UnixListener::bind(&paths.socket).unwrap();
         let (observed, responses) = mpsc::channel();
         let server = thread::spawn(move || {
