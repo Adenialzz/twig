@@ -71,6 +71,35 @@ impl Drop for Daemon {
     }
 }
 #[test]
+fn agent_status_transfers_history_larger_than_one_frame() {
+    let daemon = Daemon::start();
+    let directory = daemon.temp.path().join("controller");
+    std::fs::create_dir_all(&directory).unwrap();
+    let text = "历史内容".repeat(900_000);
+    let state = serde_json::json!({"socket":null,"bindings":{},"messages":[{
+        "id":"large", "thread":"thread", "text":text, "status":"cancelled", "turn":null, "error":null
+    }],"seen":[]});
+    std::fs::write(directory.join("runtime.json"), state.to_string()).unwrap();
+    let result = daemon.command().args(["agent", "status"]).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let actual: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(actual["messages"], state["messages"]);
+    assert!(
+        daemon
+            .command()
+            .args(["daemon", "status"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn lifecycle_singleton_and_config_isolation() {
     let mut daemon = Daemon::start();
     let status = daemon

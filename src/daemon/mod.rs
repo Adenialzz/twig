@@ -33,7 +33,7 @@ use std::{
 };
 
 pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 // 生命周期协议独立于业务视图，更新客户端后仍能有序停止旧后台。
 const CONTROL_VERSION: u32 = 1;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;
@@ -186,6 +186,71 @@ fn write_frame(value: &impl Serialize, writer: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResponseChunk {
+    chunk: usize,
+    data: String,
+    done: bool,
+}
+
+fn write_response(response: &Response, writer: &mut impl Write) -> Result<()> {
+    // 管理协议保持原帧格式，旧客户端仍可停止、重启后台。
+    if response.version != VERSION {
+        return write_frame(response, writer);
+    }
+    let text = serde_json::to_string(response)?;
+    if (text.len() as u64) < MAX_FRAME {
+        writer.write_all(text.as_bytes())?;
+        writer.write_all(b"\n")?;
+        writer.flush()?;
+        return Ok(());
+    }
+    let mut remaining = text.as_str();
+    let mut chunk = 0;
+    while !remaining.is_empty() {
+        // 即使每个字符再次 JSON 转义为六字节，单帧仍小于 8 MiB。
+        let mut end = remaining.len().min(1024 * 1024);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (data, rest) = remaining.split_at(end);
+        write_frame(
+            &ResponseChunk {
+                chunk,
+                data: data.into(),
+                done: rest.is_empty(),
+            },
+            writer,
+        )?;
+        remaining = rest;
+        chunk += 1;
+    }
+    Ok(())
+}
+
+fn read_response(reader: &mut impl BufRead) -> Result<Response> {
+    let first: Value = read_frame(reader)?;
+    if first.get("chunk").is_none() {
+        return Ok(serde_json::from_value(first)?);
+    }
+    let mut part: ResponseChunk = serde_json::from_value(first)?;
+    let mut text = String::new();
+    let mut expected = 0;
+    loop {
+        ensure!(
+            part.chunk == expected && !part.data.is_empty(),
+            "RPC 响应分块无效"
+        );
+        text.push_str(&part.data);
+        if part.done {
+            return Ok(serde_json::from_str(&text)?);
+        }
+        expected += 1;
+        part = read_frame(reader)?;
+    }
+}
+
 fn exchange(registry: &Path, method: &str, params: Value, version: u32) -> Result<Response> {
     let paths = Paths::new(registry)?;
     let mut stream = UnixStream::connect(&paths.socket).with_context(|| {
@@ -203,7 +268,7 @@ fn exchange(registry: &Path, method: &str, params: Value, version: u32) -> Resul
         params,
     };
     write_frame(&request, &mut stream)?;
-    let response: Response = read_frame(&mut BufReader::new(stream))?;
+    let response = read_response(&mut BufReader::new(stream))?;
     ensure!(response.id == request.id, "Twig 后台响应 ID 不匹配");
     Ok(response)
 }
@@ -538,7 +603,7 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
                             Ok(value) => Response { version, id:request.id, result:Some(value), error:None },
                             Err(error) => Response { version, id:request.id, result:None, error:Some(format!("{error:#}")) },
                         };
-                        write_frame(&response, &mut stream)
+                        write_response(&response, &mut stream)
                     })();
                     if let Err(error) = result { log::error(&format!("本机连接失败：{error:#}")); }
                 }
@@ -794,6 +859,32 @@ mod tests {
         assert!(read_frame::<Value>(&mut &b"{}"[..]).is_err());
         assert!(read_frame::<Value>(&mut &b"invalid\n"[..]).is_err());
         assert_eq!(read_frame::<Value>(&mut &b"{}\n"[..]).unwrap(), json!({}));
+    }
+    #[test]
+    fn large_response_chunks_preserve_unicode_and_reject_incomplete_transfers() {
+        let response = Response {
+            version: VERSION,
+            id: "large".into(),
+            result: Some(json!({"history":"中文\n\"\\".repeat(1_200_000)})),
+            error: None,
+        };
+        let mut bytes = Vec::new();
+        write_response(&response, &mut bytes).unwrap();
+        assert!(bytes.len() as u64 > MAX_FRAME);
+        assert!(
+            bytes
+                .split(|b| *b == b'\n')
+                .all(|frame| (frame.len() as u64) < MAX_FRAME)
+        );
+        let read = read_response(&mut bytes.as_slice()).unwrap();
+        assert_eq!(read.id, response.id);
+        assert_eq!(read.result, response.result);
+        let first_end = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
+        assert!(read_response(&mut &bytes[..first_end]).is_err());
+        assert!(read_response(&mut &bytes[first_end..]).is_err());
+        let mut repeated = bytes[..first_end].to_vec();
+        repeated.extend_from_slice(&bytes);
+        assert!(read_response(&mut repeated.as_slice()).is_err());
     }
     #[test]
     fn config_identity_is_stable_before_file_exists_and_isolated() {
