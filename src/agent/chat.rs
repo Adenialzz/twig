@@ -14,22 +14,23 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     io::Stdout,
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use view::{Entry, Kind};
 
+#[derive(serde::Serialize, serde::Deserialize)]
 enum Command {
     Send(String, String),
     Refresh,
     Viewing(bool),
     Exit,
 }
-#[derive(Default)]
+#[derive(Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct View {
     entries: Vec<Entry>,
     thread: String,
@@ -88,7 +89,7 @@ impl Runtime {
         let (tx, rx) = mpsc::channel();
         let updates = Arc::new(Mutex::new(Updates::default()));
         let output = updates.clone();
-        let handle = thread::spawn(move || worker(registry, rx, output));
+        let handle = thread::spawn(move || remote_worker(registry, rx, output));
         Self {
             tx,
             updates,
@@ -107,11 +108,192 @@ impl Drop for Runtime {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ChatRequest {
+    client: String,
+    viewing: bool,
+    command: Option<Command>,
+    version: Option<u64>,
+    instance: Option<String>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ChatResponse {
+    version: u64,
+    instance: String,
+    view: Option<View>,
+}
+
+pub(crate) struct Backend {
+    runtime: Runtime,
+    registry: PathBuf,
+    viewers: BTreeMap<String, Instant>,
+    version: u64,
+    instance: String,
+}
+impl Backend {
+    pub fn new(registry: PathBuf) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let updates = Arc::new(Mutex::new(Updates::default()));
+        let output = updates.clone();
+        let path = registry.clone();
+        let handle = thread::spawn(move || worker(path, rx, output));
+        Self {
+            registry,
+            viewers: BTreeMap::new(),
+            version: 0,
+            instance: super::message_id(),
+            runtime: Runtime {
+                tx,
+                updates,
+                view: View::default(),
+                handle: Some(handle),
+            },
+        }
+    }
+    pub fn expire(&mut self) -> Result<()> {
+        let active = !self.viewers.is_empty();
+        self.viewers
+            .retain(|_, at| at.elapsed() < Duration::from_secs(10));
+        if active && self.viewers.is_empty() {
+            self.runtime.tx.send(Command::Viewing(false))?;
+        }
+        Ok(())
+    }
+    pub fn handle(&mut self, value: serde_json::Value) -> Result<serde_json::Value> {
+        let request: ChatRequest = serde_json::from_value(value)?;
+        self.expire()?;
+        let active = !self.viewers.is_empty();
+        let command = request.command;
+        if !request.viewing || matches!(command, Some(Command::Exit)) {
+            self.viewers.remove(&request.client);
+        } else {
+            self.viewers.insert(request.client, Instant::now());
+        }
+        if active != !self.viewers.is_empty() {
+            self.runtime
+                .tx
+                .send(Command::Viewing(!self.viewers.is_empty()))?;
+        }
+        if let Some(Command::Send(id, text)) = command {
+            let store = Store::new(&self.registry)?;
+            let result = store.initialize().and_then(|binding| {
+                store.enqueue_with_id(
+                    &binding,
+                    text.clone(),
+                    id.clone(),
+                    Some(MessageSource::User),
+                )
+            });
+            if let Err(error) = result {
+                let rejected = store
+                    .load()
+                    .ok()
+                    .filter(|state| !state.messages.iter().any(|m| m.id == id))
+                    .map(|_| (id.clone(), text));
+                return Ok(serde_json::to_value(ChatResponse {
+                    version: self.version,
+                    instance: self.instance.clone(),
+                    view: Some(View {
+                        error: Some(format!(
+                            "{error:#}（消息 {id}；结果未知时通过 agent status 核对）"
+                        )),
+                        rejected,
+                        ..View::default()
+                    }),
+                })?);
+            }
+        } else if matches!(command, Some(Command::Refresh)) {
+            self.runtime.tx.send(Command::Refresh)?;
+        }
+        let mut output = self.runtime.updates.lock().unwrap();
+        if let Some(view) = output.latest.take()
+            && view != self.runtime.view
+        {
+            self.runtime.view = view;
+            self.version += 1;
+        }
+        Ok(serde_json::json!({
+            "instance": self.instance,
+            "version": self.version,
+            "view": if request.instance.as_ref() == Some(&self.instance)
+                && request.version == Some(self.version) { None } else { Some(&self.runtime.view) }
+        }))
+    }
+}
+fn remote_worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<Updates>>) {
+    let mut viewing = true;
+    let mut send_error = None;
+    let client = super::message_id();
+    let mut version = None;
+    let mut instance = None;
+    loop {
+        let command = match input.recv_timeout(Duration::from_millis(700)) {
+            Ok(Command::Exit) | Err(mpsc::RecvTimeoutError::Disconnected) => Some(Command::Exit),
+            Ok(command) => Some(command),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+        };
+        if let Some(Command::Viewing(active)) = command {
+            viewing = active;
+        }
+        if !viewing && command.is_none() {
+            continue;
+        }
+        if matches!(command, Some(Command::Send(..) | Command::Refresh)) {
+            version = None;
+        }
+        let result = crate::daemon::call::<ChatResponse>(
+            &registry,
+            "agent.chat",
+            serde_json::json!({"client":client,"viewing":viewing,"command":command,"version":version,"instance":instance}),
+        );
+        if matches!(command, Some(Command::Exit)) {
+            break;
+        }
+        let mut view = match result {
+            Ok(response) => {
+                version = Some(response.version);
+                instance = Some(response.instance);
+                let Some(view) = response.view else {
+                    continue;
+                };
+                if matches!(command, Some(Command::Send(..))) && view.error.is_some() {
+                    version = None;
+                }
+                view
+            }
+            Err(error) => {
+                version = None;
+                View {
+                    error: Some(match &command {
+                        Some(Command::Send(id, _)) => format!(
+                            "{error:#}；消息 {id} 的提交结果未知，请用 agent status 核对，不要重复发送"
+                        ),
+                        _ => format!("{error:#}"),
+                    }),
+                    status: "后台连接失败 · F5 重试".into(),
+                    ..Default::default()
+                }
+            }
+        };
+        if matches!(command, Some(Command::Send(..) | Command::Refresh)) {
+            send_error = view.error.clone();
+        }
+        if let Some(error) = &send_error {
+            view.error = Some(error.clone());
+        }
+        let mut updates = output.lock().unwrap();
+        if let Some(rejected) = view.rejected.take() {
+            updates.rejected.push(rejected);
+        }
+        updates.latest = Some(view);
+    }
+}
+
 fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<Updates>>) {
     let mut connection: Option<(Store, Binding, rpc::Client, bool)> = None;
     let mut last_error = None;
-    let mut refresh = true;
-    let mut viewing = true;
+    let mut refresh = false;
+    let mut viewing = false;
     loop {
         let command = if refresh {
             None
@@ -154,7 +336,6 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
             })();
             match result {
                 Ok(c) => {
-                    last_error = c.0.drain().err().map(|e| format!("队列补查失败：{e:#}"));
                     connection = Some(c);
                 }
                 Err(e) => last_error = Some(format!("{e:#}")),
@@ -188,14 +369,28 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
                     *subscribed = store.resume(client, binding)?;
                     result = client.thread(&binding.thread)?;
                 }
-                view.entries = view::transcript(&result);
                 view.thread = binding.thread.clone();
                 view.model = result["thread"]["model"].as_str().map(str::to_owned);
                 view.reasoning_effort = result["thread"]["reasoningEffort"]
                     .as_str()
                     .map(str::to_owned);
                 let state = store.load()?;
-                view::apply_sources(&mut view.entries, &state.messages, &binding.thread);
+                let queue_errors: Vec<_> = state
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(message.status.as_str(), "queued" | "sending"))
+                    .filter_map(|message| {
+                        message
+                            .error
+                            .as_ref()
+                            .map(|error| format!("消息 {}：{error}", message.id))
+                    })
+                    .collect();
+                if !queue_errors.is_empty() {
+                    view.error = Some(queue_errors.join("\n"));
+                }
+                view.entries =
+                    super::history::conversation(&result, &state.messages, &binding.thread);
                 let pending = state
                     .messages
                     .iter()
@@ -212,30 +407,6 @@ fn worker(registry: PathBuf, input: mpsc::Receiver<Command>, output: Arc<Mutex<U
                 }
                 if unknown > 0 {
                     view.status.push_str(&format!(" · 待核对 {unknown}"));
-                }
-                let mut ids: HashSet<String> = view
-                    .entries
-                    .iter()
-                    .filter_map(|entry| entry.id.clone())
-                    .collect();
-                for message in state.messages.iter().filter(|m| {
-                    m.thread == binding.thread
-                        && matches!(m.status.as_str(), "queued" | "sending" | "sent" | "failed")
-                }) {
-                    if !ids.insert(message.id.clone()) {
-                        continue;
-                    }
-                    let mut entry = Entry::new(Kind::Unknown, &message.text);
-                    entry.apply_source(message);
-                    entry.id = Some(message.id.clone());
-                    entry.detail = format!("消息 ID：{}", message.id);
-                    view.entries.push(entry);
-                    if let Some(error) = &message.error {
-                        view.entries.push(Entry::new(Kind::Error, error));
-                    }
-                }
-                if pending > 0 && result["thread"]["status"]["type"] == "idle" {
-                    store.flush()?;
                 }
                 if let Some(request) = client.requests.first() {
                     view.approval = Some(format!(
@@ -278,6 +449,7 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     registry: PathBuf,
     draft: &mut Draft,
+    inbox: &crate::console::inbox::Inbox,
 ) -> Result<bool> {
     execute!(std::io::stdout(), EnableBracketedPaste)?;
     let mut runtime = draft
@@ -285,7 +457,7 @@ pub fn run(
         .take()
         .unwrap_or_else(|| Runtime::start(registry));
     runtime.tx.send(Command::Viewing(true))?;
-    let result = run_ui(terminal, &mut runtime, draft);
+    let result = run_ui(terminal, &mut runtime, draft, inbox);
     let _ = runtime.tx.send(Command::Viewing(false));
     draft.runtime = Some(runtime);
     execute!(std::io::stdout(), DisableBracketedPaste)?;
@@ -297,6 +469,7 @@ fn run_ui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     runtime: &mut Runtime,
     draft: &mut Draft,
+    inbox: &crate::console::inbox::Inbox,
 ) -> Result<bool> {
     let Runtime {
         tx, updates, view, ..
@@ -308,6 +481,9 @@ fn run_ui(
     let mut areas = view::Areas::default();
     let mut copy_notice = None;
     loop {
+        // 进入页面之后才同步到缓存的事件也要确认；只清除 UI 已观察到的水位。
+        inbox.load()?;
+        inbox.read_controller()?;
         let (update, rejected) = {
             let mut updates = updates.lock().unwrap();
             (updates.latest.take(), std::mem::take(&mut updates.rejected))
@@ -558,6 +734,135 @@ fn run_ui(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn remote_worker_reports_hidden_and_exit_then_stops_polling() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("config.toml");
+        let paths = crate::daemon::Paths::new(&registry).unwrap();
+        crate::daemon::private_directory(paths.socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        let (observed, responses) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "agent.chat");
+                let params = &request["params"];
+                if index == 0 {
+                    assert!(params["version"].is_null());
+                } else {
+                    assert_eq!(params["version"], 1);
+                    assert_eq!(params["instance"], "mock");
+                }
+                writeln!(stream, "{}", json!({"id":request["id"],"version":request["version"],"error":null,
+                    "result":{"instance":"mock","version":1,"view":if index==0 {Some(View::default())} else {None}}})).unwrap();
+                observed.send(params["command"].clone()).unwrap();
+            }
+        });
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || remote_worker(registry, rx, Default::default()));
+        tx.send(Command::Viewing(true)).unwrap();
+        assert_eq!(
+            responses.recv_timeout(Duration::from_secs(5)).unwrap(),
+            json!({"Viewing":true})
+        );
+        tx.send(Command::Viewing(false)).unwrap();
+        assert_eq!(
+            responses.recv_timeout(Duration::from_secs(5)).unwrap(),
+            json!({"Viewing":false})
+        );
+        assert!(responses.recv_timeout(Duration::from_millis(850)).is_err());
+        tx.send(Command::Exit).unwrap();
+        assert_eq!(
+            responses.recv_timeout(Duration::from_secs(5)).unwrap(),
+            json!("Exit")
+        );
+        worker.join().unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(paths.socket).unwrap();
+    }
+
+    #[test]
+    fn viewer_leases_and_versions_are_shared_without_hiding_other_windows() {
+        let (tx, rx) = mpsc::channel();
+        let mut backend = Backend {
+            registry: PathBuf::from("unused"),
+            runtime: Runtime {
+                tx,
+                updates: Default::default(),
+                view: View::default(),
+                handle: None,
+            },
+            viewers: BTreeMap::new(),
+            version: 0,
+            instance: "instance".into(),
+        };
+        let request = |client: &str, command: Option<Command>, version: Option<u64>| json!({"client":client,"viewing":!matches!(command, Some(Command::Viewing(false) | Command::Exit)),"command":command,"version":version,"instance":"instance"});
+        let first = backend
+            .handle(request("one", Some(Command::Viewing(true)), None))
+            .unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Command::Viewing(true)));
+        assert!(!first["view"].is_null());
+        backend
+            .handle(request("two", Some(Command::Viewing(true)), None))
+            .unwrap();
+        backend
+            .handle(request("one", Some(Command::Viewing(false)), None))
+            .unwrap();
+        assert!(rx.try_recv().is_err());
+        backend.runtime.updates.lock().unwrap().latest = Some(View {
+            status: "active".into(),
+            ..View::default()
+        });
+        let changed = backend.handle(request("two", None, Some(0))).unwrap();
+        assert_eq!(changed["view"]["status"], "active");
+        let version = changed["version"].as_u64().unwrap();
+        backend.runtime.updates.lock().unwrap().latest = Some(View {
+            status: "active".into(),
+            ..View::default()
+        });
+        assert!(backend.handle(request("two", None, Some(version))).unwrap()["view"].is_null());
+        backend
+            .viewers
+            .insert("two".into(), Instant::now() - Duration::from_secs(11));
+        backend.expire().unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Command::Viewing(false)));
+        backend
+            .handle(request("two", Some(Command::Viewing(true)), Some(version)))
+            .unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Command::Viewing(true)));
+        backend
+            .handle(request("two", Some(Command::Exit), None))
+            .unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), Command::Viewing(false)));
+    }
+
+    #[test]
+    fn hidden_worker_does_not_initialize_or_query() {
+        let root = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let output = Arc::new(Mutex::new(Updates::default()));
+        let path = root.path().join("config.toml");
+        let updates = output.clone();
+        let thread = thread::spawn(move || worker(path, rx, updates));
+        tx.send(Command::Viewing(false)).unwrap();
+        tx.send(Command::Exit).unwrap();
+        thread.join().unwrap();
+        assert!(output.lock().unwrap().latest.is_none());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn local_echo_survives_stale_snapshots_and_merges_by_id_not_text() {

@@ -29,6 +29,15 @@ fn matches_error(error: &anyhow::Error, method: &str, message: &str) -> bool {
 pub fn thread_not_loaded(error: &anyhow::Error, id: &str) -> bool {
     matches_error(error, "thread/read", &format!("thread not loaded: {id}"))
 }
+pub fn unmaterialized(error: &anyhow::Error, id: &str) -> bool {
+    matches_error(
+        error,
+        "thread/turns/list",
+        &format!(
+            "thread {id} is not materialized yet; thread/turns/list is unavailable before first user message"
+        ),
+    )
+}
 pub fn no_rollout(error: &anyhow::Error, id: &str) -> bool {
     matches_error(
         error,
@@ -63,6 +72,48 @@ pub fn discover() -> Result<PathBuf> {
 }
 
 impl Client {
+    /// 仅核对已知新轮次的状态，不加载消息内容。
+    pub(crate) fn turn_status(&mut self, thread: &str, turn: &str) -> Result<String> {
+        let mut cursor = Value::Null;
+        let mut cursors = std::collections::HashSet::new();
+        loop {
+            let page = self.call("thread/turns/list", json!({"threadId":thread,"cursor":cursor,"limit":50,"sortDirection":"desc","itemsView":"notLoaded"}))?;
+            if let Some(value) = page["data"]
+                .as_array()
+                .context("轮次列表缺少 data")?
+                .iter()
+                .find(|value| value["id"] == turn)
+            {
+                return Ok(value["status"].as_str().context("轮次缺少 status")?.into());
+            }
+            cursor = page["nextCursor"].clone();
+            ensure!(
+                !cursor.is_null(),
+                "未找到新消息对应的轮次 {turn}，保留待核对记录"
+            );
+            ensure!(cursors.insert(cursor.to_string()), "轮次列表返回重复游标");
+        }
+    }
+    /// 只读取指定的新轮次，倒序找到最终回答即停止，不访问其他轮次正文。
+    pub(crate) fn final_reply(&mut self, thread: &str, turn: &str) -> Result<String> {
+        let mut cursor = Value::Null;
+        let mut cursors = std::collections::HashSet::new();
+        loop {
+            let page = self.call("thread/items/list", json!({"threadId":thread,"turnId":turn,"cursor":cursor,"limit":50,"sortDirection":"desc"}))?;
+            for entry in page["data"].as_array().context("轮次条目缺少 data")? {
+                ensure!(entry["turnId"] == turn, "Codex 返回了其他轮次的条目");
+                let item = &entry["item"];
+                if item["type"] == "agentMessage" && item["phase"] != "commentary" {
+                    return Ok(item["text"].as_str().context("最终回复缺少 text")?.into());
+                }
+            }
+            cursor = page["nextCursor"].clone();
+            if cursor.is_null() {
+                return Ok(String::new());
+            }
+            ensure!(cursors.insert(cursor.to_string()), "轮次条目返回重复游标");
+        }
+    }
     pub fn thread(&mut self, id: &str) -> Result<Value> {
         let metadata = self.call("thread/read", json!({"threadId":id,"includeTurns":false}))?;
         // 新建且尚无输入的 session 没有可分页的轮次存储。
@@ -149,5 +200,67 @@ impl Client {
                 _ => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{os::unix::net::UnixListener, thread};
+
+    #[test]
+    fn new_turn_queries_never_request_full_history_and_skip_tools_and_commentary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("socket");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let mut pages = 0;
+            while let Ok(Message::Text(text)) = ws.read() {
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let result = match request["method"].as_str().unwrap() {
+                    "initialize" => json!({}),
+                    "initialized" => continue,
+                    "thread/turns/list" => {
+                        assert_eq!(request["params"]["itemsView"], "notLoaded");
+                        json!({"data":[{"id":"new-turn","status":"completed"}]})
+                    }
+                    "thread/items/list" => {
+                        assert_eq!(request["params"]["turnId"], "new-turn");
+                        assert_eq!(request["params"]["sortDirection"], "desc");
+                        pages += 1;
+                        if pages == 1 {
+                            json!({"data":[{"turnId":"new-turn","item":{"type":"agentMessage","phase":"commentary","text":"working"}},{"turnId":"new-turn","item":{"type":"commandExecution","aggregatedOutput":"tool result"}}],"nextCursor":"next"})
+                        } else {
+                            assert_eq!(request["params"]["cursor"], "next");
+                            json!({"data":[{"turnId":"new-turn","item":{"type":"agentMessage","phase":"final_answer","text":"final reply"}}]})
+                        }
+                    }
+                    method => panic!("不允许读取旧历史：{method}"),
+                };
+                ws.send(Message::Text(
+                    json!({"id":request["id"],"result":result})
+                        .to_string()
+                        .into(),
+                ))
+                .unwrap();
+            }
+            assert_eq!(pages, 2);
+        });
+        let mut client = Client::connect(&path).unwrap();
+        assert_eq!(
+            client.turn_status("controller", "new-turn").unwrap(),
+            "completed"
+        );
+        assert_eq!(
+            client.final_reply("controller", "new-turn").unwrap(),
+            "final reply"
+        );
+        drop(client);
+        server.join().unwrap();
     }
 }

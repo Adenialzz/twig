@@ -99,7 +99,7 @@ pub fn recent_projects(path: &Path) -> Result<Vec<(String, Entry)>> {
 
 pub fn list(path: &Path) -> Result<()> {
     for (name, entry) in load(path)?.projects {
-        println!("{name}\t{}", entry.path.display());
+        crate::output!("{name}\t{}", entry.path.display());
     }
     Ok(())
 }
@@ -114,7 +114,7 @@ pub fn remove(path: &Path, name: &str) -> Result<()> {
         "未登记项目 {name}"
     );
     save(path, &registry)?;
-    println!("已取消登记 {name}；仓库、任务和项目状态保留");
+    crate::output!("已取消登记 {name}；仓库、任务和项目状态保留");
     Ok(())
 }
 
@@ -138,11 +138,10 @@ pub fn add(
         .context("未找到主工作目录")?
         .0
         .canonicalize()?;
-    std::env::set_current_dir(&main)?;
     let project = config::Project::discover_at(&main, registry_path)?;
     let _lock = project.lock()?;
-    initialize(registry_path, &name, || {
-        crate::init(&project, base, target, root)
+    initialize(registry_path, &main, &name, || {
+        crate::init(&project, &main, base, target, root)
     })
 }
 
@@ -156,14 +155,11 @@ fn save(path: &Path, registry: &Registry) -> Result<()> {
 /// 持有登记表锁，先检查冲突，再初始化；只有初始化成功才写入新登记。
 fn initialize(
     path: &Path,
+    main: &Path,
     requested: &str,
     initialize_project: impl FnOnce() -> Result<()>,
 ) -> Result<String> {
-    let main = crate::git::worktrees(&std::env::current_dir()?)?
-        .first()
-        .context("未找到主工作目录")?
-        .0
-        .canonicalize()?;
+    let main = main.canonicalize()?;
     fs::create_dir_all(path.parent().context("配置路径缺少父目录")?)?;
     let _lock = config::Lock::acquire(path.with_extension("lock"))?;
     let mut registry = load(path)?;
@@ -192,7 +188,7 @@ fn initialize(
         );
         save(path, &registry).context("项目已初始化，但全局登记保存失败；请重试 twig add")?;
     }
-    println!("项目别名：{name}（{}）", path.display());
+    crate::output!("项目别名：{name}（{}）", path.display());
     Ok(name)
 }
 

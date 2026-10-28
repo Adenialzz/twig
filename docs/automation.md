@@ -2,6 +2,8 @@
 
 命令行阅读：`twig guide automation`。人和 Agent 使用同一套命令与文档，不需要专用输出格式。
 
+业务依赖显式启动的 Twig 后台；使用 `twig daemon status` 检查连接、采集与队列，未知操作通过 `twig operation show ID` 核对。共享状态、未读和断连恢复见 [后台指南](daemon.md)。
+
 ## 先发现，再执行
 
 ```sh

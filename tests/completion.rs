@@ -42,7 +42,7 @@ fn values(cwd: &Path, args: &[&str]) -> String {
 #[test]
 fn commands_options_and_paths_without_a_repository() {
     let temp = TempDir::new().unwrap();
-    assert!(values(temp.path(), &["op"]).starts_with("open:"));
+    assert!(values(temp.path(), &["op"]).contains("open:"));
     assert!(values(temp.path(), &["rm", "--keep"]).starts_with("--keep-branch:"));
     assert!(values(temp.path(), &["guide", "win"]).starts_with("windows:"));
     fs::create_dir(temp.path().join("work trees")).unwrap();

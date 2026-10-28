@@ -905,7 +905,7 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             rows[2],
         );
         let buttons = if form.busy() {
-            "正在删除，请等待…".into()
+            form.progress.clone()
         } else {
             format!(
                 "{}[ 取消 ]    {}[ 确认删除 ]",
@@ -1182,7 +1182,7 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
                 )
             }
             Some(error) => format!("请检查输入：{}", safe(error)),
-            None if form.busy() => "正在执行，请等待…".into(),
+            None if form.busy() => form.progress.clone(),
             None if form.completing_branch() && form.branch_error.is_some() => format!(
                 "读取分支失败：{}",
                 safe(form.branch_error.as_deref().unwrap())

@@ -66,3 +66,7 @@ CI 在 Ubuntu 24.04（tmux 3.8）和 macOS Tahoe 26（Homebrew tmux）上执行�
 `cargo build --locked && uv run examples/check_agent.py` 验证正式 Chat/CLI：全新主控首次打开及两轮回复上屏、受管任务、启动配置隔离、状态文件忽略、离线回调、忙时排队、未知投递对账、漏失回调补查、离线主控执行通知 CLI、标签切换草稿、Chat 拖选/Alt-C 复制（捕获 OSC 52）、中文长输入和 F4 详情、服务重启、飞书业务错误及停止/删除保护。依赖 Codex、tmux、Git、uv，使用独立 CODEX_HOME 与本地模型，不读取真实认证、不向真实会话输入、不发送真实飞书消息。协议单独实验为 `uv run examples/check_controller.py`。
 
 主控验收还覆盖后台回复的浮动提醒与 Chat 未读、工作台提醒、卡片到期保留未读、进入 Chat 清除和不重复提醒。
+
+后台系统托管示例见 [services/twig.service](services/twig.service) 与 [services/com.twig.daemon.plist](services/com.twig.daemon.plist)，安装步骤见 [后台指南](../docs/daemon.md)。Agent 验收同时启动隔离 Twig 后台；`feishu_mock.py` 提供本机应用机器人 HTTP/WebSocket，验证全部 UI 退出后的双向收发及重启去重，不使用真实凭证。
+
+Agent CI 在 Ubuntu 24.04 与 macOS 26 上固定 Python 3.11、Codex 0.164.0，构建正式二进制后执行上述脚本。验收步骤限时 5 分钟，失败日志保留 7 天；长输入、后台等待和退出期间持续读取 PTY，超时前输出线程栈。

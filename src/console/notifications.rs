@@ -9,7 +9,7 @@ use std::{
 use twig_cli::notification::{CompletionNotice, UnreadTask};
 
 /// 首次成功读取只建立基线；待发消息确认送达后才消耗其 ID。
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Deliveries {
     pub initialized: bool,
     pub seen: std::collections::HashSet<String>,
@@ -350,6 +350,12 @@ impl ChatNotifications {
     pub fn set_viewing(&mut self, viewing: bool) -> Result<()> {
         if viewing {
             self.inbox.as_ref().unwrap().read_controller()?;
+        }
+        if !viewing {
+            self.inbox
+                .as_ref()
+                .unwrap()
+                .viewing(serde_json::Value::Null)?;
         }
         self.viewing(viewing);
         Ok(())

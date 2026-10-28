@@ -1,4 +1,4 @@
-//! 表单在独立 twig 进程中执行写操作，复用 CLI 的锁和生命周期逻辑。
+//! 表单通过短命 CLI 客户端提交后台操作；关闭前台不取消已接受操作。
 use crate::{git::git, registry};
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -30,6 +30,7 @@ pub struct Form {
     branch_input: String,
     selected_branch: Option<String>,
     pub operation_started: bool,
+    pub progress: String,
     pub deletion: Option<Deletion>,
     pub existing: Option<ExistingBranch>,
     default_alias: Option<String>,
@@ -38,7 +39,7 @@ pub struct Form {
     branch_query: Option<BranchQuery>,
     directory_cache: Option<(String, Instant, Vec<String>)>,
 }
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct BranchCandidate {
     pub name: String,
     pub reference: String,
@@ -100,6 +101,7 @@ impl Form {
             branch_input: String::new(),
             selected_branch: None,
             operation_started: false,
+            progress: "已提交，等待后台接受…".into(),
             deletion: None,
             existing: None,
             default_alias: None,
@@ -116,14 +118,19 @@ impl Form {
             ..Self::project()
         }
     }
-    pub fn load_branches(&mut self, path: &Path) {
+    pub fn load_branches(&mut self, registry: &Path, path: &Path) {
+        let registry = registry.to_owned();
         let path = path.to_owned();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
         let (out, result) = mpsc::channel();
         std::thread::spawn(move || {
             super::query::install(stop);
-            let _ = out.send(branch_candidates(&path));
+            let _ = out.send(crate::daemon::call(
+                &registry,
+                "form.branches",
+                serde_json::json!(path),
+            ));
         });
         self.branch_query = Some(BranchQuery { result, cancel });
         self.branch_error = Some("正在读取分支候选…".into());
@@ -171,6 +178,7 @@ impl Form {
         self.project.is_none() && self.field == 0 && !self.busy()
     }
     pub fn delete(
+        registry: &Path,
         project: String,
         name: String,
         common: &Path,
@@ -178,11 +186,7 @@ impl Form {
         path: std::path::PathBuf,
     ) -> Result<Self> {
         let expected = serde_json::to_string(&(common, &branch, &path))?;
-        let ignored = if path.try_exists()? {
-            crate::git::ignored(&path)?
-        } else {
-            Vec::new()
-        };
+        let ignored = crate::daemon::call(registry, "form.ignored", serde_json::json!(path))?;
         Ok(Self {
             project: Some(project),
             fields: [name, String::new()],
@@ -221,15 +225,8 @@ impl Form {
                 path = registry::expand(Path::new(&self.fields[0]))?;
             }
             ensure!(path.is_dir(), "目录不存在：{}", path.display());
-            ensure!(
-                git(&path, &["rev-parse", "--is-bare-repository"])? == "false",
-                "暂不支持裸仓库"
-            );
-            let main = crate::git::worktrees(&path)?
-                .first()
-                .context("未找到主工作目录")?
-                .0
-                .clone();
+            let main: std::path::PathBuf =
+                crate::daemon::call(registry, "form.project", serde_json::json!(path))?;
             let alias = main
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -280,14 +277,12 @@ impl Form {
         } else if let Some(project) = &self.project {
             crate::config::task_name(&self.fields[0])?;
             ensure!(self.fields[0] != "main", "main 保留给项目主窗口");
-            let entry = registry::entry(registry, project)?;
-            let path = registry::expand(&entry.path)?;
-            let repository = crate::config::Project::discover_at(&path, registry)?;
-            ensure!(
-                !repository.state()?.contains_key(&self.fields[0]),
-                "任务 {} 已存在，请从任务列表进入；资源异常时请查看 twig guide troubleshooting",
-                self.fields[0]
-            );
+            let (common, available): (std::path::PathBuf, Vec<crate::config::BranchStart>) =
+                crate::daemon::call(
+                    registry,
+                    "form.task",
+                    serde_json::json!([project, &self.fields[0]]),
+                )?;
             if let Some(existing) = self.existing.take() {
                 ensure!(existing.confirmed, "操作已取消");
                 let expected = serde_json::to_string(&(
@@ -303,8 +298,7 @@ impl Form {
                 ]);
             } else {
                 command.args(["new", project, &self.fields[0]]);
-                let config = repository.config()?;
-                let mut branches = crate::existing_branches(&config, &self.fields[0])?;
+                let mut branches = available;
                 if let Some(reference) = &self.selected_branch {
                     let source = branches
                         .into_iter()
@@ -319,7 +313,7 @@ impl Form {
                 if !branches.is_empty() {
                     self.existing = Some(ExistingBranch {
                         branches,
-                        common: repository.common,
+                        common,
                         selected: 0,
                         confirmed: false,
                     });
@@ -347,6 +341,7 @@ impl Form {
             .stdin(Stdio::null())
             .stdout(output.try_clone()?)
             .stderr(output.try_clone()?)
+            .env("TWIG_OPERATION_PROGRESS", "1")
             .spawn()
             .context("无法启动创建操作")?;
         self.job = Some(Job { child, output });
@@ -417,6 +412,16 @@ impl Form {
             return Ok(None);
         };
         let Some(status) = job.child.try_wait()? else {
+            use std::os::unix::fs::FileExt;
+            let mut bytes = vec![0; (job.output.metadata()?.len() as usize).min(64 * 1024)];
+            let count = job.output.read_at(&mut bytes, 0)?;
+            if let Some(line) = String::from_utf8_lossy(&bytes[..count])
+                .lines()
+                .rev()
+                .find(|line| line.starts_with("操作进度："))
+            {
+                self.progress = line.to_owned();
+            }
             return Ok(None);
         };
         let mut job = self.job.take().unwrap();
@@ -442,7 +447,7 @@ impl Form {
     }
 }
 
-fn branch_candidates(path: &Path) -> Result<Vec<BranchCandidate>> {
+pub(crate) fn branch_candidates(path: &Path) -> Result<Vec<BranchCandidate>> {
     let remotes = git(path, &["remote"])?;
     let references = git(
         path,

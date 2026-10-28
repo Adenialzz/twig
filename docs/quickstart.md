@@ -13,6 +13,7 @@ twig 用 Git Worktree 和 tmux 管理本地任务环境。一个项目对应一�
 准备一个至少有一次提交的普通 Git 仓库；需要克隆时先自行运行 git clone。
 
 ```sh
+twig daemon start
 twig add myapp --path ~/projects/myapp
 twig ls
 twig ls myapp

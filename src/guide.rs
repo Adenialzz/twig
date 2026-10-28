@@ -4,6 +4,8 @@ use clap::ValueEnum;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Topic {
+    /// Twig 后台生命周期与系统托管
+    Daemon,
     /// 安装、依赖和更新
     Installation,
     /// 从登记项目到完成任务
@@ -24,6 +26,8 @@ pub enum Topic {
     Automation,
     /// 主控 Agent、受管 Codex 任务与飞书通知
     Agent,
+    /// 飞书机器人申请、权限、双向接入与故障排查
+    Feishu,
     /// 错误诊断和资源恢复
     Troubleshooting,
 }
@@ -31,6 +35,7 @@ pub enum Topic {
 impl Topic {
     fn content(self) -> &'static str {
         match self {
+            Self::Daemon => include_str!("../docs/daemon.md"),
             Self::Installation => include_str!("../docs/installation.md"),
             Self::Quickstart => include_str!("../docs/quickstart.md"),
             Self::Commands => include_str!("../docs/commands.md"),
@@ -40,6 +45,7 @@ impl Topic {
             Self::Cleanup => include_str!("../docs/cleanup.md"),
             Self::Completion => include_str!("../docs/completion.md"),
             Self::Agent => include_str!("../docs/agent.md"),
+            Self::Feishu => include_str!("../docs/feishu.md"),
             Self::Automation => include_str!("../docs/automation.md"),
             Self::Troubleshooting => include_str!("../docs/troubleshooting.md"),
         }

@@ -11,6 +11,12 @@
 - 所有命令支持 `--config PATH`：选择用户登记表及同目录项目状态，默认 `~/.twig/config.toml`。不按当前目录推断项目。
 - `-h/--help` 输出帮助，顶层 `-V/--version` 输出版本。
 
+## daemon 与 operation
+
+业务 CLI 和 Console 需要显式启动 `twig daemon start`，不会静默本地执行；`--config` 同时选择后台实例。`daemon restart` 有序重启手动后台并保留原环境；前台和托管实例使用原启动方式重启。`daemon run` 供前台调试和系统托管，`daemon status` 查询健康状态，`daemon stop` 等待已接受工作后退出，保留 tmux 与 Codex。
+
+`twig operation ls` 列持久化操作，`twig operation show ID` 可按操作或请求 ID 查询，`twig operation resolve ID --yes` 在人工核对资源后解除待核对阻塞，不重跑或回滚。响应丢失先按原 ID 查询，不重复发起。`TWIG_OPERATION_PROGRESS=1` 可显示业务阶段。详细恢复步骤见 [后台指南](daemon.md)。
+
 ## guide：阅读离线手册
 
 ```sh

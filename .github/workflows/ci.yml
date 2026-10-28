@@ -79,6 +79,14 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Rust 测试
         run: cargo test --locked -- --nocapture
+      - name: 校验 systemd 示例
+        if: runner.os == 'Linux'
+        run: |
+          sed "s|%h/.cargo/bin/twig|$PWD/target/debug/twig|" examples/services/twig.service > "$RUNNER_TEMP/twig.service"
+          XDG_RUNTIME_DIR="$RUNNER_TEMP" systemd-analyze --user verify "$RUNNER_TEMP/twig.service"
+      - name: 校验 launchd 示例
+        if: runner.os == 'macOS'
+        run: plutil -lint examples/services/com.twig.daemon.plist
 
   terminal:
     name: terminal (${{ matrix.os }})
@@ -128,3 +136,74 @@ jobs:
         run: cargo build --locked --example control_mode
       - name: 终端 PTY 验收
         run: uv run examples/check_control_mode.py
+
+  agent:
+    name: agent (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: false
+          python-version: '3.11'
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: 安装固定版本 Codex
+        run: npm install --global @openai/codex@0.164.0
+      - name: 安装 Linux Agent 验收依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl bubblewrap build-essential libevent-dev libncurses-dev bison pkg-config
+      - name: 构建并安装 tmux 3.8
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --output "$RUNNER_TEMP/tmux-3.8.tar.gz" https://github.com/tmux/tmux/releases/download/3.8/tmux-3.8.tar.gz
+          tar -xzf "$RUNNER_TEMP/tmux-3.8.tar.gz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/tmux-3.8"
+          ./configure --prefix="$RUNNER_TEMP/tmux-install"
+          make -j2
+          make install
+          echo "$RUNNER_TEMP/tmux-install/bin" >> "$GITHUB_PATH"
+      - name: 安装 macOS Agent 验收依赖
+        if: runner.os == 'macOS'
+        run: brew install tmux
+      - name: 记录环境版本
+        run: |
+          rustc --version
+          cargo --version
+          git --version
+          tmux -V
+          curl --version
+          node --version
+          npm --version
+          codex --version
+          uv --version
+      - name: 构建正式 Twig 二进制
+        run: cargo build --locked
+      - name: Agent 与飞书隔离验收
+        id: agent_check
+        shell: bash
+        timeout-minutes: 5
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: uv run examples/check_agent.py 2>&1 | tee "$RUNNER_TEMP/agent-check.log"
+      - name: 保存失败验收日志
+        if: failure() && steps.agent_check.outcome == 'failure'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: agent-check-${{ matrix.os }}
+          path: ${{ runner.temp }}/agent-check.log
+          if-no-files-found: error
+          retention-days: 7

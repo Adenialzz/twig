@@ -126,6 +126,7 @@ impl Fixture {
             .arg("--config")
             .arg(&self.registry)
             .args(args);
+        support::daemon::ensure(&c, &self.registry);
         let o = c.output().unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
@@ -192,6 +193,7 @@ printf '\nTERMINAL_RESTORED:%s\n' "$code"
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        support::daemon::stop_under(self.temp.path());
         let _ = Command::new(&self.tmux)
             .args(["-L", &self.socket, "kill-server"])
             .output();
@@ -222,6 +224,7 @@ struct Pty {
 }
 impl Pty {
     fn spawn(mut command: Command) -> Self {
+        support::daemon::for_pty(&command);
         let (mut master, mut slave) = (0, 0);
         let mut size = libc::winsize {
             ws_row: 36,
@@ -356,6 +359,21 @@ impl Pty {
     }
     fn wait(&mut self, needle: &str) {
         self.wait_for(needle, false, true);
+    }
+    fn task_form_ready(&mut self) {
+        self.wait_screen("新建任务");
+        // 等待正向就绪标志；PTY 分片到达时，“加载提示尚未绘制”不等于已加载。
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            self.read_output();
+            let screen = self.screen_text();
+            if screen.contains("已有分支 · 选作任务") || screen.contains("无匹配分支，将新建分支")
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "分支候选未就绪：{screen}");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
     fn wait_screen(&mut self, needle: &str) {
         self.wait_for(needle, true, true);
@@ -531,8 +549,11 @@ fn navigation_batches_worktree_and_window_queries() {
             "#!/bin/sh\nprintf 'tmux %s\\n' \"$*\" >> \"$TWIG_QUERY_LOG\"\nexec \"$TWIG_REAL_TMUX\" -L \"$TWIG_TEST_SOCKET\" -f /dev/null \"$@\"\n",
         ),
     ] {
-        fs::write(f.bin.join(name), script).unwrap();
-        fs::set_permissions(f.bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+        // 后台可能仍在执行旧脚本，不能原地截断可执行文件。
+        let replacement = f.bin.join(format!("{name}.new"));
+        fs::write(&replacement, script).unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(replacement, f.bin.join(name)).unwrap();
     }
     let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
     f.env(&mut command);
@@ -553,28 +574,50 @@ fn navigation_batches_worktree_and_window_queries() {
             .lines()
             .filter(|line| line.starts_with("git status "))
             .count()
-            == 3
+            >= 3
         {
             break queries;
         }
         assert!(start.elapsed() < Duration::from_secs(3), "{queries}");
         thread::sleep(Duration::from_millis(10));
     };
+    // 只检查第一轮三个任务的 Git 扫描，避免慢机器已进入后续扫描。
+    let mut statuses = 0;
+    let queries = queries
+        .lines()
+        .take_while(|line| {
+            if statuses == 3 {
+                return false;
+            }
+            statuses += usize::from(line.starts_with("git status "));
+            true
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
         queries
-            .lines()
+            .iter()
             .filter(|line| line.starts_with("git worktree list "))
             .count(),
         1
     );
-    assert_eq!(
-        queries
-            .lines()
-            .filter(|line| line.starts_with("tmux list-windows "))
-            .count(),
-        1
+    // 窗口采集有独立的两秒周期，不要求与一轮 Git 扫描次数相等；
+    // 每次必须全局批量读取，不能按任务逐个查询窗口。
+    let windows: Vec<_> = queries
+        .iter()
+        .filter(|line| line.starts_with("tmux list-windows "))
+        .collect();
+    assert!(!windows.is_empty());
+    assert!(
+        windows
+            .iter()
+            .all(|line| line.starts_with("tmux list-windows -a -F ")),
+        "{windows:?}"
     );
-    assert!(!queries.contains("git branch --show-current"));
+    assert!(
+        !queries
+            .iter()
+            .any(|line| line.contains("git branch --show-current"))
+    );
     p.send(b"q");
     assert!(p.wait_exit().success());
 }
@@ -962,7 +1005,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
     p.wait("终端已返回导航：不能在当前");
     p.clear_output();
     p.send(b"2n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"feat/nested");
     p.wait_screen("无匹配分支，将新建分支");
     p.send(b"\r");
@@ -1175,12 +1218,15 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     fs::write(f.bin.join("codex"), script).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let offline = Arc::new(AtomicBool::new(false));
+    let turn_failure = Arc::new(AtomicBool::new(false));
     let methods = Arc::new(Mutex::new(Vec::new()));
     let done = stop.clone();
     let disconnected = offline.clone();
+    let failed_turn = turn_failure.clone();
     let seen = methods.clone();
     let cwd = f.repo.canonicalize().unwrap();
     let server = thread::spawn(move || {
+        let mut connections = Vec::new();
         while !done.load(Ordering::Relaxed) {
             let (socket, _) = match listener.accept() {
                 Ok(s) => s,
@@ -1190,13 +1236,19 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                 }
                 Err(e) => panic!("{e}"),
             };
+            let done = done.clone();
+            let disconnected = disconnected.clone();
+            let failed_turn = failed_turn.clone();
+            let seen = seen.clone();
+            let cwd = cwd.clone();
+            connections.push(thread::spawn(move || {
             socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut ws = match tungstenite::accept(socket) {
                 Ok(ws) => ws,
-                Err(_) => continue,
+                Err(_) => return,
             };
             ws.get_mut()
                 .set_read_timeout(Some(Duration::from_millis(200)))
@@ -1223,6 +1275,12 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                 if disconnected.load(Ordering::Relaxed) {
                     let _ = ws.close(None);
                     break;
+                }
+                if method == "thread/turns/list" && failed_turn.load(Ordering::Relaxed) {
+                    if ws.send(tungstenite::Message::Text(json!({"id":v["id"],"error":{"code":-32603,"message":"TURN_QUERY_FAILURE"}}).to_string().into())).is_err() {
+                        break;
+                    }
+                    continue;
                 }
                 let thread_value = |id: &str, status: Value| json!({"id":id,"cwd":cwd,"name":id,"status":status,"source":"cli","model":"mock-model"});
                 let result = match method {
@@ -1256,6 +1314,10 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                     break;
                 }
             }
+            }));
+        }
+        for connection in connections {
+            connection.join().unwrap();
         }
     });
     // 即使断言失败也释放模拟 server，不遗留线程。
@@ -1277,7 +1339,18 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
         thread::sleep(Duration::from_millis(20));
     }
     p.send(b"n");
-    thread::sleep(Duration::from_millis(200));
+    let start = Instant::now();
+    while methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "thread/list")
+        .count()
+        < 2
+    {
+        assert!(start.elapsed() < Duration::from_secs(5), "历史下一页未完成");
+        thread::sleep(Duration::from_millis(20));
+    }
     p.send(b"\r");
     let start = Instant::now();
     while !methods
@@ -1292,8 +1365,26 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     offline.store(true, Ordering::Relaxed);
     p.send(b"r");
     p.wait("服务关闭连接");
+    p.wait("读取失败：");
+    let prior_connections = methods
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|m| m.as_str() == "initialize")
+        .count();
+    p.clear_output();
     offline.store(false, Ordering::Relaxed);
+    // 同一详情页不改查询键、不手动刷新，连接恢复后也应重试并结束错误状态。
+    p.wait("本轮已完成");
+    turn_failure.store(true, Ordering::Relaxed);
+    p.clear_output();
     p.send(b"r");
+    p.wait("TURN_QUERY_FAILURE");
+    p.wait("读取失败：");
+    p.clear_output();
+    turn_failure.store(false, Ordering::Relaxed);
+    // details RPC 成功但 snapshot.turn 为 Err，同样必须自动重试。
+    p.wait("本轮已完成");
     let start = Instant::now();
     while methods
         .lock()
@@ -1301,7 +1392,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
         .iter()
         .filter(|m| m.as_str() == "initialize")
         .count()
-        < 2
+        <= prior_connections
     {
         assert!(start.elapsed() < Duration::from_secs(5));
         thread::sleep(Duration::from_millis(20));
@@ -1669,7 +1760,7 @@ fn forms_register_create_retry_and_enter_task() {
     p.clear_output();
     // 创建项目后焦点已在任务区；通过候选补全打开任务表单。
     p.send(b"/ne\t\r");
-    p.wait("新建任务");
+    p.task_form_ready();
     let before_creation = fs::read(&f.registry).unwrap();
     p.send(b"feat/fresh\t\x7f\x7f\x7f\x7fmissing\r");
     p.wait("基础分支不存在");
@@ -1717,7 +1808,7 @@ fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         if during_confirmation {
             p.send(b"pending\r");
             p.wait("使用已有分支");
@@ -1772,7 +1863,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"2n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"feature/");
     p.wait("feature/alpha");
     p.wait("feature/beta");
@@ -1782,7 +1873,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     // 默认取消，候选选择本身不创建资源。
     p.send(b"\r");
     p.clear_output();
-    p.wait("新建任务");
+    p.task_form_ready();
     assert_eq!(fs::read(&state_path).unwrap(), state_before);
     assert_eq!(refs(), before);
     p.send(b"\r");
@@ -1808,7 +1899,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"upstream/feat/collision");
         p.wait("upstream/feat/collision");
         // 本地与远端候选显示同名，第二项才是远端跟踪分支。
@@ -1817,7 +1908,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         p.wait("使用已有分支");
         // 默认取消后再次提交，仍须保持同一远端候选。
         p.send(b"\r");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.clear_output();
         p.send(b"\r");
         p.wait("使用已有分支");
@@ -1866,7 +1957,7 @@ fn remote_candidates_fill_task_names_and_preserve_local_precedence() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"upstream/feat");
         p.wait("upstream/feat/remote");
         assert!(!p.text.contains("origin/HEAD"));
@@ -1952,7 +2043,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"km");
         p.wait("upstream/feat/km_story");
         p.clear_output();
@@ -1975,7 +2066,7 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         assert!(!p.text.contains("选择来源"));
         p.send(b"\r");
         p.clear_output();
-        p.wait("新建任务");
+        p.task_form_ready();
         assert_eq!(fs::read(&state_path).unwrap(), before);
         p.send(b"\r");
         p.wait("分支 upstream/feat/km_story 已存在");
@@ -2031,7 +2122,7 @@ fn selected_source_cannot_disappear_or_replace_a_recorded_source_silently() {
         let mut p = f.terminal(false);
         p.wait("auth");
         p.send(b"2n");
-        p.wait("新建任务");
+        p.task_form_ready();
         p.send(b"upstream/feat");
         p.wait("upstream/feat/km_story");
         if !recorded {
@@ -2073,7 +2164,7 @@ fn remote_candidate_handles_remote_names_with_slashes() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"2n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"team/mirror/");
     p.wait("team/mirror/fix/login");
     p.send(b"\t\r");
@@ -2156,7 +2247,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     let mut p = f.terminal(false);
     p.wait("主工作目录");
     p.send(b"2/new\r");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"existing\r");
     p.wait("使用已有分支");
     p.send(b"\r");
@@ -2219,7 +2310,7 @@ fn remote_branch_cli_selects_source_and_rejects_changed_snapshot() {
     p.wait("[y/N]");
     f.git(&["update-ref", "refs/remotes/upstream/feat/remote", "main"]);
     p.send(b"y\n");
-    p.wait("分支已变化");
+    p.wait("资源已变化");
     assert!(!p.wait_exit().success());
     assert_eq!(fs::read(&state_path).unwrap(), before);
     f.git(&[
@@ -2308,7 +2399,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     let mut p = f.terminal(false);
     p.wait("主工作目录");
     p.send(b"2/new\r");
-    p.wait("新建任务");
+    p.task_form_ready();
     // 手动输入后切到起点字段提交，不接受候选，仍允许选择来源。
     p.send(b"feat/remote\x1b[Z\r");
     p.wait("origin/feat/remote");
@@ -2419,7 +2510,7 @@ fn focus_shortcuts_switch_lists_without_triggering_history_or_forms() {
     }
     // 表单中的数字仍可输入，取消不创建任务。
     p.send(b"n");
-    p.wait("新建任务");
+    p.task_form_ready();
     p.send(b"task12");
     p.wait("2▏");
     p.resize(66, 22);
@@ -2501,7 +2592,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     // 失败后回到取消，取消勾选删除分支，再明确选择确认。
     p.clear_output();
     p.send(b" \t\r");
-    p.wait("已选中 demo / main");
+    p.wait_screen("已选中 demo / main");
     assert!(!path.exists());
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     assert!(state.get("auth").is_none());
@@ -2560,7 +2651,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     fs::remove_file(path.join("unsaved")).unwrap();
     p.clear_output();
     p.send(b"\t\r");
-    p.wait("已选中 demo / main");
+    p.wait_screen("已选中 demo / main");
     let output = Command::new("git")
         .current_dir(&f.repo)
         .args(["show-ref", "--verify", "refs/heads/auth"])
@@ -2600,7 +2691,7 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     assert!(path.join(".venv/data").exists());
     p.clear_output();
     p.send(b"dd\t\r");
-    p.wait("已选中 demo / main");
+    p.wait_screen("已选中 demo / main");
     assert!(!path.exists());
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
@@ -2612,6 +2703,8 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
     let mut f = Fixture::new();
     f.registry = f.temp.path().join("config.toml");
     f.init();
+    support::daemon::stop_under(f.temp.path());
+    let _ = fs::remove_file(f.temp.path().join("notifications.json"));
     let project_state = support::project_dir(&f.repo, &f.registry).join("state.json");
     let mut tasks: serde_json::Value =
         serde_json::from_slice(&fs::read(&project_state).unwrap()).unwrap();

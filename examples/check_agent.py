@@ -8,6 +8,8 @@
 不会连接真实用户 daemon、读取认证或向飞书发送消息。
 """
 import base64
+import errno
+import faulthandler
 import re
 import fcntl
 import http.server
@@ -29,14 +31,17 @@ import time
 
 import pyte
 sys.dont_write_bytecode = True
-from check_controller import Client, Model as ProbeModel, wait_for
+from check_controller import Client, Model as ProbeModel, wait_for as wait_until
+from feishu_mock import Feishu
 
 
 class Model(ProbeModel):
     # 产品验收比协议实验多出恢复、切页及通知跳转轮次。
-    request_limit = 24
+    request_limit = 30
 
     def do_POST(self):
+        if self.server.feishu.api(self):
+            return
         if self.path == "/feishu":
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             self.server.notices.append(body)
@@ -54,8 +59,9 @@ class Model(ProbeModel):
 class Frontend:
     def __init__(self, binary, config, cwd, env):
         self.master, self.slave = pty.openpty()
+        os.set_blocking(self.master, False)
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
-        self.before = termios.tcgetattr(self.slave)
+        self.before = termios.tcgetattr(self.master)
         self.output = bytearray()
         self.screen = pyte.Screen(120, 32)
         self.stream = pyte.ByteStream(self.screen)
@@ -71,34 +77,50 @@ class Frontend:
         )
 
     def send(self, data):
-        os.write(self.master, data)
+        pending = memoryview(data)
+        deadline = time.monotonic() + 10
+        while pending:
+            # 长粘贴会填满 PTY 输入缓冲区；同时消费输出，避免与前端重绘相互阻塞。
+            readable, writable, _ = select.select([self.master], [self.master], [], 0.05)
+            if readable:
+                output = os.read(self.master, 65536)
+                self.output.extend(output)
+                self.stream.feed(output)
+            if writable:
+                try:
+                    pending = pending[os.write(self.master, pending):]
+                except BlockingIOError:
+                    pass
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"PTY 输入超时：PID={self.process.pid}，剩余 {len(pending)} 字节\n{self.output[-8000:].decode(errors='replace')}")
+
+    def drain(self):
+        if select.select([self.master], [], [], 0.05)[0]:
+            data = os.read(self.master, 65536)
+            self.output.extend(data)
+            self.stream.feed(data)
 
     def copied(self):
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            if select.select([self.master], [], [], 0.05)[0]:
-                data = os.read(self.master, 65536)
-                self.output.extend(data)
-                self.stream.feed(data)
+            self.drain()
             matches = re.findall(rb"\x1b\]52;c;([^\x07]+)\x07", self.output)
             if matches:
                 return base64.b64decode(matches[-1]).decode()
         raise AssertionError("没有收到 OSC 52 复制请求")
 
-    def wait(self, text, timeout=15, history=False):
+    def wait(self, text, timeout=15, history=False, absent=False):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if select.select([self.master], [], [], 0.05)[0]:
-                data = os.read(self.master, 65536)
-                self.output.extend(data)
-                self.stream.feed(data)
+            self.drain()
             try:
                 display = self.screen.display
             except IndexError:
                 # PTY 分片可能停在宽字符差分重绘中间，等待后续字节完成该帧。
                 continue
             history_end = next((y for y, line in enumerate(display) if "滚轮 / PgUp" in line or "Ctrl-End 回到最新" in line), len(display))
-            if text in "\n".join(display[5:history_end] if history else display):
+            found = text in "\n".join(display[5:history_end] if history else display)
+            if found != absent:
                 return
             assert self.process.poll() is None, self.screen.display
         raise AssertionError((text, self.screen.display))
@@ -106,10 +128,7 @@ class Frontend:
     def absent_for(self, text, seconds=3):
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            if select.select([self.master], [], [], 0.05)[0]:
-                data = os.read(self.master, 65536)
-                self.output.extend(data)
-                self.stream.feed(data)
+            self.drain()
             try:
                 display = "\n".join(self.screen.display)
             except IndexError:
@@ -117,10 +136,29 @@ class Frontend:
             assert text not in display, display
             assert self.process.poll() is None
 
+    def wait_exit(self, timeout=10):
+        deadline = time.monotonic() + timeout
+        while True:
+            # 退出期间继续消费 PTY，避免终端还原输出填满缓冲区后阻塞子进程。
+            if select.select([self.master], [], [], 0.05)[0]:
+                try:
+                    data = os.read(self.master, 65536)
+                except OSError as error:
+                    if error.errno != errno.EIO:
+                        raise
+                    data = b""  # Linux PTY 从端关闭时报告 EIO。
+                self.output.extend(data)
+                self.stream.feed(data)
+            code = self.process.poll()
+            if code is not None:
+                return code
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"PTY 退出超时：PID={self.process.pid}\n{self.output[-8000:].decode(errors='replace')}")
+
     def close(self):
         if self.process.poll() is None:
             self.process.kill()
-            self.process.wait(timeout=5)
+            self.wait_exit(timeout=5)
         os.close(self.master)
         os.close(self.slave)
 
@@ -136,6 +174,7 @@ def check(root):
     version = subprocess.check_output([real_codex, "--version"], text=True).strip()
     print(version, flush=True)
     model = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Model)
+    model.feishu = Feishu()
     model.root = root
     model.count = 0
     model.counter_lock = threading.Lock()
@@ -164,6 +203,8 @@ def check(root):
     env = {k: v for k, v in os.environ.items() if k in ("PATH", "HOME", "LANG")}
     env.update(
         CODEX_HOME=str(home), PATH=str(shim) + ":" + env["PATH"],
+        TWIG_FEISHU_APP_ID="test-app", TWIG_FEISHU_APP_SECRET="test-secret",
+        TWIG_FEISHU_ALLOWED_USERS="ou_allowed", TWIG_FEISHU_API_BASE=f"http://127.0.0.1:{model.server_port}",
         TWIG_FEISHU_WEBHOOK_URL=f"http://127.0.0.1:{model.server_port}/feishu",
         GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
     )
@@ -210,8 +251,22 @@ supports_websockets = false
 
     server = start_server()
     frontend = None
+
+    def wait_for(predicate, description):
+        def ready():
+            if frontend:
+                frontend.drain()
+            return predicate()
+        wait_until(ready, description)
+
+    twig_log = (root / "twig-daemon.log").open("w+")
+    twig_daemon = subprocess.Popen(
+        [str(binary), "--config", str(config), "daemon", "run", "--detached"], cwd=cwd, env=env,
+        stdin=subprocess.DEVNULL, stdout=twig_log, stderr=twig_log,
+    )
     try:
         wait_for(socket.exists, "服务未启动")
+        wait_for(lambda: '"instance"' in twig("daemon", "status"), "Twig 后台未就绪")
         # 首次 Chat 必须从没有任何历史轮次的主控开始，而不是预先发过消息。
         frontend = Frontend(binary, config, cwd, env)
         frontend.wait("空闲")
@@ -244,7 +299,7 @@ supports_websockets = false
         skill_content = skill_file.read_bytes()
         (workspace / "state.md").write_text("用户保留的全局计划")
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=5)
+        frontend.wait_exit(timeout=5)
         frontend.close()
         frontend = None
         server.terminate()
@@ -279,13 +334,14 @@ supports_websockets = false
             frontend.wait("hold-controller", timeout=1, history=True)
             assert not any(m["text"] == "hold-controller" for m in state()["messages"])
             fcntl.flock(lock, fcntl.LOCK_UN)
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
         frontend.send(b"\t")
         frontend.wait("个项目")
         model.release["controller"].set()
         frontend.wait("主控有新消息")
         frontend.wait("Agent*")
-        time.sleep(8.5)
+        card_expires = time.monotonic() + 8.5
+        wait_for(lambda: time.monotonic() >= card_expires, "通知卡片等待未完成")
         frontend.wait("Tab 切换标签")
         frontend.absent_for("主控有新消息", 1)
         frontend.send(b"\x17f")
@@ -308,6 +364,8 @@ supports_websockets = false
         original = state()["bindings"]["controller"]["thread"]
         server.terminate()
         server.wait(timeout=10)
+        # 等 Chat 实际观察到断连，再恢复服务并按 F5；不能把旧画面的“空闲”当作已重连。
+        frontend.wait("未连接 · F5 重试")
         socket.unlink(missing_ok=True)
         server = start_server()
         wait_for(socket.exists, "有历史会话服务重启失败")
@@ -344,7 +402,7 @@ supports_websockets = false
         print("PASS: Chat 拖选复制、完整回复复制、诊断展开和中文长输入光标跟随", flush=True)
         print("PASS: Chat 中有历史会话被卸载后恢复原 ID 并继续对话", flush=True)
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=5)
+        frontend.wait_exit(timeout=5)
         frontend.close()
         frontend = None
         print("PASS: 全新主控首次打开 Chat，连续两轮输入及回复实际显示", flush=True)
@@ -366,9 +424,9 @@ supports_websockets = false
         assert "已存在" in twig("new", "demo", "--no-fetch", "test", "--agent", "--no-open", success=False)
         first = twig("agent", "send", "--from-project", "demo", "--from-task", "test", "--message", "hold-controller").strip()
         assert next(m for m in state()["messages"] if m["id"] == first)["source"] == {"kind": "task", "project": "demo", "task": "test"}
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
         twig("agent", "send", "--project", "demo", "--task", "test", "--message", "hold-worker")
-        assert model.entered["worker"].wait(10)
+        wait_for(model.entered["worker"].is_set, "子任务未收到请求")
         assert "会话仍活动" in twig("rm", "demo", "test", "--delete-ignored", "-y", success=False)
         model.release["worker"].set()
         wait_for(lambda: any(m["status"] == "queued" and m["thread"] == main["thread"] for m in state()["messages"]), "完成反馈未排队")
@@ -406,7 +464,7 @@ supports_websockets = false
         model.entered["controller"].clear()
         model.release["controller"].clear()
         frontend.send(b"chat-test hold-controller\r")
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
         frontend.send(b"\t")
         frontend.wait("个项目")
         frontend.send(b"2\r")
@@ -423,9 +481,9 @@ supports_websockets = false
         frontend.absent_for("Agent*", 1)
         print("PASS: 工作台 Ctrl-W f 直达主控、清除未读并保留 Pane 进程", flush=True)
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=5)
+        frontend.wait_exit(timeout=5)
         assert frontend.process.returncode == 0
-        assert termios.tcgetattr(frontend.slave) == frontend.before
+        assert termios.tcgetattr(frontend.master) == frontend.before
         frontend.close()
         frontend = None
         assert server.poll() is None
@@ -452,7 +510,7 @@ supports_websockets = false
         model.entered["worker"].clear()
         model.release["worker"].clear()
         twig("agent", "send", "--project", "demo", "--task", "test", "--message", "hold-worker")
-        assert model.entered["worker"].wait(10)
+        wait_for(model.entered["worker"].is_set, "子任务未收到请求")
         queued = twig("agent", "send", "--project", "demo", "--task", "test", "--message", "queued-before-stop").strip()
         twig("stop", "demo", "test", "-y")
         assert next(m for m in state()["messages"] if m["id"] == queued)["status"] == "cancelled"
@@ -523,7 +581,7 @@ supports_websockets = false
         frontend.send(b"\t")
         frontend.wait("before-tab-two", history=True)
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         print("PASS: 连续发送后立即切回 Console，全部持久化并各投递一次", flush=True)
@@ -545,7 +603,7 @@ supports_websockets = false
         frontend.wait("rejected-while-hidden")
         assert not any(m["text"] == "rejected-while-hidden" for m in state()["messages"])
         frontend.send(b"\x15\x03")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         with (state_file.parent / "lock").open("a") as lock:
@@ -561,22 +619,34 @@ supports_websockets = false
         model.entered["controller"].clear()
         model.release["controller"].clear()
         frontend.send(b"navigation-follow hold-controller\r")
-        assert model.entered["controller"].wait(10)
+        wait_for(model.entered["controller"].is_set, "主控未收到请求")
+        navigation_reply = f"probe complete {model.count + 1}"
         frontend.send(b"\t")
         frontend.wait("个项目")
         model.release["controller"].set()
         frontend.wait("主控有新消息")
         frontend.wait("Ctrl-W f 查看 Agent")
         frontend.send(b"\x17f")
-        frontend.wait("navigation-follow hold-controller", history=True)
+        frontend.wait(navigation_reply, history=True)
+        # “消息送达”和“轮次完成”是两个事件；两者采集并清除后才具备“无卡片”前提。
+        def navigation_read():
+            message = next(m for m in state()["messages"] if m["text"] == "navigation-follow hold-controller")
+            if not message.get("turn"):
+                return False
+            saved = json.loads((root / "notifications.json").read_text())
+            expected = {f"message:{message['id']}", f"turn:{message['thread']}:{message['turn']}"}
+            return expected.issubset(saved["seen"]) and not any(e["thread"] == message["thread"] for e in saved["unread"])
+        wait_for(navigation_read, "导航测试轮次的送达/完成事件尚未采集并清除")
         frontend.absent_for("Agent*", 1)
         frontend.send(b"\t")
         frontend.wait("个项目")
+        # 导航文字可能先于整帧刷新到达；等旧 Agent 标题消失后再测试无卡片快捷键。
+        frontend.wait("YOLO", absent=True)
         frontend.send(b"\x17f")
         frontend.absent_for("YOLO", 1)
         frontend.wait("个项目")
         frontend.send(b"q")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         print("PASS: 导航 Ctrl-W f 跳主控并清除未读，无卡片时不跳转", flush=True)
@@ -609,12 +679,86 @@ supports_websockets = false
         failed_record = next(m for m in state()["messages"] if m["id"] == failed)
         assert failed_record["status"] == "queued" and failed_record["error"]
         frontend.send(b"\x03")
-        frontend.process.wait(timeout=10)
+        frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
         print("PASS: 失效子任务明确报错，主控仍可连接和投递，不重发异常消息", flush=True)
 
+        model.feishu.event("om_group", chat_type="group")
+        model.feishu.event("om_denied", user="ou_stranger")
+        model.feishu.event("om_offline")
+        model.feishu.event("om_offline")
+        wait_for(lambda: len(model.feishu.acks) >= 4, "飞书事件未确认")
+        def synced_text():
+            return "\n".join(text for _, text in model.feishu.replies)
+
+        def events_delivered():
+            current = json.loads(twig("agent", "read"))["thread"]
+            if current["status"]["type"] != "idle":
+                return False
+            history = current["turns"]
+            text = synced_text()
+            latest = history[-1]
+            expected = [item["text"] for item in latest["items"] if item["type"] == "agentMessage"][-1:]
+            health = json.loads(twig("daemon", "status"))["feishu"]
+            assert not health["outbox_error"] and not health["outbox_errors"], health
+            assert not health["unknown_replies"], health
+            return (expected and all(value in text for value in expected)
+                    and not health["outbox_pending"] and not health["pending"])
+
+        # 首次不读历史；等待接入后首条输入的最终回复与队列清空。
+        def wait_events():
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                if events_delivered():
+                    return
+                time.sleep(.3)
+            raise AssertionError("主控最终回复未同步：" + twig("daemon", "status"))
+
+        wait_events()
+        messages = [m for m in state()["messages"] if m["text"] == "offline-feishu-request"]
+        assert len(messages) == 1, messages
+        assert messages[0]["source"] == {"kind": "feishu", "user": "ou_allowed"}
+        assert "before-tab-one" not in synced_text()
+        assert "子任务 · demo/test" not in synced_text()
+        assert "【User】" in synced_text() and "【Codex】" in synced_text()
+        assert "主控会话" not in synced_text() and "【工具】" not in synced_text()
+        assert not any("om_group" in path or "om_denied" in path for path, _ in model.feishu.replies)
+        # 没有新的飞书输入也同步 CLI 用户输入和最终回复，隐藏子任务回报正文。
+        cli_id = twig("agent", "send", "--message", "cli-after-feishu-subscription").strip()
+        report_id = twig("agent", "send", "--from-project", "demo", "--from-task", "test",
+                         "--message", "child-report-after-subscription").strip()
+        wait_for(lambda: all(next(m for m in state()["messages"] if m["id"] == ident)["status"] == "sent"
+                             for ident in (cli_id, report_id)), "跨入口消息未投递")
+        wait_events()
+        assert "cli-after-feishu-subscription" in synced_text()
+        assert "【User】\nchild-report-after-subscription" not in synced_text()
+        # 子任务内部输入属于其他 thread，不应作为历史条目进入飞书。
+        assert "\nhold-worker\n" not in synced_text()
+        assert "\nnew-instance\n" not in synced_text()
+        replies_before_restart = list(model.feishu.replies)
+        previous_instance = json.loads(twig("daemon", "status"))["instance"]
+        twig("daemon", "restart")
+        restarted = json.loads(twig("daemon", "status"))
+        assert restarted["instance"] != previous_instance
+        assert restarted["pid"] == twig_daemon.pid
+        assert restarted["feishu"]["enabled"]
+        model.feishu.event("om_offline")
+        wait_for(lambda: len(model.feishu.acks) >= 5, "重连事件未确认")
+        time.sleep(3)
+        assert len([m for m in state()["messages"] if m["text"] == "offline-feishu-request"]) == 1
+        assert model.feishu.replies == replies_before_restart
+        print("PASS: 飞书新消息事件、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
+
     except BaseException:
+        if frontend:
+            print(frontend.output[-8000:].decode(errors="replace"), file=sys.stderr)
+        notifications = root / "notifications.json"
+        if notifications.exists():
+            print(notifications.read_text(), file=sys.stderr)
+        twig_log.flush()
+        twig_log.seek(0)
+        print(twig_log.read()[-8000:], file=sys.stderr)
         log.flush()
         log.seek(0)
         print(log.read()[-8000:], file=sys.stderr)
@@ -624,16 +768,24 @@ supports_websockets = false
             frontend.close()
         for event in model.release.values():
             event.set()
+        if twig_daemon.poll() is None:
+            twig_daemon.terminate()
+            twig_daemon.wait(timeout=30)
+        twig_log.close()
         subprocess.run([real_tmux, "-S", str(root / "tmux.sock"), "kill-server"], capture_output=True)
         if server.poll() is None:
             os.killpg(server.pid, signal.SIGTERM)
             server.wait(timeout=10)
         model.shutdown()
         model.server_close()
+        model.feishu.close()
         serving.join(timeout=2)
         log.close()
 
 
 if __name__ == "__main__":
+    # CI 的外层超时会直接取消进程；提前输出线程栈，保留阻塞位置供诊断。
+    faulthandler.dump_traceback_later(180, repeat=True)
     with tempfile.TemporaryDirectory(prefix="twig-agent-check-") as directory:
         check(Path(directory))
+    faulthandler.cancel_dump_traceback_later()

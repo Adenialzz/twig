@@ -3,6 +3,7 @@ mod codex;
 mod completion;
 mod config;
 mod console;
+mod daemon;
 mod git;
 mod guide;
 mod registry;
@@ -25,7 +26,7 @@ use std::{
     name = "twig",
     version,
     about = "Git Worktree + tmux 任务环境管理",
-    after_help = "项目通过登记别名定位；任务命令显式指定项目和任务。裸 twig 打开交互控制台。\n\n开始使用：\n  twig add myapp --path /path/to/repo\n  twig new myapp auth\n  twig ls myapp\n\n深入阅读：twig <命令> --help；twig guide；twig guide --all"
+    after_help = "项目通过登记别名定位；任务命令显式指定项目和任务。裸 twig 打开交互控制台。\n\n业务依赖显式启动的 Twig 后台；帮助、guide 和只读补全可离线使用。\n\n开始使用：\n  twig daemon start\n  twig add myapp --path /path/to/repo\n  twig new myapp auth\n  twig ls myapp\n\n深入阅读：twig <命令> --help；twig guide；twig guide --all"
 )]
 struct Cli {
     /// 使用其他登记表及同目录项目状态（默认 ~/.twig/config.toml）
@@ -35,12 +36,19 @@ struct Cli {
     command: Option<Action>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, serde::Serialize, serde::Deserialize, Clone)]
 enum Action {
+    /// 管理 Twig 本机后台；不影响 Codex daemon 和任务进程
+    #[command(after_help = "后台管理与托管说明：twig guide daemon")]
+    #[serde(skip)]
+    Daemon(daemon::Cli),
+    /// 查询后台已接受操作的进度与结果
+    Operation(daemon::operations::Cli),
     /// 阅读离线用户手册；不带主题时显示导航
     #[command(
         after_help = "示例：twig guide quickstart\n      twig guide windows\n      twig guide --all | less\n\n输出 Markdown 文本，不读取配置、不联网、不调用 Git/tmux，也不自动打开分页器。"
     )]
+    #[serde(skip)]
     Guide {
         /// 要阅读的主题；省略时显示手册目录
         #[arg(value_enum)]
@@ -53,11 +61,13 @@ enum Action {
     #[command(
         after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-W d 返回导航并保留进程。\n浏览不改项目资源；未读状态独立持久化，退出重进仍保留，进入对应任务或 Agent 后清除。提交表单、确认删除和进入缺失窗口会操作资源。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
     )]
+    #[serde(skip)]
     Console,
     /// 与主控 Codex 对话；Tab 切换 Console，退出不停止会话
     #[command(
         after_help = "主控默认 YOLO：无需审批、完整访问权限，页面常驻红色提示；子任务权限不变。daemon 不可用时只提示启动。完整说明：twig guide agent"
     )]
+    #[serde(skip)]
     Chat,
     /// 主控 Agent CLI；使用 Codex daemon，不启动后台服务
     #[command(after_help = "使用 twig agent init 初始化；完整说明：twig guide agent")]
@@ -103,6 +113,7 @@ enum Action {
         no_open: bool,
         /// 跳过远端更新，从本地 base 创建，适用于离线或纯本地仓库
         #[arg(long)]
+        #[serde(default = "legacy_no_fetch")]
         no_fetch: bool,
         /// 创建受管 Codex 任务；专用启动方式替代 tmux 配置，不接管旧任务
         #[arg(long)]
@@ -166,7 +177,12 @@ enum Action {
     },
 }
 
-#[derive(clap::Args)]
+// 旧持久化操作尚无该字段，当时的 new 使用本地基础分支；只恢复记录，不自动重跑。
+fn legacy_no_fetch() -> bool {
+    true
+}
+
+#[derive(clap::Args, serde::Serialize, serde::Deserialize, Clone)]
 struct RemoveOptions {
     /// 保留本地分支，跳过合并/upstream 检查，仍保护文件和进程
     #[arg(long)]
@@ -203,9 +219,24 @@ fn execute(cli: Cli) -> Result<()> {
     let registry_path = registry::location(cli.config)?;
     let action = cli.command.unwrap_or(Action::Console);
     match action {
-        Action::Console => return console::run(registry_path, invocation_dir, None),
-        Action::Chat => return console::run_chat(registry_path, invocation_dir),
-        Action::Agent(args) => return agent::execute(&registry_path, args.command),
+        Action::Daemon(args) => daemon::execute(&registry_path, args.command),
+        Action::Operation(args) => daemon::operations::cli(&registry_path, args.command),
+        Action::Console => console::run(registry_path, invocation_dir, None),
+        Action::Chat => console::run_chat(registry_path, invocation_dir),
+        action => daemon::operations::client(&registry_path, action),
+    }
+}
+
+fn execute_business(
+    registry_path: PathBuf,
+    action: Action,
+    expected: &serde_json::Value,
+) -> Result<()> {
+    match action {
+        Action::Agent(args) => {
+            daemon::operations::progress("处理 Agent 绑定与消息")?;
+            return agent::execute(&registry_path, args.command);
+        }
         Action::Add {
             name,
             path,
@@ -214,9 +245,10 @@ fn execute(cli: Cli) -> Result<()> {
             root,
             print_name,
         } => {
+            daemon::operations::progress("初始化并登记项目")?;
             let name = registry::add(&registry_path, &path, name, base, target, root)?;
             if print_name {
-                println!("{}", serde_json::to_string(&name)?);
+                crate::output!("{}", serde_json::to_string(&name)?);
             }
             return Ok(());
         }
@@ -236,6 +268,7 @@ fn execute(cli: Cli) -> Result<()> {
                     && expected_task.is_none(),
                 "任务删除选项必须指定任务名；取消登记请使用 twig rm <项目名>"
             );
+            daemon::operations::progress("取消项目登记")?;
             return registry::remove(&registry_path, project);
         }
         _ => {}
@@ -258,7 +291,15 @@ fn execute(cli: Cli) -> Result<()> {
         "登记路径不是仓库根目录"
     );
     let project = Project::discover_at(&path, &registry_path)?;
+    if matches!(action, Action::Ls { .. }) {
+        return list(&project, &project.config()?, &project.state()?);
+    }
+    daemon::operations::progress("获取项目锁并复查归属")?;
     let lock = project.lock()?;
+    ensure!(
+        daemon::operations::fingerprint(&registry_path, &action)? == *expected,
+        "资源已变化，请重新确认操作"
+    );
     let config = project.config()?;
     let mut state = project.state()?;
     match action {
@@ -290,15 +331,15 @@ fn execute(cli: Cli) -> Result<()> {
                 Ok(())
             } else {
                 let path = feature(&state, &name)?.path.clone();
-                console::run(
-                    registry_path,
+                daemon::output::terminal(
                     path,
-                    Some(console::TerminalTarget {
+                    console::TerminalTarget {
                         project: alias,
                         session: config.session,
                         window,
-                    }),
-                )
+                    },
+                );
+                Ok(())
             }
         }
         Action::Ls { .. } => list(&project, &config, &state),
@@ -306,27 +347,37 @@ fn execute(cli: Cli) -> Result<()> {
             name,
             project: alias,
         } => {
-            let feature = feature(&state, &name)?;
-            ensure!(
-                check_worktree(&config, feature)?,
-                "Worktree 不存在；请检查 twig ls <项目名> 和 twig guide troubleshooting，new 不恢复已登记任务"
-            );
-            let window = tmux::ensure_window(&config, &project, &name, &feature.path)?;
-            if let Some(thread) = &feature.agent_thread {
-                agent::Store::new(&registry_path)?.reactivate(thread)?;
-            }
+            daemon::operations::progress("核对 Worktree 并准备任务窗口")?;
+            let (path, window) = if name == "main" {
+                (
+                    config.main.clone(),
+                    tmux::ensure_main_window(&config, &project)?,
+                )
+            } else {
+                let feature = feature(&state, &name)?;
+                ensure!(
+                    check_worktree(&config, feature)?,
+                    "Worktree 不存在；请检查 twig ls <项目名>，new 不恢复已登记任务"
+                );
+                let window = tmux::ensure_window(&config, &project, &name, &feature.path)?;
+                if let Some(thread) = &feature.agent_thread {
+                    agent::Store::new(&registry_path)?.reactivate(thread)?;
+                }
+                (feature.path.clone(), window)
+            };
             drop(lock); // 工作台交互期间不能持有项目锁。
-            console::run(
-                registry_path,
-                feature.path.clone(),
-                Some(console::TerminalTarget {
+            daemon::output::terminal(
+                path,
+                console::TerminalTarget {
                     project: alias,
                     session: config.session,
                     window,
-                }),
-            )
+                },
+            );
+            Ok(())
         }
         Action::Stop { name, yes, .. } => {
+            daemon::operations::progress("停止受管轮次和任务窗口")?;
             let feature = feature(&state, &name)?;
             let window = tmux::window(&config, &project, &name)?;
             if window.is_some() || feature.agent_thread.is_some() {
@@ -338,7 +389,7 @@ fn execute(cli: Cli) -> Result<()> {
             if let Some(window) = window {
                 tmux::tmux(&["kill-window", "-t", &window])?;
             }
-            println!("已停止 {name}；Worktree 和分支保留");
+            crate::output!("已停止 {name}；Worktree 和分支保留");
             Ok(())
         }
         Action::Rm {
@@ -357,9 +408,11 @@ fn execute(cli: Cli) -> Result<()> {
                     "任务归属已变化，请取消并重新确认删除"
                 );
             }
-            remove(&project, &config, &mut state, &name, &options)
+            remove(&project, &config, &mut state, &name, &options, false)
         }
-        Action::Guide { .. }
+        Action::Daemon(_)
+        | Action::Operation(_)
+        | Action::Guide { .. }
         | Action::Console
         | Action::Chat
         | Action::Agent(_)
@@ -369,6 +422,7 @@ fn execute(cli: Cli) -> Result<()> {
 
 fn init(
     project: &Project,
+    cwd: &Path,
     base: Option<String>,
     target: Option<String>,
     root: Option<PathBuf>,
@@ -382,15 +436,14 @@ fn init(
             "项目已初始化；如需修改配置，请编辑 {}",
             project.dir.join("config.json").display()
         );
-        println!("项目已初始化：{}", project.dir.display());
+        crate::output!("项目已初始化：{}", project.dir.display());
         return Ok(());
     }
-    let cwd = std::env::current_dir()?;
     ensure!(
-        git(&cwd, &["rev-parse", "--is-bare-repository"])? == "false",
+        git(cwd, &["rev-parse", "--is-bare-repository"])? == "false",
         "暂不支持裸仓库"
     );
-    let main = git::worktrees(&cwd)?
+    let main = git::worktrees(cwd)?
         .first()
         .context("未找到主工作目录")?
         .0
@@ -436,7 +489,7 @@ fn init(
     project.save("config.json", &config)?;
     tmux::ensure_session(&config, project)
         .context("配置已保存；修复 tmux 后可通过 new/open 创建窗口；登记未完成时可重试 twig add")?;
-    println!(
+    crate::output!(
         "已初始化：{}\nWorktree 根目录：{}\ntmux Session：{}",
         project.dir.display(),
         config.root.display(),
@@ -684,6 +737,7 @@ fn new(
     if managed {
         agent::Store::new(&project.registry)?.initialize()?;
     }
+    daemon::operations::progress("登记任务意图")?;
     // 先保存意图，部分失败保留资源及可诊断记录；重复 new 不执行恢复。
     state.insert(
         name.to_owned(),
@@ -699,6 +753,7 @@ fn new(
     let feature = feature(state, name)?;
     check_task_parent(&config.root, &feature.path)?;
     let path = feature.path.to_str().context("暂不支持非 UTF-8 路径")?;
+    daemon::operations::progress("创建 Git Worktree")?;
     if let Some(source) = &selected {
         ensure!(
             existing_branches(config, name)?.contains(source),
@@ -740,19 +795,21 @@ fn new(
     }
     let task_path = feature.path.clone();
     if managed {
+        daemon::operations::progress("创建受管 Agent 会话")?;
         agent::initialize_task_file(project, &task_path)?;
         let thread = agent::Store::new(&project.registry)?.create_task(alias, name, &task_path)?;
         state.get_mut(name).unwrap().agent_thread = Some(thread);
         project.save("state.json", state)?;
     }
     let feature = crate::feature(state, name)?;
+    daemon::operations::progress("准备 tmux 窗口与启动命令")?;
     let window = tmux::ensure_window(config, project, name, &feature.path).with_context(|| {
         format!(
             "Worktree 已保留在 {}；修复后执行 twig open {alias} {name}",
             feature.path.display()
         )
     })?;
-    println!(
+    crate::output!(
         "{name}\n分支：{}\n目录：{}\n进入：twig open {alias} {name}",
         feature.branch,
         feature.path.display()
@@ -761,9 +818,12 @@ fn new(
 }
 
 fn list(project: &Project, config: &Config, state: &State) -> Result<()> {
-    println!(
+    crate::output!(
         "{:<20} {:<28} {:<12} {:<12} 路径",
-        "任务", "分支", "tmux", "Git"
+        "任务",
+        "分支",
+        "tmux",
+        "Git"
     );
     let trees = git::worktrees(&config.main);
     let windows = tmux::windows(config, project)?;
@@ -787,12 +847,12 @@ fn list(project: &Project, config: &Config, state: &State) -> Result<()> {
             }
             Ok(false) => "Missing",
             Err(error) => {
-                eprintln!("{name}: {error:#}");
+                crate::diagnostic!("{name}: {error:#}");
                 "Mismatch"
             }
         };
         let window = tmux::window_in(&windows, name)?;
-        println!(
+        crate::output!(
             "{:<20} {:<28} {:<12} {:<12} {}",
             name,
             feature.branch,
@@ -822,19 +882,24 @@ fn remove(
     state: &mut State,
     name: &str,
     options: &RemoveOptions,
+    preview: bool,
 ) -> Result<()> {
     let keep_branch = options.keep_branch;
     let yes = options.yes;
     let target = options.target.clone();
     config::task_name(name)?;
     let Some(feature) = state.get(name).cloned() else {
-        println!("任务 {name} 已不存在；未操作任何外部资源");
+        crate::output!("任务 {name} 已不存在；未操作任何外部资源");
         return Ok(());
     };
     let agent_store = agent::Store::new(&project.registry)?;
+    if preview && let Some(thread) = &feature.agent_thread {
+        agent_store.check_removal(thread)?;
+    }
     let _agent_guard = feature
         .agent_thread
         .as_deref()
+        .filter(|_| !preview)
         .map(|thread| agent_store.removal_guard(thread))
         .transpose()?;
     let target = target.unwrap_or_else(|| config.target.clone());
@@ -869,7 +934,7 @@ fn remove(
                 );
             }
             if report && !ignored.is_empty() {
-                eprintln!(
+                crate::diagnostic!(
                     "同时删除以下被忽略文件/目录（包含目录内全部内容）：\n{}",
                     ignored.join("\n")
                 );
@@ -899,7 +964,9 @@ fn remove(
                 ],
             )?;
             if upstream.is_empty() && report {
-                eprintln!("提示：未配置 upstream，无法验证推送状态；已验证合并到本地 {target}。");
+                crate::diagnostic!(
+                    "提示：未配置 upstream，无法验证推送状态；已验证合并到本地 {target}。"
+                );
             } else if !upstream.is_empty() {
                 let ahead = git(
                     &config.main,
@@ -925,6 +992,9 @@ fn remove(
             "窗口仍有活动进程或状态未知；请先退出任务，或明确执行 twig stop {name}"
         );
     }
+    if preview {
+        return Ok(());
+    }
     confirm(
         &format!(
             "移除 {name} 的窗口和 Worktree{}{}？",
@@ -943,6 +1013,7 @@ fn remove(
         ),
         yes,
     )?;
+    daemon::operations::progress("复查删除保护")?;
     // 确认期间可能发生外部写入；再次验证，包括 Git remove 默认不保护的 ignored 文件。
     let (present, branch_exists) = validate(false)?;
     ensure!(
@@ -951,9 +1022,11 @@ fn remove(
     );
     if let Some(id) = &window {
         ensure!(tmux::idle(id)?, "窗口状态已变化，取消清理");
+        daemon::operations::progress("删除任务窗口")?;
         tmux::tmux(&["kill-window", "-t", id])?;
     }
     if present {
+        daemon::operations::progress("删除 Worktree")?;
         git(
             &config.main,
             &["worktree", "remove", "--", feature.path.to_str().unwrap()],
@@ -961,6 +1034,7 @@ fn remove(
         .context("窗口可能已关闭；Worktree 和记录已保留，可修复后重试")?;
     }
     if branch_exists && !keep_branch {
+        daemon::operations::progress("删除本地分支")?;
         let flag = if options.console_delete_branch {
             "-D"
         } else {
@@ -971,7 +1045,7 @@ fn remove(
     }
     state.remove(name);
     project.save("state.json", state)?;
-    println!(
+    crate::output!(
         "已移除 {name}{}",
         if keep_branch {
             "（分支保留）"

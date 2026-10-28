@@ -27,6 +27,7 @@ twig guide --all          # 输出完整手册
 | [任务窗口](windows.md) | 分屏、启动命令、shell/process 模式 | twig guide windows |
 | [Console](console.md) | 面板操作、快捷键、Codex 状态和历史 | twig guide console |
 | [主控 Agent](agent.md) | 主控对话、受管任务、消息队列与飞书通知 | twig guide agent |
+| [飞书机器人](feishu.md) | 个人申请、应用权限、长连接、配置与排障 | twig guide feishu |
 | [安全清理](cleanup.md) | stop/rm、文件保护和部分失败 | twig guide cleanup |
 | [Shell 补全](completion.md) | 安装 Zsh 补全及候选规则 | twig guide completion |
 | [Agent 与脚本](automation.md) | 非交互调用、结果判断和重试 | twig guide automation |
@@ -39,3 +40,5 @@ twig guide --all          # 输出完整手册
 - 新建分支默认 fetch base 的远端 upstream，`--no-fetch` 使用本地 base；复用已有分支及其他任务管理不联网，不自动 pull/push。用户启动程序的联网行为由程序决定。
 
 源码贡献者另见仓库根目录的 DESIGN.md、AGENTS.md 与 CONTRIBUTING.md；这些开发记录不是用户操作手册。
+
+后台生命周期：[Twig 后台](daemon.md)（`twig guide daemon`）。

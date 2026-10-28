@@ -1,0 +1,18 @@
+[Unit]
+Description=Twig local backend
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+ExecStart=%h/.cargo/bin/twig --config %h/.twig/config.toml daemon run
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/twig/environment
+Restart=on-failure
+RestartSec=5
+UMask=0077
+# 只向后台发送信号，不能把它创建的 tmux server/任务一并杀掉。
+KillMode=process
+TimeoutStopSec=infinity
+
+[Install]
+WantedBy=default.target

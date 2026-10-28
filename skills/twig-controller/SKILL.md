@@ -9,7 +9,7 @@ description: 使用 Twig CLI 担任多项目主控，发现任务及 Codex 会�
 
 ## 确定命令与目标
 
-使用初始化指令提供的 Twig 可执行文件绝对路径及配置文件绝对路径；每条命令带 `--config`。向子任务派活时也传递这两个具体路径，不能假定 `twig` 在其 PATH，或其默认配置与主控相同。
+使用初始化指令提供的 Twig 可执行文件绝对路径及配置文件绝对路径；每条命令带 `--config`。业务通过该配置的 Twig 后台执行；后台缺失时报告并提示显式启动，不改用本地写入或重启共享 Codex。提交响应丢失时保留操作/请求 ID，以 `operation show ID` 核对，不能重新派发；`needs_inspection` 先核对真实资源。飞书环境由 Twig 后台读取。向子任务派活时也传递这两个具体路径，不能假定 `twig` 在其 PATH，或其默认配置与主控相同。
 
 先读 `twig --config CONFIG guide agent` 和 `guide automation`。参数不确定时查对应 `--help`；这里只给工作流，命令行为以嵌入 guide 为准。
 
