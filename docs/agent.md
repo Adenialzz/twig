@@ -132,11 +132,11 @@ twig daemon status
 
 三个变量必须一起设置；不配置则禁用双向通道。生产 API 固定使用 `https://open.feishu.cn`；`TWIG_FEISHU_API_BASE` 仅允许官方地址或隔离验收的本机 HTTP 地址。连接需要 HTTPS 与服务发现返回的 WSS 地址可达。密钥放入本地受限环境文件或服务配置，不写到仓库、任务或日志。
 
-后台先持久化接收记录，再确认平台事件；按平台 message_id 去重，以稳定 Twig 消息 ID 进入共享队列。首次合法单聊激活该目的地，只建立基线、不补发历史；之后持续同步主控会话中的 Console/CLI/飞书用户输入和每轮完成后的最终回复，不需要再发飞书消息触发。
+后台先持久化接收记录，再确认平台事件；按平台 message_id 去重，以稳定 Twig 消息 ID 进入共享队列。首次合法单聊订阅当前新消息事件流，不读取或遍历已有会话；之后同步通过 Twig Console/CLI/飞书提交的新输入及对应轮次的最终回复，不需要再发飞书消息触发。
 
-Console 保留完整历史和来源映射，工具详情用 F4 展开。飞书仅显示 User 输入和 Codex 最终回复，不展示工具、中间进度或子任务回报，也不读取子任务内部会话。多个已接入的允许用户共享上述内容。后台重启从持久化进度继续，保留待发、已发送和未知发送记录。
+Console 保留完整历史和来源映射，工具详情用 F4 展开。飞书仅显示 User 输入和 Codex 最终回复，不展示工具、中间进度或子任务回报，也不读取子任务内部会话。多个已接入的允许用户共享各自接入后产生的上述新消息；直接绕过 Twig 向原生 Codex 输入的内容不转发。后台重启从持久化进度继续，保留待发、已发送和未知发送记录。
 
-`daemon status` 的 `feishu.history_pending` 是待发历史分段数，`history_error` 为采集错误，`history_errors` 为目的地错误，`unknown_replies` 包含结果未知的历史发送。未知写结果保留 sending，阻塞该目的地后续历史，不自动重发；核对原飞书会话和受限的 `feishu.json`、`feishu-history.json` 后再决定人工处理，不能删除记录诱导重新派活或重播。完整操作说明见[飞书指南](feishu.md)。
+`daemon status` 的 `feishu.outbox_pending` 是待发新消息分段数，`outbox_error` 为采集错误，`outbox_errors` 为目的地错误，`unknown_replies` 包含结果未知的新消息发送。未知写结果保留 sending，阻塞该目的地后续消息，不自动重发；核对原飞书会话和受限的 `feishu.json`、`feishu-outbox.json` 后再决定人工处理，不能删除记录诱导重新派活或重播。完整操作说明见[飞书指南](feishu.md)。
 
 ## 飞书主动 webhook 通知
 

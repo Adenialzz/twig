@@ -2,6 +2,7 @@
 pub mod chat;
 pub(crate) mod history;
 pub mod rpc;
+pub(crate) mod stream;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
@@ -110,6 +111,8 @@ pub struct State {
     pub seen: Vec<String>,
     #[serde(default)]
     pub observed_turns: BTreeMap<String, Option<crate::codex::Turn>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) stream: Option<stream::Stream>,
 }
 
 pub struct Store {
@@ -349,6 +352,9 @@ impl Store {
                 "同一消息 ID 不能用于不同内容或会话"
             );
             return Ok(id);
+        }
+        if let Some(stream) = &mut state.stream {
+            stream.accepted(binding, &id, &text, source.as_ref());
         }
         state.messages.push(Delivery {
             id: id.clone(),
@@ -613,16 +619,14 @@ impl Store {
         let key = format!("{thread}:{turn}");
         if !state.seen.contains(&key) {
             // 以服务端状态验证轮次，不能将任意回调 JSON 当作完成事实。
-            let result = self.client(&state)?.call(
+            let mut client = self.client(&state)?;
+            let result = client.call(
                 "thread/read",
-                json!({"threadId":thread,"includeTurns":true}),
+                json!({"threadId":thread,"includeTurns":false}),
             )?;
-            let completed = result["thread"]["turns"]
-                .as_array()
-                .and_then(|turns| turns.iter().find(|t| t["id"] == turn));
             check_thread(&binding, &result)?;
             ensure!(
-                completed.is_some_and(|t| t["status"] == "completed"),
+                client.turn_status(thread, turn)? == "completed",
                 "服务端尚未确认轮次完成，请用 twig agent drain 核对"
             );
             record_completion(&mut state, &binding, turn)?;
@@ -641,7 +645,10 @@ impl Store {
     }
     pub fn resume(&self, client: &mut rpc::Client, binding: &Binding) -> Result<bool> {
         self.validate(binding)?;
-        let result = client.thread(&binding.thread)?;
+        let result = client.call(
+            "thread/read",
+            json!({"threadId":binding.thread,"includeTurns":false}),
+        )?;
         check_thread(binding, &result)?;
         // 新建且仍加载的空会话尚无 rollout，不能恢复；首条消息仍可直接投递。
         if result["thread"]["preview"]
@@ -728,6 +735,15 @@ fn record_completion(state: &mut State, binding: &Binding, turn: &str) -> Result
     if let Some(project) = &binding.project {
         let controller = state.bindings.get("controller").context("主控绑定缺失")?;
         state.messages.push(Delivery { id: message_id(), thread: controller.thread.clone(), text: format!("任务反馈：项目 {project}，任务 {}，会话 {}，轮次 {turn} 已完成。请读取任务 .twig/state.md 并用 twig agent read --project {project} --task {} 查询反馈，对照目标决定下一步；不要仅凭轮次完成宣布任务完成。", binding.task.as_deref().unwrap_or_default(), binding.thread, binding.task.as_deref().unwrap_or_default()), source: Some(MessageSource::Completion { project: project.clone(), task: binding.task.clone().context("任务绑定缺少任务名")? }), status: "queued".into(), turn: None, error: None });
+        if let Some(stream) = &mut state.stream {
+            let message = state.messages.last().unwrap();
+            stream.accepted(
+                controller,
+                &message.id,
+                &message.text,
+                message.source.as_ref(),
+            );
+        }
     }
     state.seen.push(key);
     Ok(())

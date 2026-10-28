@@ -1,6 +1,6 @@
 //! 飞书应用机器人：官方长连接帧协议；事件落盘后确认，投递与回复独立推进。
 //! 协议来源：https://github.com/larksuite/oapi-sdk-python/tree/v2_main/lark_oapi/ws
-mod history;
+mod outbox;
 
 use anyhow::{Context, Result, ensure};
 use prost::Message as ProtoMessage;
@@ -189,9 +189,9 @@ pub struct Health {
     pub pending: usize,
     pub unknown_replies: usize,
     pub message_errors: BTreeMap<String, String>,
-    pub history_pending: usize,
-    pub history_errors: BTreeMap<String, String>,
-    pub history_error: Option<String>,
+    pub outbox_pending: usize,
+    pub outbox_errors: BTreeMap<String, String>,
+    pub outbox_error: Option<String>,
     pub worker_errors: BTreeMap<String, String>,
 }
 pub struct Runtime {
@@ -212,7 +212,7 @@ impl Runtime {
             // TLS 初始化在启动线程前完成，配置错误直接报告，不能留下假在线的后台。
             let tls = native_tls_client()?;
             let inbox = Arc::new(Mutex::new(Inbox::open(dir.join("feishu.json"))?));
-            let mut history = history::History::open(dir.join("feishu-history.json"))?;
+            let mut outbox = outbox::Outbox::open(dir.join("feishu-outbox.json"))?;
             let config = Arc::new(config);
             let rx_config = config.clone();
             let rx_inbox = inbox.clone();
@@ -253,12 +253,10 @@ impl Runtime {
                             .filter(|(_, m)| config.users.contains(&m.user))
                             .map(|(id, _)| id.clone())
                             .collect();
-                        let history_error = history
-                            .sync(&registry, &config, &inbox, &tx_stop)
-                            .err()
-                            .map(|error| format!("{error:#}"));
-                        // 首次基线必须先于输入投递，避免快速回复被归入旧历史。
-                        if history_error.is_none() {
+                        let subscribed =
+                            outbox.subscribe(&registry, &config, &inbox.lock().unwrap());
+                        // 先持久化订阅位置，再投递首次输入；接入前内容从不入队。
+                        if subscribed.is_ok() {
                             for id in ids {
                                 if tx_stop.load(Ordering::Relaxed) {
                                     break;
@@ -274,9 +272,14 @@ impl Runtime {
                                 }
                             }
                         }
+                        let synced = outbox.sync(&registry, &config, &tx_stop);
+                        let outbox_error = subscribed
+                            .and(synced)
+                            .err()
+                            .map(|error| format!("{error:#}"));
                         let inbox = inbox.lock().unwrap();
                         let mut health = tx_health.lock().unwrap();
-                        health.history_error = history_error;
+                        health.outbox_error = outbox_error;
                         health.message_errors = inbox
                             .messages
                             .iter()
@@ -295,7 +298,7 @@ impl Runtime {
                             .flat_map(|m| &m.replies)
                             .filter(|r| r.status == "sending")
                             .count();
-                        history.health(&mut health);
+                        outbox.health(&mut health);
                         drop(health);
                         drop(inbox);
                         sleep(&tx_stop, 2);
@@ -462,50 +465,8 @@ fn dispatch(registry: &Path, config: &Config, inbox: &Mutex<Inbox>, id: &str) ->
                 user: incoming.user.clone(),
             }),
         )?;
-        let state = store.load()?;
-        let delivery = state
-            .messages
-            .iter()
-            .find(|m| m.id == incoming.delivery)
-            .context("飞书投递记录不存在")?;
-        let mut result = None;
-        if matches!(delivery.status.as_str(), "failed" | "cancelled") {
-            result = Some(format!(
-                "请求{}：{}",
-                delivery.status,
-                delivery.error.as_deref().unwrap_or("请检查 Twig 状态")
-            ));
-        }
-        if let Some(turn_id) = &delivery.turn {
-            let history = store.read(binding)?;
-            if let Some(turn) = history["thread"]["turns"]
-                .as_array()
-                .and_then(|turns| turns.iter().find(|turn| turn["id"] == *turn_id))
-            {
-                match turn["status"].as_str() {
-                    Some("completed") => {
-                        // 最终回复由精简历史同步发送，此处只更新接收请求状态。
-                        incoming.finished = true;
-                    }
-                    Some("failed" | "interrupted") => {
-                        result = Some("本轮失败或被中断，请检查 Twig Agent。".into())
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some(text) = result {
-            incoming.finished = true;
-            for chunk in text.chars().collect::<Vec<_>>().chunks(4000) {
-                incoming.replies.push(Reply {
-                    text: chunk.iter().collect(),
-                    status: "queued".into(),
-                });
-            }
-            let mut inbox = inbox.lock().unwrap();
-            inbox.messages.insert(id.into(), incoming.clone());
-            inbox.save()?;
-        }
+        // 已入共享队列即完成请求接收；最终回复和失败由新消息事件发送。
+        incoming.finished = true;
     }
     {
         let mut inbox = inbox.lock().unwrap();

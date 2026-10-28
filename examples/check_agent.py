@@ -692,7 +692,7 @@ supports_websockets = false
         def synced_text():
             return "\n".join(text for _, text in model.feishu.replies)
 
-        def history_caught_up():
+        def events_delivered():
             current = json.loads(twig("agent", "read"))["thread"]
             if current["status"]["type"] != "idle":
                 return False
@@ -701,21 +701,21 @@ supports_websockets = false
             latest = history[-1]
             expected = [item["text"] for item in latest["items"] if item["type"] == "agentMessage"][-1:]
             health = json.loads(twig("daemon", "status"))["feishu"]
-            assert not health["history_error"] and not health["history_errors"], health
+            assert not health["outbox_error"] and not health["outbox_errors"], health
             assert not health["unknown_replies"], health
             return (expected and all(value in text for value in expected)
-                    and not health["history_pending"] and not health["pending"])
+                    and not health["outbox_pending"] and not health["pending"])
 
-        # 首次不补历史；等待接入后首条输入的最终回复与队列清空。
-        def wait_history():
+        # 首次不读历史；等待接入后首条输入的最终回复与队列清空。
+        def wait_events():
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
-                if history_caught_up():
+                if events_delivered():
                     return
                 time.sleep(.3)
             raise AssertionError("主控最终回复未同步：" + twig("daemon", "status"))
 
-        wait_history()
+        wait_events()
         messages = [m for m in state()["messages"] if m["text"] == "offline-feishu-request"]
         assert len(messages) == 1, messages
         assert messages[0]["source"] == {"kind": "feishu", "user": "ou_allowed"}
@@ -730,7 +730,7 @@ supports_websockets = false
                          "--message", "child-report-after-subscription").strip()
         wait_for(lambda: all(next(m for m in state()["messages"] if m["id"] == ident)["status"] == "sent"
                              for ident in (cli_id, report_id)), "跨入口消息未投递")
-        wait_history()
+        wait_events()
         assert "cli-after-feishu-subscription" in synced_text()
         assert "【User】\nchild-report-after-subscription" not in synced_text()
         # 子任务内部输入属于其他 thread，不应作为历史条目进入飞书。
@@ -748,7 +748,7 @@ supports_websockets = false
         time.sleep(3)
         assert len([m for m in state()["messages"] if m["text"] == "offline-feishu-request"]) == 1
         assert model.feishu.replies == replies_before_restart
-        print("PASS: 飞书首次不补历史、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
+        print("PASS: 飞书新消息事件、跨入口输入与最终回复、子任务回报过滤及保留环境重启去重", flush=True)
 
     except BaseException:
         if frontend:
