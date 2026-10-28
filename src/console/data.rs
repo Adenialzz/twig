@@ -75,6 +75,17 @@ pub struct Request {
     pub projects: Vec<String>,
 }
 
+impl Snapshot {
+    fn query_error(&mut self, request: &Request, error: String) {
+        if let Some(id) = &request.turn {
+            self.turn = Some((id.clone(), Err(error.clone())));
+        }
+        if request.history {
+            self.history_error = Some(error);
+        }
+    }
+}
+
 // 快照可覆盖；完成事件使用独立队列，不能丢弃。
 #[derive(Clone, Default)]
 pub struct Updates(Arc<Mutex<Option<Snapshot>>>);
@@ -118,6 +129,7 @@ impl Worker {
             let mut version = None::<u64>;
             let mut instance = serde_json::Value::Null;
             let mut detail_key = None;
+            let mut detail_retry_at = None::<Instant>;
             let mut detail = Snapshot::default();
             while !stop.load(Ordering::Relaxed) {
                 for next in rx.try_iter() {
@@ -159,8 +171,12 @@ impl Worker {
                     request.turn,
                     request.refresh
                 ]);
-                if !request.background && detail_key.as_ref() != Some(&key) {
+                if !request.background
+                    && (detail_key.as_ref() != Some(&key)
+                        || detail_retry_at.is_some_and(|at| Instant::now() >= at))
+                {
                     detail_key = Some(key);
+                    detail_retry_at = None;
                     detail = Snapshot::default();
                     if request.history || request.turn.is_some() {
                         match crate::daemon::call::<Snapshot>(
@@ -169,7 +185,10 @@ impl Worker {
                             serde_json::json!(request),
                         ) {
                             Ok(snapshot) => detail = snapshot,
-                            Err(error) => detail.history_error = Some(format!("{error:#}")),
+                            Err(error) => {
+                                detail.query_error(&request, format!("{error:#}"));
+                                detail_retry_at = Some(Instant::now() + Duration::from_secs(2));
+                            }
                         }
                     }
                 }
@@ -1056,6 +1075,30 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn details_failure_is_associated_with_the_requested_turn() {
+        let request = super::Request {
+            turn: Some("thread".into()),
+            ..Default::default()
+        };
+        let mut snapshot = super::Snapshot::default();
+        snapshot.query_error(&request, "连接失败".into());
+        assert_eq!(
+            snapshot.turn,
+            Some(("thread".into(), Err("连接失败".into())))
+        );
+        assert!(snapshot.history_error.is_none());
+        let request = super::Request {
+            history: true,
+            ..request
+        };
+        snapshot.query_error(&request, "再次失败".into());
+        assert_eq!(snapshot.history_error.as_deref(), Some("再次失败"));
+        assert_eq!(
+            snapshot.turn,
+            Some(("thread".into(), Err("再次失败".into())))
+        );
+    }
     use super::*;
     #[test]
     fn status_header_keeps_upstream_detached_and_rename_counts() {

@@ -1356,14 +1356,17 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     offline.store(true, Ordering::Relaxed);
     p.send(b"r");
     p.wait("服务关闭连接");
+    p.wait("读取失败：");
     let prior_connections = methods
         .lock()
         .unwrap()
         .iter()
         .filter(|m| m.as_str() == "initialize")
         .count();
+    p.clear_output();
     offline.store(false, Ordering::Relaxed);
-    p.send(b"r");
+    // 同一详情页不改查询键、不手动刷新，连接恢复后也应重试并结束错误状态。
+    p.wait("本轮已完成");
     let start = Instant::now();
     while methods
         .lock()
