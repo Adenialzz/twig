@@ -1,6 +1,7 @@
 use twig_cli::notification::{PickerAction, UnreadPicker};
 pub(crate) mod data;
 pub(crate) mod form;
+mod hyperlink;
 pub(crate) mod inbox;
 mod notifications;
 pub(crate) mod query;
@@ -49,6 +50,7 @@ pub(super) struct App {
     scroll: u16,
     message: Option<String>,
     initial_cwd: PathBuf,
+    registry_path: PathBuf,
     located: bool,
     form: Option<form::Form>,
     pending_selection: Option<(String, String)>,
@@ -97,6 +99,7 @@ impl App {
             scroll: 0,
             message: None,
             initial_cwd: cwd,
+            registry_path: PathBuf::from("~/.twig/config.toml"),
             located: false,
             form: None,
             pending_selection: None,
@@ -693,6 +696,7 @@ fn run_inner(
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let worker = Worker::start(registry.clone())?;
     let mut app = App::new(cwd);
+    app.registry_path = registry.clone();
     app.notifications.restore(&worker.inbox.load()?);
     let mut chat_draft = crate::agent::chat::Draft::default();
     if chat && open_chat(&mut terminal, &registry, &mut chat_draft, &worker)? {
@@ -715,6 +719,7 @@ fn run_inner(
     let mut dirty = true;
     let mut select_at = None;
     let mut stale_count = 0;
+    let mut hyperlinks = hyperlink::Painter::default();
     loop {
         if let Some(form) = &mut app.form {
             dirty |= form.querying();
@@ -812,7 +817,7 @@ fn run_inner(
         dirty |= stale != stale_count;
         stale_count = stale;
         if dirty {
-            terminal.draw(|frame| {
+            let completed = terminal.draw(|frame| {
                 if selection
                     .as_ref()
                     .is_some_and(|selection| !selection.fits(frame.area()))
@@ -841,6 +846,12 @@ fn run_inner(
                     picker.draw(frame, &unread_tasks);
                 }
             })?;
+            let link = if selection.is_none() && unread_picker.is_none() {
+                ui::zed_link(completed.area, &app)
+            } else {
+                None
+            };
+            hyperlinks.draw(&mut io::stdout(), completed.buffer, link.as_ref())?;
             dirty = false;
         }
         if !event::poll(Duration::from_millis(100))? {

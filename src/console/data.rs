@@ -43,6 +43,8 @@ pub struct Repo {
 }
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub zed: Option<crate::zed::Config>,
     pub repos: Vec<Repo>,
     pub registry_error: Option<String>,
     #[serde(with = "crate::daemon::time")]
@@ -347,8 +349,11 @@ pub fn summary<'a>(threads: impl Iterator<Item = &'a Thread>) -> String {
     }
 }
 
-pub fn repositories(registry_path: &Path) -> Result<Vec<Repo>> {
-    registry::recent_projects(registry_path)?
+pub fn repositories(registry_path: &Path) -> Result<(Vec<Repo>, Option<crate::zed::Config>)> {
+    let mut config = registry::load(registry_path)?;
+    let zed = config.zed.take();
+    let repos = config
+        .into_recent_projects()
         .into_iter()
         .map(|(name, entry)| {
             query::check()?;
@@ -404,7 +409,8 @@ pub fn repositories(registry_path: &Path) -> Result<Vec<Repo>> {
             }
             Ok(repo)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok((repos, zed))
 }
 
 struct GitScan {
@@ -674,7 +680,7 @@ fn collect(
         let mut associations_changed = false;
         if force || due(registry_at, 10) {
             match repositories(&registry) {
-                Ok(mut repos) => {
+                Ok((mut repos, zed)) => {
                     for repo in &mut repos {
                         if let Some(old) = snapshot
                             .repos
@@ -699,10 +705,12 @@ fn collect(
                         }
                     }
                     snapshot.repos = repos;
+                    snapshot.zed = zed;
                     snapshot.registry_error = None;
                     snapshot.registry_checked = Some(Instant::now());
                 }
                 Err(e) => {
+                    snapshot.zed = None;
                     snapshot.registry_error = Some(format!("登记表读取失败，旧数据过期：{e:#}"))
                 }
             }
@@ -1196,7 +1204,7 @@ mod tests {
     fn broken_project_does_not_hide_others_or_create_registry() {
         let dir = tempfile::tempdir().unwrap();
         let registry = dir.path().join("registry.toml");
-        assert!(repositories(&registry).unwrap().is_empty());
+        assert!(repositories(&registry).unwrap().0.is_empty());
         assert!(!registry.exists());
         std::fs::write(
             &registry,
@@ -1206,7 +1214,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let repos = repositories(&registry).unwrap();
+        let repos = repositories(&registry).unwrap().0;
         assert_eq!(repos.len(), 1);
         assert!(repos[0].error.is_some());
         assert!(!dir.path().join("missing").exists());

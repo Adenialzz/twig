@@ -11,6 +11,8 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Registry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zed: Option<crate::zed::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmux: Option<crate::startup::Layout>,
     #[serde(default)]
     pub projects: BTreeMap<String, Entry>,
@@ -50,6 +52,10 @@ pub fn load(path: &Path) -> Result<Registry> {
     };
     let registry: Registry =
         toml::from_str(&text).with_context(|| format!("配置格式错误：{}", path.display()))?;
+    if let Some(zed) = &registry.zed {
+        zed.validate()
+            .with_context(|| format!("Zed 配置错误：{}", path.display()))?;
+    }
     for (name, entry) in &registry.projects {
         config::name(name)?;
         entry.validate()?;
@@ -91,10 +97,12 @@ pub fn record_use(path: &Path, name: &str, task: &str) -> Result<()> {
     save(path, &registry).context("任务操作已成功，但保存项目和任务使用时间失败")
 }
 
-pub fn recent_projects(path: &Path) -> Result<Vec<(String, Entry)>> {
-    let mut projects: Vec<_> = load(path)?.projects.into_iter().collect();
-    projects.sort_by(|a, b| b.1.last_used.cmp(&a.1.last_used).then(a.0.cmp(&b.0)));
-    Ok(projects)
+impl Registry {
+    pub fn into_recent_projects(self) -> Vec<(String, Entry)> {
+        let mut projects: Vec<_> = self.projects.into_iter().collect();
+        projects.sort_by(|a, b| b.1.last_used.cmp(&a.1.last_used).then(a.0.cmp(&b.0)));
+        projects
+    }
 }
 
 pub fn list(path: &Path) -> Result<()> {
@@ -200,13 +208,15 @@ mod tests {
     fn recent_usage_persists_without_changing_paths_or_startup() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("custom.toml");
-        assert!(recent_projects(&path).unwrap().is_empty());
+        assert!(load(&path).unwrap().into_recent_projects().is_empty());
         assert!(!path.exists());
         fs::write(
             &path,
             r#"
 [tmux]
 panes = [{ command = ["echo", "hello"], focus = true }]
+[zed]
+ssh_host = "me@devbox:2222"
 [projects.alpha]
 path = "/alpha"
 [projects.beta]
@@ -220,8 +230,9 @@ last_used = 1
         .unwrap();
         let before = fs::read(&path).unwrap();
         let names = || {
-            recent_projects(&path)
+            load(&path)
                 .unwrap()
+                .into_recent_projects()
                 .into_iter()
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>()
@@ -231,6 +242,7 @@ last_used = 1
         record_use(&path, "alpha", "feat/auth").unwrap();
         assert_eq!(names(), ["alpha", "beta", "gamma"]);
         let registry = load(&path).unwrap();
+        assert_eq!(registry.zed.as_ref().unwrap().ssh_host, "me@devbox:2222");
         assert_eq!(registry.projects["alpha"].path, Path::new("/alpha"));
         assert!(registry.projects["alpha"].last_used.unwrap() > 1);
         assert_eq!(

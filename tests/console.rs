@@ -696,6 +696,53 @@ fn noninteractive_console_is_explicit_and_completion_remains_readonly() {
     assert!(!f.registry.exists());
 }
 #[test]
+fn zed_links_follow_tasks_and_config_without_writing_registry() {
+    let f = Fixture::new();
+    f.init();
+    let original = fs::read_to_string(&f.registry).unwrap();
+    let configured = format!("[zed]\nssh_host = 'me@devbox:2222'\n{original}");
+    fs::write(&f.registry, &configured).unwrap();
+    let mut p = f.terminal(false);
+    let wait_link = |p: &mut Pty, path: &std::path::Path| {
+        let url = format!("\x1b]8;;zed://ssh/me@devbox:2222{}\x1b\\", path.display());
+        let start = Instant::now();
+        loop {
+            p.read_output();
+            if String::from_utf8_lossy(&p.bytes).contains(&url) {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(12),
+                "PID {} 缺少链接 {url:?}：{}",
+                p.child.id(),
+                p.text
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+    p.wait_screen("用 Zed 打开 ↗");
+    p.send(b"2/main\r");
+    wait_link(&mut p, &f.repo);
+    p.clear_output();
+    p.send(b"/auth\r");
+    let state: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+    )
+    .unwrap();
+    wait_link(
+        &mut p,
+        std::path::Path::new(state["auth"]["path"].as_str().unwrap()),
+    );
+    assert_eq!(fs::read_to_string(&f.registry).unwrap(), configured);
+    fs::write(&f.registry, &original).unwrap();
+    p.send(b"r");
+    p.wait_screen("[zed].ssh_host");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert_eq!(fs::read_to_string(&f.registry).unwrap(), original);
+}
+
+#[test]
 fn empty_and_broken_registry_keep_terminal_usable_and_do_not_write() {
     let f = Fixture::new();
     let mut p = f.terminal(false);
