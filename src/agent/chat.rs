@@ -478,6 +478,7 @@ fn run_ui(
     let mut dirty = true;
     let mut selection: Option<Selection> = None;
     let mut select_at = None;
+    let mut clicks = twig_cli::mouse_selection::Clicks::default();
     let mut areas = view::Areas::default();
     let mut copy_notice = None;
     loop {
@@ -541,7 +542,14 @@ fn run_ui(
                     selection = [areas.history, areas.input]
                         .into_iter()
                         .find(|area| area.contains((x, y).into()))
-                        .map(|area| Selection::new(frame.buffer_mut(), area, x, y));
+                        .map(|area| {
+                            let mut selected = Selection::new(frame.buffer_mut(), area, x, y);
+                            selected.select_click(clicks.next(&area, x, y, Instant::now()));
+                            selected
+                        });
+                    if selection.is_none() {
+                        clicks.reset();
+                    }
                 }
                 if let Some(selected) = &selection {
                     selected.draw(frame.buffer_mut());
@@ -557,6 +565,12 @@ fn run_ui(
         }
         dirty = true;
         let event = event::read()?;
+        if !matches!(event, Event::Mouse(mouse) if matches!(mouse.kind,
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            | MouseEventKind::Moved))
+        {
+            clicks.reset();
+        }
         if !view.connected && view.error.is_none() {
             match &event {
                 Event::Resize(_, _) => {}

@@ -857,7 +857,7 @@ fn run_inner(
     let mut unread_picker: Option<UnreadPicker> = None;
     let mut drag: Option<Drag> = None;
     let mut selection: Option<Selection> = None;
-    let mut clicks = selection::Clicks::default();
+    let mut clicks = crate::mouse_selection::Clicks::default();
     let mut label = Status::default();
     let mut notice = String::new();
     let mut copy_notice: Option<clipboard::Notice> = None;

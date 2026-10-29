@@ -647,6 +647,42 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
         + prefix.len();
     let end = start + p.bytes[start..].iter().position(|byte| *byte == 7).unwrap();
     assert_eq!(STANDARD.decode(&p.bytes[start..end]).unwrap(), b"demo");
+    p.wait_screen_absent("已请求复制");
+    p.clear_output();
+    p.send(b"\x1b[<0;5;6M\x1b[<0;5;6m\x1b[<0;5;6M\x1b[<0;5;6m\x1b[<0;5;6M\x1b[<0;5;6m");
+    let started = Instant::now();
+    let copies = loop {
+        p.read_output();
+        let copies: Vec<_> = p
+            .bytes
+            .windows(prefix.len())
+            .enumerate()
+            .filter(|(_, bytes)| *bytes == prefix)
+            .filter_map(|(start, _)| {
+                let start = start + prefix.len();
+                let end = start + p.bytes[start..].iter().position(|byte| *byte == 7)?;
+                Some(String::from_utf8(STANDARD.decode(&p.bytes[start..end]).unwrap()).unwrap())
+            })
+            .collect();
+        if copies.len() == 2 {
+            break copies;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "连击复制超时：{}",
+            p.text
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(copies[0], "demo");
+    assert!(
+        copies[1].contains("demo") && copies[1].len() > copies[0].len(),
+        "{copies:?}"
+    );
+    assert!(
+        !copies[1].contains('│'),
+        "选区不得包含边框或相邻区域：{copies:?}"
+    );
     // 缩放清除旧坐标的选区；窄屏仍可拖选，Esc 只清除选区。
     p.resize(80, 24);
     p.clear_output();

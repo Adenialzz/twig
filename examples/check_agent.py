@@ -387,6 +387,19 @@ supports_websockets = false
         assert frontend.copied() == reply
         frontend.wait("已请求复制")
         frontend.output.clear()
+        click = f"\x1b[<0;{col+2};{row+1}M\x1b[<0;{col+2};{row+1}m".encode()
+        frontend.send(click * 3)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            frontend.drain()
+            copies = [base64.b64decode(value).decode() for value in
+                      re.findall(rb"\x1b\]52;c;([^\x07]+)\x07", frontend.output)]
+            if len(copies) == 2:
+                break
+        assert len(copies) == 2, f"Agent 连击复制超时：{copies}"
+        assert copies[0] == "probe", copies
+        assert copies[1].strip() == reply, copies
+        frontend.output.clear()
         frontend.send(b"\x1bc")  # Alt-C，复制完整回复。
         assert frontend.copied() == reply
         frontend.wait("已请求复制")
