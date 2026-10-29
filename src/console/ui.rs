@@ -95,9 +95,8 @@ pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
     }
     let areas = panels(area, app.searching);
     let mut regions = Vec::new();
-    // 全局监控不参与拖选，避免选区快照冻结实时状态。
-    for (index, panel) in areas.into_iter().take(3).enumerate() {
-        if area.width < 100 && index != app.focus {
+    for (index, panel) in areas.into_iter().enumerate() {
+        if area.width < 100 && index < 3 && index != app.focus {
             continue;
         }
         regions.push(panel);
@@ -1618,6 +1617,40 @@ mod tests {
     }
 
     #[test]
+    fn monitor_selection_freezes_only_its_region_until_cleared() {
+        for width in [80, 140] {
+            let mut app = fixture();
+            let buffer = render(&app, width, 30, |frame, _, app| super::draw(frame, app));
+            let area = panels(buffer.area, false)[3].inner(ratatui::layout::Margin::new(1, 1));
+            assert!(selection_regions(buffer.area, &app).contains(&area));
+            let mut selected =
+                super::super::selection::Selection::new(&buffer, area, area.x, area.y);
+            selected.update(width - 1, 29);
+            let copied = selected.text();
+            assert!(!copied.is_empty());
+            assert!(!copied.contains('│'));
+            app.message = Some("后台继续刷新".into());
+            app.snapshot.codex_error = Some("模拟断连".into());
+            app.snapshot.threads.clear();
+            let mut updated = render(&app, width, 30, |frame, _, app| super::draw(frame, app));
+            assert!(text(&updated).contains("Codex 不可用"));
+            selected.draw(&mut updated);
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    assert_eq!(updated[(x, y)].symbol(), buffer[(x, y)].symbol());
+                }
+            }
+            assert!(text(&updated).contains("后台继续刷新"));
+            assert!(
+                text(&render(&app, width, 30, |frame, _, app| super::draw(
+                    frame, app
+                )))
+                .contains("Codex 不可用")
+            );
+        }
+    }
+
+    #[test]
     fn layout_keeps_monitor_visible_and_details_hide_metadata() {
         let mut app = fixture();
         for (width, height) in [(38, 12), (65, 22), (100, 30), (140, 40)] {
@@ -1625,11 +1658,15 @@ mod tests {
                 app.focus = focus;
                 let area = Rect::new(0, 0, width, height);
                 let regions = selection_regions(area, &app);
-                assert_eq!(regions.len(), if width >= 100 { 4 } else { 2 });
+                let monitor_area =
+                    panels(area, app.searching)[3].inner(ratatui::layout::Margin::new(1, 1));
+                let monitor_visible = monitor_area.width > 0 && monitor_area.height > 0;
+                assert_eq!(
+                    regions.len(),
+                    (if width >= 100 { 4 } else { 2 }) + usize::from(monitor_visible)
+                );
                 assert_eq!(regions.last(), Some(&Rect::new(0, height - 1, width, 1)));
-                for region in regions {
-                    assert!(!region.intersects(panels(area, app.searching)[3]));
-                }
+                assert_eq!(regions.contains(&monitor_area), monitor_visible);
                 let output = text(&render(&app, width, height, |frame, _, app| {
                     super::draw(frame, app)
                 }));

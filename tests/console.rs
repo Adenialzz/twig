@@ -700,7 +700,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
 }
 
 #[test]
-fn footer_drag_and_triple_click_copy_only_the_displayed_status() {
+fn monitor_and_footer_drag_and_triple_click_stay_in_their_regions() {
     use base64::{Engine, engine::general_purpose::STANDARD};
     fn copies(p: &mut Pty, count: usize) -> Vec<String> {
         let started = Instant::now();
@@ -773,6 +773,40 @@ fn footer_drag_and_triple_click_copy_only_the_displayed_status() {
         let copied = copies(&mut p, 2);
         assert_eq!(copied[1], expected);
         assert!(!copied[0].is_empty());
+        // 全局监控在宽屏左下、窄屏下方，按真实画面定位。
+        let monitor = "Codex 不可用，详见底部状态";
+        p.wait_screen(monitor);
+        let screen = p.screen_text();
+        let (row, line) = screen
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(monitor))
+            .unwrap();
+        let col = line[..line.find(monitor).unwrap()].chars().count();
+        p.clear_output();
+        p.send(
+            format!(
+                "\x1b[<0;{};{}M\x1b[<32;{};{}M\x1b[<0;{};{}m",
+                col + 1,
+                row + 1,
+                col + 5,
+                row + 1,
+                col + 5,
+                row + 1
+            )
+            .as_bytes(),
+        );
+        assert_eq!(copies(&mut p, 1), vec!["Codex"]);
+        p.clear_output();
+        let click = format!(
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            col + 2,
+            row + 1,
+            col + 2,
+            row + 1
+        );
+        p.send(click.repeat(3).as_bytes());
+        assert_eq!(copies(&mut p, 2), vec!["Codex", monitor]);
     }
     p.send(b"q");
     assert!(p.wait_exit().success());
