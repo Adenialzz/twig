@@ -46,6 +46,7 @@ impl Fixture {
             temp.path().file_name().unwrap().to_string_lossy()
         );
         for (name, text) in [
+            ("claude", "#!/bin/sh\nprintf '[]\\n'\n"),
             (
                 "tmux",
                 "#!/bin/sh\nexec \"$TWIG_REAL_TMUX\" -L \"$TWIG_TEST_SOCKET\" -f /dev/null \"$@\"\n",
@@ -860,7 +861,7 @@ fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
             .as_bytes(),
         );
         let copied = p.copies(1);
-        for background in ["Console", "全局 Codex", title] {
+        for background in ["Console", "全局 Agent", title] {
             assert!(!copied[0].contains(background), "{copied:?}");
         }
         p.wait_screen("已请求复制");
@@ -3108,6 +3109,50 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
             .unwrap(),
         state
     );
+}
+
+#[test]
+fn claude_state_changes_notify_and_jump_without_hooks_or_agent_control() {
+    let mut f = Fixture::new();
+    f.registry = f.temp.path().join("config.toml");
+    f.init();
+    let tasks: serde_json::Value = serde_json::from_slice(
+        &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+    )
+    .unwrap();
+    let path = tasks["auth"]["path"].clone();
+    let save = |status: &str| {
+        let json = serde_json::json!([{"cwd":path, "kind":"interactive", "startedAt":1,
+            "sessionId":"claude-live", "name":"claude-live", "status":status}]);
+        fs::write(
+            f.bin.join("claude.next"),
+            serde_json::to_vec(&json).unwrap(),
+        )
+        .unwrap();
+        fs::rename(f.bin.join("claude.next"), f.bin.join("claude.json")).unwrap();
+    };
+    save("busy");
+    fs::write(f.bin.join("claude"), "#!/bin/sh\n[ \"$*\" = 'agents --json --all' ] || exit 9\nexec /bin/cat \"${0%/*}/claude.json\"\n").unwrap();
+    let mut p = f.terminal(false);
+    p.wait("claude-live");
+    p.send(b"\x17u");
+    p.wait("暂无未读任务");
+    p.send(b"\x17u");
+    save("idle");
+    p.wait("Claude 状态变化");
+    p.send(b"\x17u");
+    p.wait_screen("demo / auth / 未读 1");
+    p.send(b"\x17u\x17f");
+    p.wait(" · 全局 Codex ");
+    p.send(b"\x17u");
+    p.wait_screen("暂无未读任务");
+    p.send(b"\x17u\x17d");
+    p.wait("任务 / ");
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
+    assert!(!f.repo.join(".claude/settings.json").exists());
+    assert!(!f.temp.path().join("controller/workspace").exists());
 }
 
 #[test]

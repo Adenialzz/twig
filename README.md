@@ -14,7 +14,7 @@ Twig 提供两个可切换的页面：**Console** 管理项目、任务和终端
 - **对话阅读**：主控回复支持 Markdown 排版、代码高亮与自适应表格；工具过程以紧凑状态和输出预览展示，F4 展开详情；Console 列表、详情、全局监控、底部状态行、表单弹窗和 Agent 对话/输入区也支持拖选、双击选词和三击选行复制。
 - **主控协作**：通过 Codex daemon 创建受管任务、派发消息、跟进完成回调，要求子任务回报结果和阻塞，并核对验收。
 - **持续后台**：Console、CLI 和飞书共享状态与消息队列；多窗口同步未读，界面退出后继续采集与投递。
-- **状态与提醒**：查看 Codex 会话状态，接收消息送达和轮次完成通知，从通知直接跳转任务或主控；重要事项可由主控发送飞书通知。
+- **状态与提醒**：查看 Codex / Claude 会话状态，接收 Codex 消息送达、轮次完成及 Claude 状态变化提醒，从通知直接跳转任务或主控；重要事项可由主控发送飞书通知。Claude 使用零配置轮询，可能漏掉采样间变化，详见 [Console](docs/console.md#claude-状态与提醒)。
 
 ## 安装
 
@@ -31,6 +31,7 @@ make install
 | 可选能力 | 额外依赖 |
 | --- | --- |
 | 主控与受管 Codex 任务 | 支持 app-server daemon 的 Codex，且服务已启动 |
+| Claude 状态与变化提醒 | Twig 后台的 PATH 中有支持 `claude agents --json --all` 的 Claude Code，无需 hooks 或 SDK |
 | 飞书双向机器人 / 主动 webhook 通知 | curl、应用凭证与允许用户 / `TWIG_FEISHU_WEBHOOK_URL` |
 
 也可用 `cargo install --path . --locked` 只安装二进制；使用主控时需另行复制 skill。完整说明及平台验证范围见 [安装指南](docs/installation.md)。

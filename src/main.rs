@@ -1,4 +1,5 @@
 mod agent;
+mod claude;
 mod codex;
 mod completion;
 mod config;
@@ -58,7 +59,7 @@ enum Action {
         #[arg(long, conflicts_with = "topic")]
         all: bool,
     },
-    /// 全局项目、任务与 Codex 会话控制台
+    /// 全局项目、任务与 Codex / Claude 会话控制台
     #[command(
         after_help = "需要交互终端。任务区 Enter 打开内置终端工作台，Ctrl-W d 返回导航并保留进程。\n浏览不改项目资源；未读状态独立持久化，退出重进仍保留，进入对应任务或 Agent 后清除。提交表单、确认删除和进入缺失窗口会操作资源。\n配置用户级 [zed].ssh_host 后，可从任务详情 Cmd/Ctrl + 点击链接，在本机 Zed 打开远程目录。\n完整操作说明：twig guide console；脚本请使用 twig ls。"
     )]

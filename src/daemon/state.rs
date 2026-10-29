@@ -101,6 +101,8 @@ impl State {
             "registry_error": self.snapshot.registry_error,
             "codex_age_seconds": self.snapshot.codex_checked.map(|t|t.elapsed().as_secs()),
             "codex_error": self.snapshot.codex_error,
+            "claude_age_seconds": self.snapshot.claude_checked.map(|t|t.elapsed().as_secs()),
+            "claude_error": self.snapshot.claude_error,
             "delivery_error": self.snapshot.delivery_error,
             "projects": self.snapshot.repos.iter().map(|r|serde_json::json!({"name":r.name,"error":r.error,
                 "tasks":r.tasks.iter().map(|t|serde_json::json!({"name":t.name,"age_seconds":t.checked.map(|t|t.elapsed().as_secs()),"error":t.error})).collect::<Vec<_>>()
