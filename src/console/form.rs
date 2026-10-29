@@ -25,7 +25,7 @@ pub struct Form {
     pub directory_selection: usize,
     pub directory_error: Option<String>,
     pub branches: Vec<BranchCandidate>,
-    pub branch_selection: usize,
+    pub branch_selection: Option<usize>,
     pub branch_error: Option<String>,
     branch_input: String,
     selected_branch: Option<String>,
@@ -96,7 +96,7 @@ impl Form {
             directory_selection: 0,
             directory_error: None,
             branches: Vec::new(),
-            branch_selection: 0,
+            branch_selection: None,
             branch_error: None,
             branch_input: String::new(),
             selected_branch: None,
@@ -154,7 +154,10 @@ impl Form {
         if !self.completing_branch() {
             return false;
         }
-        let selected = self.matching_branches().nth(self.branch_selection).cloned();
+        let selected = self
+            .matching_branches()
+            .nth(self.branch_selection.unwrap_or(0))
+            .cloned();
         if let Some(branch) = selected {
             self.fields[0] = branch.name.clone();
             self.branch_input = self.fields[0].clone();
@@ -162,7 +165,7 @@ impl Form {
                 .matching_branches()
                 .position(|candidate| candidate.reference == branch.reference)
                 .unwrap();
-            self.branch_selection = selection;
+            self.branch_selection = Some(selection);
             self.selected_branch = Some(branch.reference);
             self.error = None;
             self.scroll = 0;
@@ -241,7 +244,9 @@ impl Form {
             self.scroll = 0;
             return Ok(());
         }
-        self.complete_branch();
+        if self.branch_selection.is_some() {
+            self.complete_branch();
+        }
         self.submit(registry)
     }
     fn submit(&mut self, registry: &Path) -> Result<()> {
@@ -393,7 +398,7 @@ impl Form {
         }
         if self.branch_input != self.fields[0] {
             self.branch_input = self.fields[0].clone();
-            self.branch_selection = 0;
+            self.branch_selection = None;
             self.selected_branch = None;
         }
         if self.completing_path() && self.completion_input.as_ref() != Some(&self.fields[0]) {
@@ -555,13 +560,16 @@ mod tests {
         form.fields[0] = "feature/".into();
         form.poll().unwrap();
         assert_eq!(form.matching_branches().count(), 2);
-        form.branch_selection = 1;
+        assert_eq!(form.branch_selection, None);
+        form.branch_selection = Some(1);
         assert!(form.complete_branch());
         assert_eq!(form.fields, ["feature/beta", "develop"]);
         form.poll().unwrap();
-        assert_eq!(form.branch_selection, 0);
+        assert_eq!(form.branch_selection, Some(0));
         form.fields[0] = "new-task".into();
         form.poll().unwrap();
+        assert_eq!(form.branch_selection, None);
+        assert_eq!(form.selected_branch, None);
         assert!(form.matching_branches().next().is_none());
         assert!(!form.complete_branch());
         form.fields[0].clear();

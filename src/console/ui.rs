@@ -1230,7 +1230,7 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
             if sections[3].height >= 3 {
                 widget = widget.block(block(" 已有分支 · 选作任务 ".into(), true));
             }
-            let mut state = ListState::default().with_selected(Some(form.branch_selection));
+            let mut state = ListState::default().with_selected(form.branch_selection);
             frame.render_stateful_widget(widget, sections[3], &mut state);
         }
     } else {
@@ -1277,7 +1277,11 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
         Paragraph::new(if form.busy() {
             "执行期间请等待，避免中断写操作。"
         } else if form.completing_branch() {
-            "↑↓ 选择 · Tab 填入\nEnter 选中并确认 · Esc 取消"
+            if form.branch_selection.is_some() {
+                "↑↓ 选择 · Tab 填入\nEnter 选中并确认 · Esc 取消"
+            } else {
+                "↑↓ 选择 · Tab 填入\nEnter 按输入创建 · Esc 取消"
+            }
         } else {
             "Tab 切字段 · 空格勾选 · Enter 创建\nEsc 取消 · PgUp/PgDn 滚动"
         })
@@ -1345,7 +1349,7 @@ mod tests {
                 "项目：alpha",
                 "任务名",
                 "起点分支",
-                "Enter 选中并确认",
+                "Enter 按输入创建",
                 "Esc 取消",
             ] {
                 assert!(
@@ -1421,7 +1425,7 @@ mod tests {
                 }
             })
             .collect();
-        form.branch_selection = 29;
+        form.branch_selection = Some(29);
         app.form = Some(form);
         for (width, height) in [(38, 12), (65, 24), (100, 30)] {
             let output = text(&render(&app, width, height, |frame, _, app| {
