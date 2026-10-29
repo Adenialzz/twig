@@ -34,6 +34,7 @@ mod tests {
             }
             .into(),
             task: task.then(|| Completion {
+                claude: None,
                 message: true,
                 project: "demo".into(),
                 path: "/work".into(),
