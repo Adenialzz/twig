@@ -20,9 +20,11 @@ twig daemon run             # 前台运行，供调试或系统服务托管
 
 `status` 中的 `collection` 展示登记、Codex 与任务采集的年龄和错误；`agent_queue` 为投递状态计数，`operations` 为排队数量和运行/待核对阶段；`feishu` 展示连接、待处理请求、未知回复数和按消息 ID 记录的错误；`outbox_pending` 是待发主控新消息分段，`outbox_error` 为新消息采集错误，`outbox_errors` 为各单聊同步错误；`worker_errors` 记录飞书接收/发送线程的异常退出，接收线程异常也会将 connected 置为 false 并设置 error。未启用 Codex 时其采集失败不影响普通任务管理。
 
-Unix socket 位于 `/tmp/twig-<UID>/` 私有目录，按规范化配置路径隔离。后台运行目录为配置旁的 `daemon/<配置身份>/`，包含单例锁、`operations.json`、可选 `feishu.json` 与 `feishu-outbox.json`。配置文件尚不存在也可先启动。socket 不受客户端 TMPDIR 和启动目录影响。
+Unix socket 位于 `/tmp/twig-<UID>/` 私有目录，按规范化配置路径隔离。后台运行目录为配置旁的 `daemon/<配置身份>/`，包含单例锁、`operations/<操作 ID>.json`、可选 `feishu.json` 与 `feishu-outbox.json`。配置文件尚不存在也可先启动。socket 不受客户端 TMPDIR 和启动目录影响。
 
 ## 操作进度与未知结果
+
+操作记录按 ID 分文件保存，只原子更新当前操作，不随每次进度更新重写整份历史。首次升级启动时，后台将旧 `operations.json` 完整迁移到 `operations/`，保留旧文件作为迁移时的备份；迁移中断可重新启动继续，损坏记录会阻止启动并保留原文件。新目录启用后是唯一数据来源，旧文件不再更新或导入。迁移后不要直接运行使用旧存储格式的后台，也不要删除新目录后用旧备份替代，否则会丢失迁移后的操作状态和去重记录。
 
 写请求先准备确认计划，再携带稳定请求 ID 提交，接受后落盘。默认 CLI 等待终态；Console 表单显示实际业务阶段。可用 `TWIG_OPERATION_PROGRESS=1 twig …` 在 CLI 显示阶段。关闭界面不会撤销操作，也不能用重新运行 `new` 代替查结果。
 
@@ -81,7 +83,7 @@ launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.twig.daemon.plist
 
 ## 日志与升级
 
-手动 `start` 的启动诊断在运行目录 `daemon.log`，达到 1 MiB 后下次启动保留一份 `.1`。运行连接/操作故障写 `events.log`，达到 1 MiB 时保留一份 `.1`。系统托管的启动错误由服务管理器接收。普通诊断不记录消息正文或密钥；`operations.json`、Agent runtime 和 飞书接收/新消息出站记录是受限业务数据，可能含用户消息，不能当作脱敏日志公开。
+手动 `start` 的启动诊断在运行目录 `daemon.log`，达到 1 MiB 后下次启动保留一份 `.1`。运行连接/操作故障写 `events.log`，达到 1 MiB 时保留一份 `.1`。系统托管的启动错误由服务管理器接收。普通诊断不记录消息正文或密钥；操作记录及其旧格式备份、Agent runtime 和 飞书接收/新消息出站记录是受限业务数据，可能含用户消息，不能当作脱敏日志公开。
 
 日常源码更新，已通过 `daemon start` 启动且支持 restart 的后台只需：
 

@@ -48,3 +48,5 @@ Console 的 `/delete` 或 `dd` 提供相同清理能力，默认取消；「删�
 ## 受管 Codex 任务
 
 `new --agent` 创建的任务还受 Codex 活动状态和待发消息保护。先用 stop 中断轮次并取消尚未投递的消息，再检查文件；结果未知的 sending 记录需核对后用 `agent cancel --id ID` 取消，取消记录不撤回已发内容。`.twig/state.md` 是 ignored 文件，CLI 删除须显式 `--delete-ignored`。Twig 不关闭共享 Codex daemon。
+
+进程保护只查询目标 Pane 的直接子进程，不扫描全机进程。Linux 需要可读取对应 `/proc/<PID>/task/*/children`，macOS 使用系统进程接口；目标进程不可查或查询失败时拒绝删除。确认前和实际删除前均实时复查，不缓存此前的空闲结果。

@@ -18,7 +18,7 @@ Twig 提供两个可切换的页面：**Console** 管理项目、任务和终端
 
 ## 安装
 
-基础环境需要 Git、**tmux 3.8 或更新版本**和 Unix `ps`；源码安装还需要 Rust/Cargo 和 Make。可先用 `tmux -V` 检查版本，支持范围见 [安装指南](docs/installation.md)。在仓库目录执行：
+基础环境需要 Git、**tmux 3.8 或更新版本**（Linux 或 macOS）；源码安装还需要 Rust/Cargo 和 Make。可先用 `tmux -V` 检查版本，支持范围见 [安装指南](docs/installation.md)。在仓库目录执行：
 
 ```sh
 make install

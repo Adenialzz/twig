@@ -1,5 +1,28 @@
 # twig 设计决定与开发交接
 
+## 操作历史与删除查询性能（2026-10-29）
+
+隔离 release 实测发现两个瓶颈：旧 operations.json 每次进度变化全量重写且未缓冲，Open 在 0/500/2000 条历史下中位耗时分别约 0.10/1.12/5.28 秒；本机约 8.4 万条进程记录，删除重复全机 ps 扫描约 5 秒。均为小仓库单机样本，不代表生产吞吐。
+
+操作持久化提取至 src/daemon/operations/store.rs，按操作 ID 存入 operations/，写入通过 BufWriter、flush、文件 sync_all、原子替换完成，接口和请求去重语义不变。启动在临时目录完整迁移旧整表，校验 ID 与文件名，所有记录写入后原子发布目录；原 operations.json 保留为迁移备份。存在新目录便不再读取旧文件，不能以损坏新记录为由回退旧状态。中途退出留下的未发布目录不参与恢复；损坏记录和非法路径拒绝启动。新目录 0700，记录 0600。只重写需要转为 needs_inspection 的未完成记录，不重写已完成历史；启动和列表仍读取历史，不自动清理去重信息。
+
+删除保留原有确认前及执行前复查，子进程查询改为 Linux /proc 指定 PID 的全部线程 children，以及 macOS proc_listchildpids（明确检查 errno，防止错误零返回误判空闲）。无效/消失 PID 和读取失败仍拒绝删除，不全机扫描，也不缓存空闲结论。接口依据：[Linux proc 文档](https://docs.kernel.org/filesystems/proc.html#proc-pid-task-tid-children-information-about-task-children)、[Apple libproc 实现](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c)。
+
+验证：格式检查、严格 Clippy、Linux 全量 246 项 Rust 测试通过；新增测试覆盖迁移中断/损坏/非法 ID、旧文件不再导入、更新单条不改写其他记录、请求去重、保存失败、后台任务保护、进程消失和无 ps 环境。macOS 子进程查询及其测试通过 aarch64-apple-darwin 目标编译检查，尚未在 macOS 运行；实际行为由平台 CI 验证。
+
+同机 release 串行复测（临时小仓库、本地 bare remote、独立后台/tmux，无真实 Agent；后台样本 5 次，Console 与每档历史各 3 次，中位数）：
+
+| 场景 | 修改前 | 修改后 |
+| --- | --- | --- |
+| Console 创建并进入 | 0.604 秒 | 0.504 秒 |
+| Console 进入已有任务 | 0.184 秒 | 0.184 秒 |
+| Console 确认删除至反馈 | 5.214 秒 | 0.309 秒 |
+| 后台 Open，500 条历史 | 1.121 秒 | 0.080 秒 |
+| 后台 Open，2000 条历史 | 5.280 秒 | 0.080 秒 |
+| 后台删除，小历史 | 5.038 秒 | 0.161 秒 |
+
+历史用约 2.33 MB 的 2000 条模拟已完成记录验证真实迁移，不向真实后台注入数据。创建波动仍有 0.405–0.698 秒，未修改 Console 刷新与二次 Open 流程，不把该项小幅差异视为稳定提速保证。未安装、提交或重启真实服务；升级后须重启 Twig 后台以启用新格式及进程查询。
+
 ## 创建后自动进入的资源校验（2026-10-29）
 
 Console 创建后通过 Open 操作进入工作台。此前 Open 复用全项目快照，包含文件状态、全部 refs 和 Worktree 列表，启动程序生成文件或正常提交会触发「资源已变化」。Open 改为只固定项目路径、共享 Git 目录、项目配置、目标任务记录、目录设备/inode 与窗口 ID；主工作目录同样保留目录身份检查。执行时仍在项目锁内实时检查目标 Worktree 分支及路径归属。其他操作保持原有校验，不自动重试。

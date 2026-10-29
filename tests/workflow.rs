@@ -1632,3 +1632,28 @@ fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
         }
     }
 }
+
+#[test]
+fn deletion_rejects_unknown_pane_process_and_does_not_require_ps() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "safe", "--no-fetch", "--no-open"]);
+    let wrapper = f.bin.join("tmux");
+    let original = fs::read_to_string(&wrapper).unwrap();
+    let state_path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
+    let state = fs::read(&state_path).unwrap();
+    // 已退出/不可查的 PID 不能被视为没有子进程。
+    fs::write(&wrapper, original.replacen("#!/bin/sh\n", "#!/bin/sh\nif [ \"$1\" = list-panes ]; then printf '2147483647\\tsh\\t0\\n'; exit 0; fi\n", 1)).unwrap();
+    f.fail(&["rm", "local", "safe", "-y"], "无法确认 Pane 进程");
+    assert!(f.root.join("safe").is_dir());
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    fs::write(&wrapper, original).unwrap();
+    // 进程保护不再依赖全机 ps；真实空闲 Shell 仍能正常删除。
+    fs::write(
+        f.bin.join("ps"),
+        "#!/bin/sh\necho unexpected-ps >&2\nexit 99\n",
+    )
+    .unwrap();
+    fs::set_permissions(f.bin.join("ps"), fs::Permissions::from_mode(0o755)).unwrap();
+    f.ok(&["rm", "local", "safe", "-y"]);
+    assert!(!f.root.join("safe").exists());
+}
