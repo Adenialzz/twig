@@ -857,6 +857,7 @@ fn run_inner(
     let mut unread_picker: Option<UnreadPicker> = None;
     let mut drag: Option<Drag> = None;
     let mut selection: Option<Selection> = None;
+    let mut clicks = crate::mouse_selection::Clicks::default();
     let mut label = Status::default();
     let mut notice = String::new();
     let mut copy_notice: Option<clipboard::Notice> = None;
@@ -1000,6 +1001,12 @@ fn run_inner(
                 }
             }
         }
+        if !matches!(input, Event::Mouse(mouse) if matches!(mouse.kind,
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            | MouseEventKind::Moved))
+        {
+            clicks.reset();
+        }
         if matches!(input, Event::Key(_)) {
             notice.clear();
         }
@@ -1038,12 +1045,18 @@ fn run_inner(
                                 client.command(&format!("select-pane -t {}", pane.id))?;
                             }
                             if drag.is_none() && pane.rect.contains((x, y).into()) {
-                                selection = Some(Selection::new(pane, x, y));
+                                let count = clicks.next(&pane.id, x, y, Instant::now());
+                                let mut selected = Selection::new(pane, x, y);
+                                selected.select_click(count);
+                                selection = Some(selected);
                             }
                             let id = pane.id.clone();
                             for pane in &mut panes {
                                 pane.active = pane.id == id;
                             }
+                        }
+                        if selection.is_none() {
+                            clicks.reset();
                         }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {

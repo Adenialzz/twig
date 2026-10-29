@@ -718,6 +718,8 @@ fn run_inner(
     let mut created_task = None;
     let mut dirty = true;
     let mut select_at = None;
+    let mut selection_form = None;
+    let mut clicks = twig_cli::mouse_selection::Clicks::default();
     let mut stale_count = 0;
     let mut hyperlinks = hyperlink::Painter::default();
     loop {
@@ -816,6 +818,20 @@ fn run_inner(
             .count();
         dirty |= stale != stale_count;
         stale_count = stale;
+        let form_kind = app.form.as_ref().map(|form| {
+            (
+                form.project.is_some(),
+                form.existing.is_some(),
+                form.deletion.is_some(),
+            )
+        });
+        if selection_form != form_kind {
+            selection = None;
+            select_at = None;
+            clicks.reset();
+            selection_form = form_kind;
+            dirty = true;
+        }
         if dirty {
             let completed = terminal.draw(|frame| {
                 if selection
@@ -829,7 +845,15 @@ fn run_inner(
                     selection = ui::selection_regions(frame.area(), &app)
                         .into_iter()
                         .find(|area| area.contains((x, y).into()))
-                        .map(|area| selection::Selection::new(frame.buffer_mut(), area, x, y));
+                        .map(|area| {
+                            let mut selected =
+                                selection::Selection::new(frame.buffer_mut(), area, x, y);
+                            selected.select_click(clicks.next(&area, x, y, Instant::now()));
+                            selected
+                        });
+                    if selection.is_none() {
+                        clicks.reset();
+                    }
                 }
                 if let Some(selection) = &selection {
                     selection.draw(frame.buffer_mut());
@@ -858,6 +882,12 @@ fn run_inner(
             continue;
         }
         let event = event::read()?;
+        if !matches!(event, Event::Mouse(mouse) if matches!(mouse.kind,
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            | MouseEventKind::Moved))
+        {
+            clicks.reset();
+        }
         dirty = true;
         if let Some(picker) = &mut unread_picker {
             if let Event::Key(key) = event {

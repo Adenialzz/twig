@@ -90,23 +90,30 @@ fn panels(area: Rect, searching: bool) -> [Rect; 4] {
 }
 
 pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
-    if area.width < 38 || area.height < 12 || app.form.is_some() || app.help || app.searching {
+    if area.width < 38 || area.height < 12 {
+        return Vec::new();
+    }
+    if let Some(form) = &app.form {
+        return vec![form_area(area, form).inner(ratatui::layout::Margin::new(1, 1))];
+    }
+    if app.help || app.searching {
         return Vec::new();
     }
     let areas = panels(area, app.searching);
     let mut regions = Vec::new();
-    // 全局监控不参与拖选，避免选区快照冻结实时状态。
-    for (index, panel) in areas.into_iter().take(3).enumerate() {
-        if area.width < 100 && index != app.focus {
+    for (index, panel) in areas.into_iter().enumerate() {
+        if area.width < 100 && index < 3 && index != app.focus {
             continue;
         }
         regions.push(panel);
     }
-    regions
+    let mut regions: Vec<_> = regions
         .into_iter()
         .map(|area| area.inner(ratatui::layout::Margin::new(1, 1)))
         .filter(|area| area.width > 0 && area.height > 0)
-        .collect()
+        .collect();
+    regions.push(Rect::new(area.x, area.bottom() - 1, area.width, 1));
+    regions
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -855,16 +862,25 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn form_area(area: Rect, form: &super::form::Form) -> Rect {
+    let (max_width, max_height) = if form.deletion.is_some() {
+        (78, 22)
+    } else {
+        (72, 20)
+    };
+    let width = area.width.saturating_sub(4).min(max_width);
+    let height = area.height.saturating_sub(2).min(max_height);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
 fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
+    let area = form_area(area, form);
     if let Some(deletion) = &form.deletion {
-        let width = area.width.saturating_sub(4).min(78);
-        let height = area.height.saturating_sub(2).min(22);
-        let area = Rect::new(
-            area.x + (area.width - width) / 2,
-            area.y + (area.height - height) / 2,
-            width,
-            height,
-        );
         let border = block(" 删除任务 ".into(), true).title_alignment(Alignment::Center);
         let inner = border.inner(area);
         frame.render_widget(Clear, area);
@@ -992,14 +1008,6 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         );
         return;
     }
-    let width = area.width.saturating_sub(4).min(72);
-    let height = area.height.saturating_sub(2).min(20);
-    let area = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
     if let Some(existing) = &form.existing {
         let border = block(" 使用已有分支 ".into(), true);
         let inner = border.inner(area);
@@ -1331,6 +1339,57 @@ mod tests {
     }
 
     #[test]
+    fn form_selection_uses_only_the_visible_dialog_in_all_four_forms() {
+        use super::super::form::{Deletion, ExistingBranch, Form};
+        let mut app = fixture();
+        let mut existing = Form::task("alpha".into(), "main".into());
+        existing.existing = Some(ExistingBranch {
+            branches: vec![crate::config::BranchStart {
+                reference: "refs/heads/existing".into(),
+                commit: "abc".into(),
+            }],
+            common: "/tmp/repo".into(),
+            selected: 0,
+            confirmed: false,
+        });
+        let mut deletion = Form::task("alpha".into(), "main".into());
+        deletion.deletion = Some(Deletion {
+            branch: "task".into(),
+            path: "/tmp/task".into(),
+            expected: "abc".into(),
+            delete_branch: true,
+            delete_ignored: true,
+            ignored: vec![],
+            confirm: false,
+            option: 0,
+        });
+        for form in [
+            Form::project(),
+            Form::task("alpha".into(), "main".into()),
+            existing,
+            deletion,
+        ] {
+            app.form = Some(form);
+            for (width, height) in [(38, 12), (80, 24), (140, 36)] {
+                let buffer = render(&app, width, height, |frame, _, app| super::draw(frame, app));
+                let regions = selection_regions(buffer.area, &app);
+                let inner = form_area(buffer.area, app.form.as_ref().unwrap())
+                    .inner(ratatui::layout::Margin::new(1, 1));
+                assert_eq!(regions, vec![inner]);
+                assert!(!inner.contains((0, 0).into()));
+                let mut selection =
+                    super::super::selection::Selection::new(&buffer, inner, inner.x, inner.y);
+                selection.update(width - 1, height - 1);
+                let copied = selection.text();
+                assert!(!copied.is_empty());
+                for background in ["Console", "全局 Codex", "│", "┌", "┘"] {
+                    assert!(!copied.contains(background), "{copied}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn task_dialog_is_centered_and_preserves_background_and_selection() {
         let mut app = fixture();
         let selected = (app.project.clone(), app.task.clone());
@@ -1590,6 +1649,66 @@ mod tests {
     }
 
     #[test]
+    fn footer_selection_freezes_only_status_and_is_disabled_in_overlays() {
+        let mut app = fixture();
+        app.message = Some("Codex 状态错误：连接中断".into());
+        let mut buffer = render(&app, 80, 24, |frame, _, app| super::draw(frame, app));
+        let area = *selection_regions(buffer.area, &app).last().unwrap();
+        let mut selected = super::super::selection::Selection::new(&buffer, area, 2, 23);
+        selected.select_click(3);
+        assert_eq!(selected.text(), "Codex 状态错误：连接中断");
+        app.message = Some("Codex 已连接".into());
+        buffer = render(&app, 80, 24, |frame, _, app| super::draw(frame, app));
+        selected.draw(&mut buffer);
+        assert!(text(&buffer).contains("Codex 状态错误：连接中断"));
+        assert!(
+            text(&render(&app, 80, 24, |frame, _, app| super::draw(
+                frame, app
+            )))
+            .contains("Codex 已连接")
+        );
+        app.help = true;
+        assert!(selection_regions(buffer.area, &app).is_empty());
+        app.help = false;
+        app.searching = true;
+        assert!(selection_regions(buffer.area, &app).is_empty());
+    }
+
+    #[test]
+    fn monitor_selection_freezes_only_its_region_until_cleared() {
+        for width in [80, 140] {
+            let mut app = fixture();
+            let buffer = render(&app, width, 30, |frame, _, app| super::draw(frame, app));
+            let area = panels(buffer.area, false)[3].inner(ratatui::layout::Margin::new(1, 1));
+            assert!(selection_regions(buffer.area, &app).contains(&area));
+            let mut selected =
+                super::super::selection::Selection::new(&buffer, area, area.x, area.y);
+            selected.update(width - 1, 29);
+            let copied = selected.text();
+            assert!(!copied.is_empty());
+            assert!(!copied.contains('│'));
+            app.message = Some("后台继续刷新".into());
+            app.snapshot.codex_error = Some("模拟断连".into());
+            app.snapshot.threads.clear();
+            let mut updated = render(&app, width, 30, |frame, _, app| super::draw(frame, app));
+            assert!(text(&updated).contains("Codex 不可用"));
+            selected.draw(&mut updated);
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    assert_eq!(updated[(x, y)].symbol(), buffer[(x, y)].symbol());
+                }
+            }
+            assert!(text(&updated).contains("后台继续刷新"));
+            assert!(
+                text(&render(&app, width, 30, |frame, _, app| super::draw(
+                    frame, app
+                )))
+                .contains("Codex 不可用")
+            );
+        }
+    }
+
+    #[test]
     fn layout_keeps_monitor_visible_and_details_hide_metadata() {
         let mut app = fixture();
         for (width, height) in [(38, 12), (65, 22), (100, 30), (140, 40)] {
@@ -1597,10 +1716,15 @@ mod tests {
                 app.focus = focus;
                 let area = Rect::new(0, 0, width, height);
                 let regions = selection_regions(area, &app);
-                assert_eq!(regions.len(), if width >= 100 { 3 } else { 1 });
-                for region in regions {
-                    assert!(!region.intersects(panels(area, app.searching)[3]));
-                }
+                let monitor_area =
+                    panels(area, app.searching)[3].inner(ratatui::layout::Margin::new(1, 1));
+                let monitor_visible = monitor_area.width > 0 && monitor_area.height > 0;
+                assert_eq!(
+                    regions.len(),
+                    (if width >= 100 { 4 } else { 2 }) + usize::from(monitor_visible)
+                );
+                assert_eq!(regions.last(), Some(&Rect::new(0, height - 1, width, 1)));
+                assert_eq!(regions.contains(&monitor_area), monitor_visible);
                 let output = text(&render(&app, width, height, |frame, _, app| {
                     super::draw(frame, app)
                 }));

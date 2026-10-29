@@ -220,6 +220,23 @@ def main():
             second.send(b"\x1b[<0;2;3M\x1b[<0;2;3m")
             second.settle()
             assert b"\x1b]52;" not in second.output
+            # 连击走真实鼠标输入与 OSC 52，不能写真实剪贴板。
+            second.send(b"\x1b[<65;2;3M" * 12)
+            second.wait("SCROLL_059")
+            second.settle()
+            row = next(y for y, line in enumerate(second.screen.display) if "SCROLL_059" in line)
+            col = second.screen.display[row].index("SCROLL_059")
+            line_text = second.screen.display[row].rstrip()
+            second.output.clear()
+            click = f"\x1b[<0;{col+3};{row+1}M\x1b[<0;{col+3};{row+1}m".encode()
+            second.send(click * 3)
+            def multiple_copies():
+                return [base64.b64decode(value).decode() for value in
+                        re.findall(rb"\x1b\]52;c;([^\x07]*)\x07", second.output)]
+            second.until(lambda: len(multiple_copies()) == 2, "双击与三击复制")
+            assert multiple_copies() == ["SCROLL_059", line_text]
+            second.wait(f"已请求复制 {len(line_text)} chars")
+            second.until(lambda: "已请求复制" not in "\n".join(second.screen.display), "连击复制提示自动消失")
             second.send(b"\x1b[<65;2;3M" * 12)
             second.wait("SCROLL_059")
             # 有限输出负载：约 120 行，用于交互延迟回归，不是吞吐压测。
