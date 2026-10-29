@@ -102,11 +102,13 @@ pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
         }
         regions.push(panel);
     }
-    regions
+    let mut regions: Vec<_> = regions
         .into_iter()
         .map(|area| area.inner(ratatui::layout::Margin::new(1, 1)))
         .filter(|area| area.width > 0 && area.height > 0)
-        .collect()
+        .collect();
+    regions.push(Rect::new(area.x, area.bottom() - 1, area.width, 1));
+    regions
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -1590,6 +1592,32 @@ mod tests {
     }
 
     #[test]
+    fn footer_selection_freezes_only_status_and_is_disabled_in_overlays() {
+        let mut app = fixture();
+        app.message = Some("Codex 状态错误：连接中断".into());
+        let mut buffer = render(&app, 80, 24, |frame, _, app| super::draw(frame, app));
+        let area = *selection_regions(buffer.area, &app).last().unwrap();
+        let mut selected = super::super::selection::Selection::new(&buffer, area, 2, 23);
+        selected.select_click(3);
+        assert_eq!(selected.text(), "Codex 状态错误：连接中断");
+        app.message = Some("Codex 已连接".into());
+        buffer = render(&app, 80, 24, |frame, _, app| super::draw(frame, app));
+        selected.draw(&mut buffer);
+        assert!(text(&buffer).contains("Codex 状态错误：连接中断"));
+        assert!(
+            text(&render(&app, 80, 24, |frame, _, app| super::draw(
+                frame, app
+            )))
+            .contains("Codex 已连接")
+        );
+        app.help = true;
+        assert!(selection_regions(buffer.area, &app).is_empty());
+        app.help = false;
+        app.searching = true;
+        assert!(selection_regions(buffer.area, &app).is_empty());
+    }
+
+    #[test]
     fn layout_keeps_monitor_visible_and_details_hide_metadata() {
         let mut app = fixture();
         for (width, height) in [(38, 12), (65, 22), (100, 30), (140, 40)] {
@@ -1597,7 +1625,8 @@ mod tests {
                 app.focus = focus;
                 let area = Rect::new(0, 0, width, height);
                 let regions = selection_regions(area, &app);
-                assert_eq!(regions.len(), if width >= 100 { 3 } else { 1 });
+                assert_eq!(regions.len(), if width >= 100 { 4 } else { 2 });
+                assert_eq!(regions.last(), Some(&Rect::new(0, height - 1, width, 1)));
                 for region in regions {
                     assert!(!region.intersects(panels(area, app.searching)[3]));
                 }

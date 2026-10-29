@@ -700,6 +700,86 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
 }
 
 #[test]
+fn footer_drag_and_triple_click_copy_only_the_displayed_status() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    fn copies(p: &mut Pty, count: usize) -> Vec<String> {
+        let started = Instant::now();
+        let prefix = b"\x1b]52;c;";
+        loop {
+            p.read_output();
+            let copies: Vec<_> = p
+                .bytes
+                .windows(prefix.len())
+                .enumerate()
+                .filter(|(_, bytes)| *bytes == prefix)
+                .filter_map(|(start, _)| {
+                    let start = start + prefix.len();
+                    let end = start + p.bytes[start..].iter().position(|byte| *byte == 7)?;
+                    Some(String::from_utf8(STANDARD.decode(&p.bytes[start..end]).unwrap()).unwrap())
+                })
+                .collect();
+            if copies.len() == count {
+                return copies;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "底部状态复制超时：{}",
+                p.text
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let f = Fixture::new();
+    f.init();
+    let registry = fs::read(&f.registry).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .env("SSH_CONNECTION", "twig-pty-test")
+        .arg("--config")
+        .arg(&f.registry);
+    let mut p = Pty::spawn(command);
+    p.wait_screen("demo");
+    for (width, height) in [(140, 36), (80, 24)] {
+        p.resize(width, height);
+        let expected = "Codex 服务未运行；Console 不自动启动服务".to_owned();
+        let started = Instant::now();
+        loop {
+            p.read_output();
+            if p.screen_text().lines().last().unwrap().trim_end() == expected {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "缩放后未显示底部状态：{}",
+                p.text
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        p.clear_output();
+        // 拖动到上方内容区，仍只能选中底部状态这一行。
+        p.send(
+            format!(
+                "\x1b[<0;1;{height}M\x1b[<32;{width};{}M\x1b[<0;{width};{}m",
+                height - 2,
+                height - 2
+            )
+            .as_bytes(),
+        );
+        assert_eq!(copies(&mut p, 1), vec![expected.clone()]);
+        p.clear_output();
+        let click = format!("\x1b[<0;2;{height}M\x1b[<0;2;{height}m");
+        p.send(click.repeat(3).as_bytes());
+        let copied = copies(&mut p, 2);
+        assert_eq!(copied[1], expected);
+        assert!(!copied[0].is_empty());
+    }
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+    assert_eq!(fs::read(&f.registry).unwrap(), registry);
+}
+
+#[test]
 fn noninteractive_console_is_explicit_and_completion_remains_readonly() {
     let f = Fixture::new();
     let mut old = Command::new(env!("CARGO_BIN_EXE_twig"));
