@@ -444,6 +444,25 @@ pub(crate) fn fingerprint(registry: &Path, action: &Action) -> Result<Value> {
             _ => None,
         };
         let task_path = name.and_then(|name| state.get(name)).map(|task| &task.path);
+        let directory = task_path
+            .or_else(|| {
+                matches!(action, Action::Open { name, .. } if name == "main")
+                    .then_some(&config.main)
+            })
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| {
+                use std::os::unix::fs::MetadataExt;
+                (metadata.dev(), metadata.ino())
+            });
+        let window = name
+            .map(|name| crate::tmux::window(&config, &project, name).context("无法确认归属"))
+            .transpose()?;
+        if matches!(action, Action::Open { .. }) {
+            // 打开只固定目标身份；启动程序写文件或 Git 提交不改变资源归属。
+            // 执行时仍在项目锁内实时核对 Worktree 分支和路径归属。
+            return Ok(json!({"path":path,"common":project.common,"config":config,
+                "task":name.and_then(|name| state.get(name)),"directory":directory,"window":window}));
+        }
         let files = task_path
             .filter(|path| path.is_dir())
             .map(|path| {
@@ -457,15 +476,6 @@ pub(crate) fn fingerprint(registry: &Path, action: &Action) -> Result<Value> {
                     ],
                 )
             })
-            .transpose()?;
-        let directory = task_path
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.dev(), metadata.ino())
-            });
-        let window = name
-            .map(|name| crate::tmux::window(&config, &project, name).context("无法确认归属"))
             .transpose()?;
         let refs = crate::git::git(&config.main, &["show-ref"])?;
         let worktrees = crate::git::git(&config.main, &["worktree", "list", "--porcelain"])?;

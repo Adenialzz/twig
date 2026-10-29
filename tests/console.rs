@@ -2939,3 +2939,32 @@ fn new_form_uses_latest_remote_base_by_default() {
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.wait_exit().success());
 }
+
+#[test]
+fn task_creation_enters_workbench_while_startup_writes_files() {
+    let f = Fixture::new();
+    f.init();
+    fs::create_dir_all(f.repo.join(".twig")).unwrap();
+    fs::write(
+        f.repo.join(".twig/config.toml"),
+        r#"[tmux]
+panes = [{ command = ["sh", "-c", "i=0; while [ $i -lt 100 ]; do touch startup-$i; i=$((i+1)); sleep 0.02; done; echo STARTUP_DONE"] }]
+"#,
+    ).unwrap();
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"2n");
+    p.task_form_ready();
+    p.send(b"writer\r");
+    p.wait(" · 全局 Codex ");
+    p.wait_screen("STARTUP_DONE");
+    p.created_task(&f, "writer");
+    assert!(
+        f.repo
+            .with_file_name("repo.worktrees")
+            .join("writer/startup-99")
+            .is_file()
+    );
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
+}

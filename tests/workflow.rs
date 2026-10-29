@@ -1527,3 +1527,108 @@ fn new_fetch_failure_leaves_no_task_record_and_can_retry_offline() {
     success(f.run(&["new", "local", "retry", "--no-fetch", "--no-open"]));
     assert!(f.root.join("retry/.git").exists());
 }
+
+#[test]
+fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
+    use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    for change in ["files", "main", "directory", "branch", "window", "delete"] {
+        let f = Fixture::new();
+        f.ok(&["new", "local", "task", "--no-fetch", "--no-open"]);
+        let path = f.root.join("task");
+        let status: Value = serde_json::from_str(&f.ok(&["daemon", "status"])).unwrap();
+        let rpc = |method: &str, params: Value| -> Value {
+            let mut stream = UnixStream::connect(status["socket"].as_str().unwrap()).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"version":status["version"],"id":"test","method":method,"params":params})
+            )
+            .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            let response: Value = serde_json::from_str(&line).unwrap();
+            assert!(response["error"].is_null(), "{response}");
+            response["result"].clone()
+        };
+        let name = if change == "main" { "main" } else { "task" };
+        let action = if change == "delete" {
+            json!({"Rm":{"project":"local","name":"task","options":{"yes":true,
+                "keep_branch":true,"target":null,"delete_ignored":false,
+                "console_delete_branch":false,"expected_ignored":null},"expected_task":null}})
+        } else {
+            json!({"Open":{"project":"local","name":name}})
+        };
+        let plan = rpc("operation.prepare", action);
+        match change {
+            "files" | "main" | "delete" => {
+                let cwd = if change == "main" { &f.repo } else { &path };
+                fs::write(cwd.join("startup-output"), "created after prepare").unwrap();
+                fs::write(cwd.join(".gitignore"), "ignored-output\n").unwrap();
+                fs::write(cwd.join("ignored-output"), "ignored startup output").unwrap();
+                if change != "delete" {
+                    f.git(&["-C", cwd.to_str().unwrap(), "add", ".gitignore"]);
+                    f.git(&[
+                        "-C",
+                        cwd.to_str().unwrap(),
+                        "commit",
+                        "-m",
+                        "work during open",
+                    ]);
+                }
+            }
+            "directory" => {
+                fs::rename(&path, f.root.join("original-task")).unwrap();
+                fs::create_dir(&path).unwrap();
+            }
+            "branch" => {
+                f.git(&["-C", path.to_str().unwrap(), "checkout", "-b", "replaced"]);
+            }
+            "window" => {
+                let windows = f.mux(&["list-windows", "-a", "-F", "#{window_id} #{@twig-feature}"]);
+                let window = windows
+                    .lines()
+                    .find(|line| line.ends_with(" task"))
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap();
+                f.mux(&["kill-window", "-t", window]);
+            }
+            _ => unreachable!(),
+        }
+        let id = rpc(
+            "operation.submit",
+            json!({"plan":plan["id"],"request":"open-check","confirmed":true}),
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let record = loop {
+            let record = rpc("operation.get", id.clone());
+            if record["status"] != "queued" && record["status"] != "running" {
+                break record;
+            }
+            assert!(std::time::Instant::now() < deadline, "{record}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        if matches!(change, "files" | "main") {
+            assert_eq!(record["status"], "succeeded", "{change}: {record}");
+            assert!(!record["output"]["terminal"].is_null(), "{record}");
+        } else {
+            assert_eq!(record["status"], "failed", "{change}: {record}");
+            let error = record["error"].as_str().unwrap();
+            assert!(
+                error.contains(if change == "branch" {
+                    "Worktree 分支已改变"
+                } else {
+                    "资源已变化"
+                }),
+                "{record}"
+            );
+            assert!(path.exists());
+        }
+    }
+}
