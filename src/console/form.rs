@@ -101,7 +101,7 @@ impl Form {
             branch_input: String::new(),
             selected_branch: None,
             operation_started: false,
-            progress: "已提交，等待后台接受…".into(),
+            progress: "已提交，等待执行…".into(),
             deletion: None,
             existing: None,
             default_alias: None,
@@ -126,7 +126,7 @@ impl Form {
         let (out, result) = mpsc::channel();
         std::thread::spawn(move || {
             super::query::install(stop);
-            let _ = out.send(crate::daemon::call(
+            let _ = out.send(crate::core::query(
                 &registry,
                 "form.branches",
                 serde_json::json!(path),
@@ -189,7 +189,7 @@ impl Form {
         path: std::path::PathBuf,
     ) -> Result<Self> {
         let expected = serde_json::to_string(&(common, &branch, &path))?;
-        let ignored = crate::daemon::call(registry, "form.ignored", serde_json::json!(path))?;
+        let ignored = crate::core::query(registry, "form.ignored", serde_json::json!(path))?;
         Ok(Self {
             project: Some(project),
             fields: [name, String::new()],
@@ -229,7 +229,7 @@ impl Form {
             }
             ensure!(path.is_dir(), "目录不存在：{}", path.display());
             let main: std::path::PathBuf =
-                crate::daemon::call(registry, "form.project", serde_json::json!(path))?;
+                crate::core::query(registry, "form.project", serde_json::json!(path))?;
             let alias = main
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -283,7 +283,7 @@ impl Form {
             crate::config::task_name(&self.fields[0])?;
             ensure!(self.fields[0] != "main", "main 保留给项目主窗口");
             let (common, available): (std::path::PathBuf, Vec<crate::config::BranchStart>) =
-                crate::daemon::call(
+                crate::core::query(
                     registry,
                     "form.task",
                     serde_json::json!([project, &self.fields[0]]),

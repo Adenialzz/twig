@@ -2,7 +2,7 @@
 
 命令行阅读：`twig guide console`。
 
-业务依赖显式启动的 Twig 后台；使用 `twig daemon status` 检查连接、采集与队列，未知操作通过 `twig operation show ID` 核对。共享状态、未读和断连恢复见 [后台指南](daemon.md)。
+普通任务 CLI、Console 导航、创建/删除表单和工作台无需 Twig 后台。Agent、受管任务、持续监控与未读通知依赖显式启动的后台；用 `twig daemon status` 检查扩展状态。未知操作通过 `twig operation show ID` 核对，详见 [后台指南](daemon.md)。
 
 Console 是 twig 的全局终端面板，用来浏览已登记的项目、任务和 Codex 会话，并进入项目或任务的 Shell。项目导航与任务终端共用 Twig 界面，tmux server 继续托管进程和分屏，不会自动创建侧边 Pane。可以从 tmux 外或另一个 Session 使用；不能在目标项目自身的 Session 中嵌套打开工作台。
 
@@ -318,7 +318,7 @@ Twig 打开期间，会只读查询已关联任务的 Codex 轮次。检测到�
 
 **Codex 不可用，但项目正常？**
 
-这是允许的。Codex 为可选功能，需要 PATH 中的 Codex CLI 和已运行的本机 app-server，首个实测版本为 0.163.0。面板不会启动或重启服务。可在 Shell 中用 `codex --version` 和 `codex app-server daemon version` 检查，再按 `r` 重试。
+这是允许的。Codex 监控为可选功能，需要已运行的 Twig 后台，以及后台 PATH 中的 Codex CLI 和已运行的本机 app-server，首个实测版本为 0.163.0。面板不会启动或重启服务。可在 Shell 中用 `codex --version` 和 `codex app-server daemon version` 检查，再按 `r` 重试。
 
 **Codex 已打开，却找不到会话？**
 

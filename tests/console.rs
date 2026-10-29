@@ -21,6 +21,7 @@ struct Fixture {
     bin: PathBuf,
     socket: String,
     tmux: String,
+    core_only: bool,
 }
 impl Fixture {
     fn new() -> Self {
@@ -60,6 +61,7 @@ impl Fixture {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let f = Self {
+            core_only: false,
             registry: temp.path().join("registry.toml"),
             temp,
             repo,
@@ -93,7 +95,15 @@ impl Fixture {
         f.git(&["branch", "--set-upstream-to=base-source/main", "main"]);
         f
     }
+    fn core() -> Self {
+        let mut fixture = Self::new();
+        fixture.core_only = true;
+        fixture
+    }
     fn env(&self, c: &mut Command) {
+        if self.core_only {
+            c.env("TWIG_TEST_NO_DAEMON", "1");
+        }
         c.current_dir(self.temp.path())
             .env(
                 "PATH",
@@ -126,7 +136,9 @@ impl Fixture {
             .arg("--config")
             .arg(&self.registry)
             .args(args);
-        support::daemon::ensure(&c, &self.registry);
+        if !self.core_only {
+            support::daemon::ensure(&c, &self.registry);
+        }
         let o = c.output().unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
@@ -256,7 +268,12 @@ impl Pty {
     }
 
     fn spawn(mut command: Command) -> Self {
-        support::daemon::for_pty(&command);
+        if !command
+            .get_envs()
+            .any(|(key, value)| key == "TWIG_TEST_NO_DAEMON" && value.is_some())
+        {
+            support::daemon::for_pty(&command);
+        }
         let (mut master, mut slave) = (0, 0);
         let mut size = libc::winsize {
             ws_row: 36,
@@ -521,7 +538,7 @@ fn pty_exit_drains_output_larger_than_the_terminal_buffer() {
 
 #[test]
 fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     f.git(&["branch", "feature/demo"]);
     let real_git = Command::new("sh")
@@ -563,7 +580,7 @@ fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
 
 #[test]
 fn navigation_batches_worktree_and_window_queries() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     f.twig(&["new", "demo", "second", "--no-open"]);
     let real_git = Command::new("sh")
@@ -657,7 +674,7 @@ fn navigation_batches_worktree_and_window_queries() {
 #[test]
 fn navigation_drag_copies_text_and_preserves_readonly_state() {
     use base64::{Engine, engine::general_purpose::STANDARD};
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let registry = fs::read(&f.registry).unwrap();
     let mut command = Command::new("sh");
@@ -940,7 +957,7 @@ fn noninteractive_console_is_explicit_and_completion_remains_readonly() {
 }
 #[test]
 fn zed_links_follow_tasks_and_config_without_writing_registry() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let original = fs::read_to_string(&f.registry).unwrap();
     let configured = format!("[zed]\nssh_host = 'me@devbox:2222'\n{original}");
@@ -987,7 +1004,7 @@ fn zed_links_follow_tasks_and_config_without_writing_registry() {
 
 #[test]
 fn empty_and_broken_registry_keep_terminal_usable_and_do_not_write() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     let mut p = f.terminal(false);
     p.wait("尚未登记项目");
     p.send(b"q");
@@ -1002,7 +1019,7 @@ fn empty_and_broken_registry_keep_terminal_usable_and_do_not_write() {
 }
 #[test]
 fn navigation_search_resize_and_quit_work_during_slow_queries() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let state = fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
     let mut p = f.terminal(true);
@@ -1028,7 +1045,7 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
 }
 #[test]
 fn task_visit_order_persists_and_browsing_is_readonly() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     thread::sleep(Duration::from_millis(2));
     f.twig(&["new", "demo", "second", "--no-open"]);
@@ -1103,7 +1120,7 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
 
 #[test]
 fn enter_main_and_task_releases_lock_and_restores_terminal() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     for keys in [b"/main\r\r".as_slice(), b"/auth\r\r".as_slice()] {
         let mut p = f.terminal(false);
@@ -1166,7 +1183,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
 
 #[test]
 fn workbench_split_resize_paste_disconnect_and_process_survival() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let mux = |args: &[&str]| {
         let out = Command::new(&f.tmux)
@@ -1225,7 +1242,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
 
 #[test]
 fn workbench_switches_projects_and_rejects_its_own_session() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let other = f.temp.path().join("other");
     assert!(
@@ -1311,7 +1328,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
 
 #[test]
 fn new_and_open_share_workbench_and_return_to_the_selected_task() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let target = f.repo.with_file_name("repo.worktrees").join("feat/unified");
     let mut previous_pids = None;
@@ -2011,7 +2028,7 @@ fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
 
 #[test]
 fn forms_register_create_retry_and_enter_task() {
-    let mut f = Fixture::new();
+    let mut f = Fixture::core();
     let spaced = f.temp.path().join("repo with spaces");
     fs::rename(&f.repo, &spaced).unwrap();
     f.repo = spaced;
@@ -2089,7 +2106,7 @@ fn forms_register_create_retry_and_enter_task() {
 #[test]
 fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
     for during_confirmation in [false, true] {
-        let f = Fixture::new();
+        let f = Fixture::core();
         f.init();
         if during_confirmation {
             f.git(&["branch", "pending"]);
@@ -2757,7 +2774,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
 
 #[test]
 fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let config = fs::read(support::project_dir(&f.repo, &f.registry).join("config.json")).unwrap();
     let run = |name: &str| {
@@ -2783,7 +2800,7 @@ fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
         config,
         fs::read(support::project_dir(&f.repo, &f.registry).join("config.json")).unwrap()
     );
-    let other = Fixture::new();
+    let other = Fixture::core();
     let registry = fs::read_to_string(&f.registry).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
     f.env(&mut command);
@@ -2890,7 +2907,7 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
 
 #[test]
 fn delete_task_confirmation_protection_and_keep_branch() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -2928,7 +2945,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
 
 #[test]
 fn delete_task_removes_branch_and_rejects_changed_identity() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let mut state: serde_json::Value =
@@ -2987,7 +3004,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
 
 #[test]
 fn delete_ignored_defaults_on_and_keeps_default_cancel() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let state: serde_json::Value = serde_json::from_slice(
         &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
@@ -3185,7 +3202,7 @@ fn new_form_uses_latest_remote_base_by_default() {
 
 #[test]
 fn task_creation_enters_workbench_while_startup_writes_files() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     fs::create_dir_all(f.repo.join(".twig")).unwrap();
     fs::write(
@@ -3210,4 +3227,65 @@ panes = [{ command = ["sh", "-c", "i=0; while [ $i -lt 100 ]; do touch startup-$
     );
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
+}
+
+#[test]
+fn stalled_optional_backend_does_not_block_core_navigation_or_workbench() {
+    use std::{
+        os::unix::{fs::DirBuilderExt, net::UnixListener},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+    let f = Fixture::core();
+    f.init();
+    let registry = f.registry.canonicalize().unwrap();
+    let id = registry
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+        });
+    let dir = PathBuf::from(format!("/tmp/twig-{}", unsafe { libc::geteuid() }));
+    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&dir) {
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+    let socket = dir.join(format!("{id:016x}.sock"));
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let signal = stop.clone();
+    let handle = thread::spawn(move || {
+        let mut connections = Vec::new();
+        while !signal.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => connections.push(stream), // 故意不回复任何 RPC。
+                Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    struct StalledBackend(Arc<AtomicBool>, Option<thread::JoinHandle<()>>, PathBuf);
+    impl Drop for StalledBackend {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            self.1.take().unwrap().join().unwrap();
+            fs::remove_file(&self.2).unwrap();
+        }
+    }
+    let _backend = StalledBackend(stop, Some(handle), socket);
+    let mut p = f.terminal(false);
+    p.wait_screen("auth");
+    p.send(b"2/auth\r\r");
+    p.wait(" · 全局 Codex ");
+    p.send(b"printf 'OPTIONAL_%s\\n' BACKEND\r");
+    p.wait("OPTIONAL_BACKEND");
+    p.clear_output();
+    p.send(b"\x17d");
+    p.wait("任务 / ");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
 }

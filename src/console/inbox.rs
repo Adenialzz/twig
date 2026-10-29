@@ -48,6 +48,7 @@ mod tests {
         let inbox = Inbox::remote(&temp.path().join("config.toml"), "client".into()).unwrap();
         let remote = inbox.remote.as_ref().unwrap();
         remote.cache.lock().unwrap().target = serde_json::json!({"project":"demo","path":"/work"});
+        remote.cache.lock().unwrap().connected = true;
         remote
             .cache
             .lock()
@@ -261,6 +262,7 @@ struct Remote {
 }
 #[derive(Default)]
 struct RemoteState {
+    connected: bool,
     state: State,
     seen: HashSet<String>,
     read: HashSet<String>,
@@ -282,10 +284,14 @@ impl Inbox {
 
     pub fn remote(registry: &Path, client: String) -> Result<Self> {
         let mut inbox = Self::new(registry)?;
+        let initial = inbox.load().unwrap_or_default();
         inbox.remote = Some(Remote {
             registry: registry.to_owned(),
             client,
-            cache: Arc::new(Mutex::new(RemoteState::default())),
+            cache: Arc::new(Mutex::new(RemoteState {
+                state: initial,
+                ..Default::default()
+            })),
             sync_lock: Arc::new(Mutex::new(())),
         });
         Ok(inbox)
@@ -295,6 +301,13 @@ impl Inbox {
     }
     // 仅订阅线程调用网络；终端按键和绘制只读缓存，不在每轮 UI 回调等待 RPC。
     pub fn sync(&self) -> Result<()> {
+        let result = self.sync_remote();
+        if let Some(remote) = &self.remote {
+            remote.cache.lock().unwrap().connected = result.is_ok();
+        }
+        result
+    }
+    fn sync_remote(&self) -> Result<()> {
         let Some(remote) = &self.remote else {
             return Ok(());
         };
@@ -324,6 +337,7 @@ impl Inbox {
         if let Some(remote) = &self.remote {
             let mut cache = remote.cache.lock().unwrap();
             let changed = cache.target != target;
+            let connected = cache.connected;
             let read: HashSet<_> = cache
                 .state
                 .unread
@@ -348,7 +362,7 @@ impl Inbox {
             drop(cache);
             // 目标切换只确认一次，避免离开页面后的完成事件仍按旧租约静默。
             // 相同目标的逐帧更新完全本地；后台轮询与切换同步按客户端串行。
-            if changed {
+            if changed && connected {
                 self.sync()?;
             }
         }

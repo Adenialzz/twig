@@ -548,13 +548,9 @@ fn open_terminal(
             twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
                 if recorded.as_deref() != Some(task) {
                     recorded = Some(task.to_owned());
-                    usage_error = crate::daemon::call::<serde_json::Value>(
-                        registry,
-                        "record_use",
-                        serde_json::json!([&target.project, task]),
-                    )
-                    .err()
-                    .map(|error| format!("{error:#}"));
+                    usage_error = crate::core::record_use(registry, &target.project, task)
+                        .err()
+                        .map(|error| format!("{error:#}"));
                 }
                 if let Some(notice) = jump.take() {
                     app.notifications.dismiss(&notice);

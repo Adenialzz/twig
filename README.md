@@ -1,16 +1,21 @@
 # twig
 
-用 Git Worktree 和 tmux 管理并行开发任务，通过主控 Codex Agent 派活、跟进与验收。
+用 Git Worktree 隔离并行开发任务，用内置终端工作台进入和管理任务。Agent 协作与飞书是可选扩展。
 
 一个项目对应一个 tmux Session，一个任务拥有独立的分支、Worktree 和任务窗口。你可以自己在任务中开发，也可以让主控协调多个受管 Codex 会话。
 
-Twig 提供两个可切换的页面：**Console** 管理项目、任务和终端工作台；**Agent** 与主控对话、查看进展。普通任务可以独立使用，无需 Codex。
+Twig 提供两个可切换的页面：**Console** 管理项目、任务和终端工作台；**Agent** 与主控对话、查看进展。核心 CLI、Console 导航和普通任务工作台可独立使用，无需 Twig daemon 或 Codex。
 
 ## 核心能力
 
 - **任务隔离**：为每项工作创建独立分支与 Worktree，统一登记、进入、停止和清理。
 - **终端工作台**：在 Twig 内使用 Shell、编辑器或任务启动程序，支持分屏、滚动、拖选复制，以及双击选词、三击选行复制；离开界面后任务进程继续运行。
 - **Zed 远程编辑**：配置 `[zed].ssh_host` 后，从任务详情点击链接，在本机 Zed 打开服务器上的 Worktree；见 [配置说明](docs/configuration.md#在本机-zed-打开远程任务)。
+
+## 可选扩展
+
+启用 Agent、持续监控与通知需要显式启动 Twig daemon；飞书按需配置。
+
 - **对话阅读**：主控回复支持 Markdown 排版、代码高亮与自适应表格；工具过程以紧凑状态和输出预览展示，F4 展开详情；Console 列表、详情、全局监控、底部状态行、表单弹窗和 Agent 对话/输入区也支持拖选、双击选词和三击选行复制。
 - **主控协作**：通过 Codex daemon 创建受管任务、派发消息、跟进完成回调，要求子任务回报结果和阻塞，并核对验收。
 - **持续后台**：Console、CLI 和飞书共享状态与消息队列；多窗口同步未读，界面退出后继续采集与投递。
@@ -42,7 +47,6 @@ make install
 先准备一个已有提交的 Git 仓库，登记后创建任务：
 
 ```sh
-twig daemon start             # 显式启动 Twig 后台
 twig add myapp --path ~/projects/myapp
 twig new myapp feat/login
 ```
@@ -63,6 +67,7 @@ twig open myapp feat/login   # 再次进入已有任务
 
 ```sh
 codex app-server daemon start
+twig daemon start
 twig chat
 ```
 
@@ -103,7 +108,9 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 
 ## 行为边界
 
-- 所有业务入口依赖显式启动的 Twig 后台；不启动、重启或停止共享 Codex daemon。帮助、guide、只读补全不依赖后台，已有终端工作台在后台断开时仍可操作。
+- 普通任务的 `add/ls/new/open/stop/rm`、Console 导航和工作台始终在本地执行，使用调用进程的环境；后台是否在线不改变执行路径。Twig 不启动、重启或停止共享 Codex daemon。
+- 主控、受管任务的创建/打开/停止/删除、持续通知及飞书需要 Twig 后台。后台断开不影响普通任务；受管操作明确报错，不回退或重发。
+- 本地核心操作被强制中断时不会保证继续执行；操作记录和已有资源保留，通过 `twig operation ls/show/resolve` 核对。已启动的 tmux 任务继续独立运行。
 - 受管任务通过 `new --agent` 新建，不自动迁移或接管旧任务。普通任务的已有 Codex session 是否可通信，需核对当前 daemon 中的会话并取得用户授权。
 - 消息送达和一轮回复完成都不代表任务通过验收。投递结果未知时按消息 ID 核对，不自动重发。
 - 新建分支默认 fetch base 的远端 upstream，从最新远端提交创建，不改动本地 base 或工作目录；`--no-fetch` 使用本地 base。复用已有分支不 fetch，其他任务管理不联网，不自动 pull、push 或合并。

@@ -89,30 +89,70 @@ impl Snapshot {
 }
 
 // 快照可覆盖；完成事件使用独立队列，不能丢弃。
+#[derive(Default)]
+struct Published {
+    snapshot: Snapshot,
+    core: Option<Snapshot>,
+    dirty: bool,
+}
 #[derive(Clone, Default)]
-pub struct Updates(Arc<Mutex<Option<Snapshot>>>);
+pub struct Updates(Arc<Mutex<Published>>);
 impl Updates {
     pub fn take(&self) -> Option<Snapshot> {
-        self.0.lock().unwrap().take()
+        let mut state = self.0.lock().unwrap();
+        if !state.dirty {
+            return None;
+        }
+        state.dirty = false;
+        Some(state.snapshot.clone())
     }
     fn publish(&self, snapshot: &Snapshot) {
-        let snapshot = snapshot.clone();
-        *self.0.lock().unwrap() = Some(snapshot);
+        let mut state = self.0.lock().unwrap();
+        state.snapshot = snapshot.clone();
+        if let Some(core) = state.core.clone() {
+            Self::merge(&mut state.snapshot, &core);
+        }
+        state.dirty = true;
+    }
+    fn publish_core(&self, snapshot: &Snapshot) {
+        let mut state = self.0.lock().unwrap();
+        Self::merge(&mut state.snapshot, snapshot);
+        state.core = Some(snapshot.clone());
+        state.dirty = true;
+    }
+    fn merge(snapshot: &mut Snapshot, core: &Snapshot) {
+        snapshot.repos = core.repos.clone();
+        snapshot.zed = core.zed.clone();
+        snapshot.registry_error = core.registry_error.clone();
+        snapshot.registry_checked = core.registry_checked;
+        associate(snapshot);
+    }
+}
+pub struct Requests {
+    primary: Sender<Request>,
+    core: Option<Sender<Request>>,
+}
+impl Requests {
+    pub fn send(&self, request: Request) -> Result<()> {
+        if let Some(core) = &self.core {
+            core.send(request.clone())?;
+        }
+        self.primary.send(request)?;
+        Ok(())
     }
 }
 
 pub struct Worker {
-    pub requests: Sender<Request>,
+    pub requests: Requests,
     pub updates: Updates,
     pub inbox: Inbox,
     pub chat: Arc<Mutex<ChatNotifications>>,
     cancel: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handles: Vec<JoinHandle<()>>,
 }
 impl Worker {
     pub fn start(registry: PathBuf) -> Result<Self> {
         let inbox = Inbox::remote(&registry, crate::agent::message_id())?;
-        let _ = inbox.sync();
         let saved = inbox.load().unwrap_or_default();
         let (tx, rx) = mpsc::channel::<Request>();
         let updates = Updates::default();
@@ -125,6 +165,14 @@ impl Worker {
         )));
         let client = inbox.client_id().unwrap().to_owned();
         let remote_inbox = inbox.clone();
+        let (core_tx, core_rx) = mpsc::channel();
+        let core_registry = registry.clone();
+        let core_out = updates.clone();
+        let core_stop = cancel.clone();
+        let core_handle = thread::spawn(move || {
+            query::install(core_stop.clone());
+            collect_core(core_registry, core_rx, core_out, core_stop);
+        });
         let handle = thread::spawn(move || {
             let mut request = Request::default();
             let mut latest = Snapshot::default();
@@ -137,10 +185,15 @@ impl Worker {
                 for next in rx.try_iter() {
                     request = next;
                 }
+                let subscription = Request {
+                    background: true,
+                    refresh: request.refresh,
+                    ..Default::default()
+                };
                 let result = crate::daemon::call::<serde_json::Value>(
                     &registry,
                     "snapshot",
-                    serde_json::json!({"client":client,"request":request,"version":version,"instance":instance}),
+                    serde_json::json!({"client":client,"request":subscription,"version":version,"instance":instance}),
                 );
                 match result {
                     Ok(value) => {
@@ -153,16 +206,16 @@ impl Worker {
                             match serde_json::from_value(value["snapshot"].clone()) {
                                 Ok(snapshot) => latest = snapshot,
                                 Err(error) => {
-                                    latest.registry_error =
-                                        Some(format!("后台快照格式错误：{error}"))
+                                    latest.codex_error =
+                                        Some(format!("Agent 后台快照格式错误：{error}"))
                                 }
                             }
                         }
                     }
                     Err(error) => {
                         version = None;
-                        latest.registry_error =
-                            Some(format!("后台连接中断，旧数据过期：{error:#}"));
+                        latest.codex_error =
+                            Some(format!("Agent 扩展不可用，旧状态过期：{error:#}"));
                     }
                 }
                 let key = serde_json::json!([
@@ -220,20 +273,25 @@ impl Worker {
                     thread::sleep(Duration::from_millis(50));
                 }
             }
-            let _ = remote_inbox.sync();
-            let _ = crate::daemon::call::<serde_json::Value>(
-                &registry,
-                "disconnect",
-                serde_json::json!(client),
-            );
+            if version.is_some() {
+                let _ = remote_inbox.sync();
+                let _ = crate::daemon::call::<serde_json::Value>(
+                    &registry,
+                    "disconnect",
+                    serde_json::json!(client),
+                );
+            }
         });
         Ok(Self {
-            requests: tx,
+            requests: Requests {
+                primary: tx,
+                core: Some(core_tx),
+            },
             updates,
             inbox,
             chat,
             cancel,
-            handle: Some(handle),
+            handles: vec![core_handle, handle],
         })
     }
     pub fn start_local(registry: PathBuf) -> Result<Self> {
@@ -255,21 +313,128 @@ impl Worker {
             collect(registry, rx, out, inbox_out, saved, stop, chat_out);
         });
         Ok(Self {
-            requests: tx,
+            requests: Requests {
+                primary: tx,
+                core: None,
+            },
             updates,
             inbox,
             chat,
             cancel,
-            handle: Some(handle),
+            handles: vec![handle],
         })
     }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
+        for h in self.handles.drain(..) {
             let _ = h.join();
         }
+    }
+}
+
+// 核心采集不连接 Codex、不读写通知；独立线程避免可选服务阻塞导航。
+fn collect_core(
+    registry: PathBuf,
+    requests: Receiver<Request>,
+    updates: Updates,
+    cancel: Arc<AtomicBool>,
+) {
+    let mut snapshot = Snapshot::default();
+    let mut request = Request::default();
+    let mut registry_at = None;
+    let mut windows_at = None;
+    let mut git_at = None;
+    let mut refresh = 0;
+    let mut project = None;
+    let mut scan: Option<GitScan> = None;
+    while !cancel.load(Ordering::Relaxed) {
+        for next in requests.try_iter() {
+            request = next;
+        }
+        if request.background {
+            scan = None;
+            git_at = None;
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let force = request.refresh != refresh;
+        refresh = request.refresh;
+        if force || due(registry_at, 10) {
+            match repositories(&registry) {
+                Ok((mut repos, zed)) => {
+                    for repo in &mut repos {
+                        if let Some(old) = snapshot
+                            .repos
+                            .iter()
+                            .find(|old| old.name == repo.name && old.path == repo.path)
+                        {
+                            for task in &mut repo.tasks {
+                                if let Some(old) = old.tasks.iter().find(|old| {
+                                    old.name == task.name
+                                        && old.path == task.path
+                                        && (task.name == "main" || old.branch == task.branch)
+                                }) {
+                                    task.git = old.git.clone();
+                                    task.window = old.window.clone();
+                                    task.error = old.error.clone();
+                                    task.checked = old.checked;
+                                    if task.name == "main" {
+                                        task.branch = old.branch.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    snapshot.repos = repos;
+                    snapshot.zed = zed;
+                    snapshot.registry_error = None;
+                    snapshot.registry_checked = Some(Instant::now());
+                }
+                Err(error) => {
+                    snapshot.zed = None;
+                    snapshot.registry_error =
+                        Some(format!("登记表读取失败，旧数据过期：{error:#}"));
+                }
+            }
+            updates.publish_core(&snapshot);
+            registry_at = Some(Instant::now());
+        }
+        if force || due(windows_at, 2) {
+            refresh_windows(&mut snapshot.repos);
+            updates.publish_core(&snapshot);
+            windows_at = Some(Instant::now());
+        }
+        if force || request.project != project {
+            scan = None;
+            git_at = None;
+            project = request.project.clone();
+        }
+        if scan.is_none() && due(git_at, 5) {
+            scan = snapshot
+                .repos
+                .iter()
+                .find(|repo| Some(&repo.name) == project.as_ref())
+                .and_then(|repo| GitScan::new(repo, request.path.as_deref()));
+            git_at = Some(Instant::now());
+        }
+        if let Some(current) = &mut scan {
+            if let Some(repo) = snapshot
+                .repos
+                .iter_mut()
+                .find(|repo| repo.name == current.project)
+            {
+                current.next(repo);
+            } else {
+                current.paths.clear();
+            }
+            if current.paths.is_empty() {
+                scan = None;
+            }
+            updates.publish_core(&snapshot);
+        }
+        thread::sleep(Duration::from_millis(if scan.is_some() { 1 } else { 50 }));
     }
 }
 
@@ -1077,14 +1242,14 @@ fn due(at: Option<Instant>, seconds: u64) -> bool {
 }
 
 pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<(String, String)> {
-    let output = crate::daemon::operations::execute(
+    let output = crate::core::execute(
         registry_path,
         crate::Action::Open {
             project: name.into(),
             name: task.into(),
         },
     )?;
-    let (_, target) = output.terminal.context("后台未返回终端目标")?;
+    let (_, target) = output.terminal.context("操作未返回终端目标")?;
     Ok((target.session, target.window))
 }
 

@@ -3,7 +3,7 @@ mod feishu;
 mod log;
 pub mod operations;
 pub mod output;
-mod queries;
+pub(crate) mod queries;
 pub(crate) mod state;
 pub mod time;
 use anyhow::{Context, Result, bail, ensure};
@@ -259,7 +259,15 @@ fn exchange(registry: &Path, method: &str, params: Value, version: u32) -> Resul
             paths.registry.display()
         )
     })?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let timeout = if matches!(
+        method,
+        "snapshot" | "details" | "inbox" | "viewing" | "disconnect"
+    ) {
+        2
+    } else {
+        30
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(timeout)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let request = Request {
         version,
