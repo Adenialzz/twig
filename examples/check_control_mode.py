@@ -104,11 +104,14 @@ class Frontend:
 
     def close(self):
         print(f"清理前端：PID {self.process.pid}", flush=True)
-        if self.process.poll() is None:
-            self.process.kill()
-            self.process.wait(timeout=5)
-        os.close(self.master)
-        os.close(self.slave)
+        try:
+            if self.process.poll() is None:
+                self.process.kill()
+                # macOS 的 PTY 退出也可能等待输出排空；等待期间仍须读取 master。
+                self.until(lambda: self.process.poll() is not None, "清理前端退出")
+        finally:
+            os.close(self.master)
+            os.close(self.slave)
 
 
 def main():
@@ -189,7 +192,8 @@ def main():
             # 在第十行暂停，等选区已经显示才继续，避免较慢 CI 在选区确认前耗尽负载。
             load_gate = Path(root) / "load-ready"
             load_script = Path(root) / "load.sh"
-            load_script.write_text("i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; "
+            # 明确负载的中断行为，避免不同 /bin/sh 对循环内子进程 SIGINT 的处理差异。
+            load_script.write_text("trap 'exit 130' INT\ni=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; "
                                    f"if [ $i -eq 10 ]; then while [ ! -f {shlex.quote(str(load_gate))} ]; do sleep 0.01; done; fi; "
                                    "i=$((i+1)); sleep 0.01; done; printf 'LOAD_%s\\n' FINISHED\n")
             second.send(f"PS1='LOAD_READY> '; sh {shlex.quote(str(load_script))}\r".encode())
@@ -204,7 +208,8 @@ def main():
                 # 中断可能清空终端输入队列；先确认 Shell 已恢复，再发送下一条命令。
                 second.send(b"\x03")
                 second.until(
-                    lambda: any(line.strip() == "LOAD_READY>" for line in second.screen.display),
+                    # SIGINT 回显可能与新提示符同行（^CLOAD_READY>）。
+                    lambda: any(line.rstrip().endswith("LOAD_READY>") for line in second.screen.display),
                     "Ctrl-C 后返回 Shell",
                 )
                 assert "LOAD_FINISHED" not in mux("capture-pane", "-p", "-S", "-150").decode().splitlines(), "负载自然结束，未被 Ctrl-C 中断"
@@ -291,13 +296,15 @@ def main():
             fourth.detach()
             print("通过：Zsh vi 模式光标切换、跨 Pane 样式同步、重连恢复与退出重置")
         finally:
-            for client in clients:
-                client.close()
-            subprocess.run(
-                ["tmux", "-S", socket, "kill-server"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
+            try:
+                for client in clients:
+                    client.close()
+            finally:
+                subprocess.run(
+                    ["tmux", "-S", socket, "kill-server"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
 
 
 if __name__ == "__main__":
