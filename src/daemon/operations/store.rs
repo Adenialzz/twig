@@ -10,11 +10,11 @@ use std::{
 };
 
 #[derive(Clone)]
-pub(super) struct Store {
-    pub(super) directory: PathBuf,
+pub(crate) struct Store {
+    pub(crate) directory: PathBuf,
 }
 impl Store {
-    pub(super) fn open(root: &Path) -> Result<(Self, BTreeMap<String, Operation>)> {
+    pub(crate) fn open(root: &Path) -> Result<(Self, BTreeMap<String, Operation>)> {
         let directory = root.join("operations");
         if !directory.try_exists()? {
             let legacy = root.join("operations.json");
@@ -41,7 +41,29 @@ impl Store {
             fs::rename(staging.path(), &directory)?;
             fs::File::open(root)?.sync_all()?;
         }
-        super::super::private_directory(&directory)?;
+        Ok((Self { directory }, Self::read(root)?))
+    }
+    /// 只读查询不迁移、不创建目录；新目录存在时绝不回退到旧备份。
+    pub(crate) fn read(root: &Path) -> Result<BTreeMap<String, Operation>> {
+        let directory = root.join("operations");
+        if !directory.try_exists()? {
+            let legacy = root.join("operations.json");
+            return match fs::read(&legacy) {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .with_context(|| format!("操作记录损坏：{}", legacy.display())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+                Err(error) => Err(error.into()),
+            };
+        }
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(&directory)?;
+        ensure!(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0,
+            "操作目录必须属于当前用户且权限为 0700：{}",
+            directory.display()
+        );
         let store = Self { directory };
         let mut records = BTreeMap::new();
         for entry in fs::read_dir(&store.directory)? {
@@ -65,9 +87,9 @@ impl Store {
             );
             records.insert(record.id.clone(), record);
         }
-        Ok((store, records))
+        Ok(records)
     }
-    pub(super) fn path(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) fn path(&self, id: &str) -> Result<PathBuf> {
         ensure!(
             !id.is_empty()
                 && id
@@ -77,7 +99,7 @@ impl Store {
         );
         Ok(self.directory.join(format!("{id}.json")))
     }
-    pub(super) fn save(&self, record: &Operation) -> Result<()> {
+    pub(crate) fn save(&self, record: &Operation) -> Result<()> {
         let path = self.path(&record.id)?;
         let mut temp = tempfile::NamedTempFile::new_in(&self.directory)?;
         {
@@ -121,6 +143,22 @@ mod tests {
         let data = serde_json::to_vec(&records).unwrap();
         fs::write(root.join("operations.json"), &data).unwrap();
         data
+    }
+
+    #[test]
+    fn readonly_queries_never_create_or_migrate_and_prefer_published_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(Store::read(&missing).unwrap().is_empty());
+        assert!(!missing.exists());
+        legacy(temp.path(), BTreeMap::from([("one".into(), record("one"))]));
+        assert_eq!(Store::read(temp.path()).unwrap().len(), 1);
+        assert!(!temp.path().join("operations").exists());
+        let (store, _) = Store::open(temp.path()).unwrap();
+        fs::write(temp.path().join("operations.json"), "obsolete backup").unwrap();
+        assert_eq!(Store::read(temp.path()).unwrap().len(), 1);
+        fs::write(store.path("one").unwrap(), "broken current record").unwrap();
+        assert!(Store::read(temp.path()).is_err());
     }
 
     #[test]

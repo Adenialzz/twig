@@ -85,7 +85,6 @@ impl Fixture {
             .env("SHELL", "/bin/sh")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE");
-        support::daemon::ensure(&c, registry);
         c
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -753,7 +752,6 @@ fn detects_conflicts_and_preserves_partial_creation() {
     );
     let mut command = f.command(&f.repo);
     command.env("TWIG_FAIL_TMUX", "1");
-    support::daemon::ensure(&command, &f.registry_path());
     let out = command
         .args(["new", "local", "--no-fetch", "--no-open", "partial"])
         .output()
@@ -1209,7 +1207,6 @@ fn default_global_storage_ignores_and_preserves_old_files() {
         .env("SHELL", "/bin/sh")
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
-    support::daemon::ensure(&c, &home.join(".twig/config.toml"));
     success(
         c.args(["add", "default", "--path", f.repo.to_str().unwrap()])
             .output()
@@ -1384,6 +1381,7 @@ fn disconnected_submit_and_retry_create_only_one_task() {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     let f = Fixture::new();
+    support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
     let status: Value = serde_json::from_str(&f.ok(&["daemon", "status"])).unwrap();
     let socket = status["socket"].as_str().unwrap();
     let rpc = |method: &str, params: Value, read: bool| -> Value {
@@ -1537,6 +1535,7 @@ fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
         let f = Fixture::new();
         f.ok(&["new", "local", "task", "--no-fetch", "--no-open"]);
         let path = f.root.join("task");
+        support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
         let status: Value = serde_json::from_str(&f.ok(&["daemon", "status"])).unwrap();
         let rpc = |method: &str, params: Value| -> Value {
             let mut stream = UnixStream::connect(status["socket"].as_str().unwrap()).unwrap();
@@ -1656,4 +1655,115 @@ fn deletion_rejects_unknown_pane_process_and_does_not_require_ps() {
     fs::set_permissions(f.bin.join("ps"), fs::Permissions::from_mode(0o755)).unwrap();
     f.ok(&["rm", "local", "safe", "-y"]);
     assert!(!f.root.join("safe").exists());
+}
+
+#[test]
+fn core_execution_uses_client_environment_even_with_daemon_online() {
+    let f = Fixture::new();
+    let mut backend = f.command(&f.repo);
+    backend.env("TWIG_FAIL_TMUX", "1");
+    support::daemon::ensure(&backend, &f.registry_path());
+    // 后台环境会拒绝 new-window；普通任务仍使用调用进程的环境。
+    f.ok(&["new", "local", "standalone", "--no-fetch", "--no-open"]);
+    let records: serde_json::Value = serde_json::from_str(&f.ok(&["operation", "ls"])).unwrap();
+    assert!(
+        records
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|id| id.starts_with("local-"))
+    );
+    support::daemon::stop_under(f._temp.path());
+    f.fail(
+        &[
+            "new",
+            "local",
+            "managed",
+            "--agent",
+            "--no-fetch",
+            "--no-open",
+        ],
+        "后台不可用",
+    );
+    assert!(!f.root.join("managed").exists());
+    assert!(!f.git(&["branch", "--list", "managed"]).contains("managed"));
+    f.ok(&["stop", "local", "standalone", "--yes"]);
+}
+
+#[test]
+fn interrupted_local_record_blocks_writes_and_is_resolvable_without_daemon() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "recorded", "--no-fetch", "--no-open"]);
+    let records: serde_json::Value = serde_json::from_str(&f.ok(&["operation", "ls"])).unwrap();
+    let (id, _) = records
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, record)| record["plan"]["action"]["New"]["name"] == "recorded")
+        .unwrap();
+    let directory = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let path = directory.join("operations").join(format!("{id}.json"));
+    let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    journal["status"] = "running".into();
+    fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    use std::os::fd::AsRawFd;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join("execution.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let running: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", id])).unwrap();
+    assert_eq!(
+        running["status"], "running",
+        "活跃持锁操作不能被误判为已中断"
+    );
+    drop(lock);
+    let status: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", id])).unwrap();
+    assert_eq!(status["status"], "needs_inspection");
+    f.fail(
+        &["new", "local", "blocked", "--no-fetch", "--no-open"],
+        "待核对",
+    );
+    assert!(!f.root.join("blocked").exists());
+    f.ok(&["operation", "resolve", id, "--yes"]);
+    f.ok(&["new", "local", "allowed", "--no-fetch", "--no-open"]);
+    assert!(f.root.join("recorded").is_dir());
+    let status: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", id])).unwrap();
+    assert_eq!(status["status"], "resolved");
+}
+
+#[test]
+fn managed_task_lifecycle_requires_daemon_before_changing_resources() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "bound", "--no-fetch", "--no-open"]);
+    let path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
+    let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["bound"]["agent_thread"] = "isolated-binding".into();
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let windows = f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"]);
+    for args in [
+        vec!["open", "local", "bound"],
+        vec!["stop", "local", "bound", "--yes"],
+        vec!["rm", "local", "bound", "--yes"],
+    ] {
+        f.fail(&args, "后台不可用");
+        assert_eq!(
+            windows,
+            f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"])
+        );
+        assert!(f.root.join("bound").is_dir());
+        assert_eq!(
+            state,
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap()
+        );
+    }
 }

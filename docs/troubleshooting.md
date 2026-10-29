@@ -2,9 +2,9 @@
 
 ## 后台不可用、操作结果未知
 
-先运行 `twig --config CONFIG daemon status`。未运行时显式启动；采集失败查看来源错误、后台 PATH/CODEX_HOME 和所需服务。更新环境须重启 Twig 后台，不能依赖客户端的新 export。已有工作台继续运行，业务写入不回退本地。
+普通任务 CLI、Console 导航和工作台不依赖后台。Agent、受管任务或飞书不可用时，先运行 `twig --config CONFIG daemon status`，未运行时显式启动；采集失败查看来源错误、后台 PATH/CODEX_HOME 和所需服务。更新环境须重启 Twig 后台，不能依赖客户端的新 export。普通任务使用调用进程的 PATH/SHELL，后台环境只影响扩展操作；受管请求失败不回退或重发。
 
-提交后断连按错误中的操作 ID 或请求 ID 执行 `operation show`，不要重复 new/send/rm。强制退出留下的 `needs_inspection` 先核对实际资源，再 `operation resolve ID --yes`；不会自动回滚。更多信息见 [后台指南](daemon.md)。
+提交后断连按错误中的操作 ID 或请求 ID 执行 `operation show`，不要重复 new/send/rm。本地执行中途退出或后台强制退出留下的 `needs_inspection` 先核对实际资源，再 `operation resolve ID --yes`；不会自动回滚。更多信息见 [后台指南](daemon.md)。
 
 命令行阅读：`twig guide troubleshooting`。
 
