@@ -223,6 +223,38 @@ struct Pty {
     original: libc::termios,
 }
 impl Pty {
+    fn copies(&mut self, count: usize) -> Vec<String> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let started = Instant::now();
+        let prefix = b"\x1b]52;c;";
+        loop {
+            self.read_output();
+            let copies: Vec<_> = self
+                .bytes
+                .windows(prefix.len())
+                .enumerate()
+                .filter(|(_, bytes)| *bytes == prefix)
+                .filter_map(|(start, _)| {
+                    let start = start + prefix.len();
+                    let end = start + self.bytes[start..].iter().position(|byte| *byte == 7)?;
+                    Some(
+                        String::from_utf8(STANDARD.decode(&self.bytes[start..end]).unwrap())
+                            .unwrap(),
+                    )
+                })
+                .collect();
+            if copies.len() == count {
+                return copies;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "复制超时：{}",
+                self.text
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn spawn(mut command: Command) -> Self {
         support::daemon::for_pty(&command);
         let (mut master, mut slave) = (0, 0);
@@ -701,34 +733,6 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
 
 #[test]
 fn monitor_and_footer_drag_and_triple_click_stay_in_their_regions() {
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    fn copies(p: &mut Pty, count: usize) -> Vec<String> {
-        let started = Instant::now();
-        let prefix = b"\x1b]52;c;";
-        loop {
-            p.read_output();
-            let copies: Vec<_> = p
-                .bytes
-                .windows(prefix.len())
-                .enumerate()
-                .filter(|(_, bytes)| *bytes == prefix)
-                .filter_map(|(start, _)| {
-                    let start = start + prefix.len();
-                    let end = start + p.bytes[start..].iter().position(|byte| *byte == 7)?;
-                    Some(String::from_utf8(STANDARD.decode(&p.bytes[start..end]).unwrap()).unwrap())
-                })
-                .collect();
-            if copies.len() == count {
-                return copies;
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "底部状态复制超时：{}",
-                p.text
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
     let f = Fixture::new();
     f.init();
     let registry = fs::read(&f.registry).unwrap();
@@ -766,11 +770,11 @@ fn monitor_and_footer_drag_and_triple_click_stay_in_their_regions() {
             )
             .as_bytes(),
         );
-        assert_eq!(copies(&mut p, 1), vec![expected.clone()]);
+        assert_eq!(p.copies(1), vec![expected.clone()]);
         p.clear_output();
         let click = format!("\x1b[<0;2;{height}M\x1b[<0;2;{height}m");
         p.send(click.repeat(3).as_bytes());
-        let copied = copies(&mut p, 2);
+        let copied = p.copies(2);
         assert_eq!(copied[1], expected);
         assert!(!copied[0].is_empty());
         // 全局监控在宽屏左下、窄屏下方，按真实画面定位。
@@ -796,7 +800,7 @@ fn monitor_and_footer_drag_and_triple_click_stay_in_their_regions() {
             )
             .as_bytes(),
         );
-        assert_eq!(copies(&mut p, 1), vec!["Codex"]);
+        assert_eq!(p.copies(1), vec!["Codex"]);
         p.clear_output();
         let click = format!(
             "\x1b[<0;{};{}M\x1b[<0;{};{}m",
@@ -806,11 +810,100 @@ fn monitor_and_footer_drag_and_triple_click_stay_in_their_regions() {
             row + 1
         );
         p.send(click.repeat(3).as_bytes());
-        assert_eq!(copies(&mut p, 2), vec!["Codex", monitor]);
+        assert_eq!(p.copies(2), vec!["Codex", monitor]);
     }
     p.send(b"q");
     assert!(p.wait_exit().success());
     assert_eq!(fs::read(&f.registry).unwrap(), registry);
+}
+
+#[test]
+fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
+    fn check_dialog(p: &mut Pty, title: &str, word: &str, width: u16, height: u16, deletion: bool) {
+        p.wait_screen(title);
+        let w = (width - 4).min(if deletion { 78 } else { 72 });
+        let h = (height - 2).min(if deletion { 22 } else { 20 });
+        let (left, top) = ((width - w) / 2 + 1, (height - h) / 2 + 1);
+        let screen = p.screen_text();
+        let (row, line) = screen
+            .lines()
+            .enumerate()
+            .skip(top as usize)
+            .take((h - 2) as usize)
+            .find(|(_, line)| line.contains(word))
+            .unwrap();
+        let col = ratatui::text::Line::from(&line[..line.find(word).unwrap()]).width();
+        p.clear_output();
+        // 背景拖动不得产生复制，也不得计入弹窗连击。
+        p.send(b"\x1b[<0;1;1M\x1b[<32;5;2M\x1b[<0;5;2m");
+        let click = format!(
+            "\x1b[<0;{};{}M\x1b[<0;{};{}m",
+            col + 1,
+            row + 1,
+            col + 1,
+            row + 1
+        );
+        p.send(click.repeat(3).as_bytes());
+        let copied = p.copies(2);
+        assert_eq!(copied[0], word);
+        assert!(
+            copied[1].contains(word) && !copied[1].contains('│'),
+            "{copied:?}"
+        );
+        p.clear_output();
+        p.send(
+            format!(
+                "\x1b[<0;{};{}M\x1b[<32;{width};{height}M\x1b[<0;{width};{height}m",
+                left + 1,
+                top + 1
+            )
+            .as_bytes(),
+        );
+        let copied = p.copies(1);
+        for background in ["Console", "全局 Codex", title] {
+            assert!(!copied[0].contains(background), "{copied:?}");
+        }
+        p.wait_screen("已请求复制");
+        p.send(b"\x1b");
+        p.wait_screen_absent("已请求复制");
+        assert!(p.screen_text().contains(title), "首次 Esc 不能关闭弹窗");
+    }
+    let f = Fixture::new();
+    f.init();
+    f.git(&["branch", "existing"]);
+    let registry = fs::read(&f.registry).unwrap();
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let state = fs::read(&state_path).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .env("SSH_CONNECTION", "twig-pty-test")
+        .arg("--config")
+        .arg(&f.registry);
+    let mut p = Pty::spawn(command);
+    p.wait_screen("demo");
+    p.send(b"1n");
+    check_dialog(&mut p, "登记已有仓库", "Git", 140, 36, false);
+    p.send(b"\x1b");
+    p.wait_screen_absent("登记已有仓库");
+    p.resize(80, 24);
+    p.send(b"2n");
+    p.task_form_ready();
+    check_dialog(&mut p, "新建任务", "demo", 80, 24, false);
+    p.send(b"existing\r");
+    check_dialog(&mut p, "使用已有分支", "existing", 80, 24, false);
+    p.send(b"\x1b");
+    p.wait_screen_absent("使用已有分支");
+    p.send(b"\x1b");
+    p.wait_screen_absent("新建任务");
+    p.send(b"/auth\rdd");
+    check_dialog(&mut p, "删除任务", "demo", 80, 24, true);
+    p.send(b"\x1b");
+    p.wait_screen_absent("删除任务");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+    assert_eq!(fs::read(&f.registry).unwrap(), registry);
+    assert_eq!(fs::read(state_path).unwrap(), state);
 }
 
 #[test]

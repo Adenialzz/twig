@@ -90,7 +90,13 @@ fn panels(area: Rect, searching: bool) -> [Rect; 4] {
 }
 
 pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
-    if area.width < 38 || area.height < 12 || app.form.is_some() || app.help || app.searching {
+    if area.width < 38 || area.height < 12 {
+        return Vec::new();
+    }
+    if let Some(form) = &app.form {
+        return vec![form_area(area, form).inner(ratatui::layout::Margin::new(1, 1))];
+    }
+    if app.help || app.searching {
         return Vec::new();
     }
     let areas = panels(area, app.searching);
@@ -856,16 +862,25 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn form_area(area: Rect, form: &super::form::Form) -> Rect {
+    let (max_width, max_height) = if form.deletion.is_some() {
+        (78, 22)
+    } else {
+        (72, 20)
+    };
+    let width = area.width.saturating_sub(4).min(max_width);
+    let height = area.height.saturating_sub(2).min(max_height);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
+}
+
 fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
+    let area = form_area(area, form);
     if let Some(deletion) = &form.deletion {
-        let width = area.width.saturating_sub(4).min(78);
-        let height = area.height.saturating_sub(2).min(22);
-        let area = Rect::new(
-            area.x + (area.width - width) / 2,
-            area.y + (area.height - height) / 2,
-            width,
-            height,
-        );
         let border = block(" 删除任务 ".into(), true).title_alignment(Alignment::Center);
         let inner = border.inner(area);
         frame.render_widget(Clear, area);
@@ -993,14 +1008,6 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         );
         return;
     }
-    let width = area.width.saturating_sub(4).min(72);
-    let height = area.height.saturating_sub(2).min(20);
-    let area = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
     if let Some(existing) = &form.existing {
         let border = block(" 使用已有分支 ".into(), true);
         let inner = border.inner(area);
@@ -1329,6 +1336,57 @@ mod tests {
         app.help = false;
         app.snapshot.registry_error = Some("bad config".into());
         assert!(zed_link(area, &app).is_none());
+    }
+
+    #[test]
+    fn form_selection_uses_only_the_visible_dialog_in_all_four_forms() {
+        use super::super::form::{Deletion, ExistingBranch, Form};
+        let mut app = fixture();
+        let mut existing = Form::task("alpha".into(), "main".into());
+        existing.existing = Some(ExistingBranch {
+            branches: vec![crate::config::BranchStart {
+                reference: "refs/heads/existing".into(),
+                commit: "abc".into(),
+            }],
+            common: "/tmp/repo".into(),
+            selected: 0,
+            confirmed: false,
+        });
+        let mut deletion = Form::task("alpha".into(), "main".into());
+        deletion.deletion = Some(Deletion {
+            branch: "task".into(),
+            path: "/tmp/task".into(),
+            expected: "abc".into(),
+            delete_branch: true,
+            delete_ignored: true,
+            ignored: vec![],
+            confirm: false,
+            option: 0,
+        });
+        for form in [
+            Form::project(),
+            Form::task("alpha".into(), "main".into()),
+            existing,
+            deletion,
+        ] {
+            app.form = Some(form);
+            for (width, height) in [(38, 12), (80, 24), (140, 36)] {
+                let buffer = render(&app, width, height, |frame, _, app| super::draw(frame, app));
+                let regions = selection_regions(buffer.area, &app);
+                let inner = form_area(buffer.area, app.form.as_ref().unwrap())
+                    .inner(ratatui::layout::Margin::new(1, 1));
+                assert_eq!(regions, vec![inner]);
+                assert!(!inner.contains((0, 0).into()));
+                let mut selection =
+                    super::super::selection::Selection::new(&buffer, inner, inner.x, inner.y);
+                selection.update(width - 1, height - 1);
+                let copied = selection.text();
+                assert!(!copied.is_empty());
+                for background in ["Console", "全局 Codex", "│", "┌", "┘"] {
+                    assert!(!copied.contains(background), "{copied}");
+                }
+            }
+        }
     }
 
     #[test]

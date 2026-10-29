@@ -718,6 +718,7 @@ fn run_inner(
     let mut created_task = None;
     let mut dirty = true;
     let mut select_at = None;
+    let mut selection_form = None;
     let mut clicks = twig_cli::mouse_selection::Clicks::default();
     let mut stale_count = 0;
     let mut hyperlinks = hyperlink::Painter::default();
@@ -817,6 +818,20 @@ fn run_inner(
             .count();
         dirty |= stale != stale_count;
         stale_count = stale;
+        let form_kind = app.form.as_ref().map(|form| {
+            (
+                form.project.is_some(),
+                form.existing.is_some(),
+                form.deletion.is_some(),
+            )
+        });
+        if selection_form != form_kind {
+            selection = None;
+            select_at = None;
+            clicks.reset();
+            selection_form = form_kind;
+            dirty = true;
+        }
         if dirty {
             let completed = terminal.draw(|frame| {
                 if selection
