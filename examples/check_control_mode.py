@@ -5,6 +5,7 @@
 """PTY 验收：先 cargo build --example control_mode，再 uv run 本文件。"""
 
 import fcntl
+import faulthandler
 import base64
 import os
 from pathlib import Path
@@ -74,6 +75,7 @@ class Frontend:
         self.until(lambda: needle in "\n".join(self.screen.display), needle)
 
     def until(self, predicate, description):
+        print(f"等待：{description}", flush=True)
         until = time.monotonic() + 5
         while time.monotonic() < until:
             self.read_output(0.05)
@@ -101,9 +103,10 @@ class Frontend:
         )
 
     def close(self):
+        print(f"清理前端：PID {self.process.pid}", flush=True)
         if self.process.poll() is None:
             self.process.kill()
-            self.process.wait()
+            self.process.wait(timeout=5)
         os.close(self.master)
         os.close(self.slave)
 
@@ -116,6 +119,7 @@ def main():
         target.write_text("ORIGINAL_MARKER\n")
 
         def mux(*args):
+            print(f"tmux：{args}", flush=True)
             return subprocess.check_output(["tmux", "-S", socket, *args], timeout=10)
 
         print("阶段：启动隔离 tmux", flush=True)
@@ -297,4 +301,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # 包括原生调用与清理在内的硬超时，避免只得到 CI 的 20 分钟取消日志。
+    faulthandler.dump_traceback_later(60, exit=True)
     main()
+    faulthandler.cancel_dump_traceback_later()
