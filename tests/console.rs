@@ -1886,6 +1886,38 @@ fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
 }
 
 #[test]
+fn task_form_creates_typed_prefix_and_clears_selection_after_editing() {
+    for select_then_edit in [false, true] {
+        let f = Fixture::new();
+        f.init();
+        f.git(&["branch", "optimize"]);
+        let mut p = f.terminal(false);
+        p.wait("auth");
+        p.send(b"2n");
+        p.task_form_ready();
+        p.send(b"op");
+        p.wait_screen("optimize");
+        p.wait_screen("Enter 按输入创建");
+        if select_then_edit {
+            p.send(b"\x1b[B");
+            p.wait_screen("Enter 选中并确认");
+        }
+        p.send(b"t");
+        p.wait_screen("Enter 按输入创建");
+        p.send(b"\r");
+        p.created_task(&f, "opt");
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state["opt"]["branch"], "opt");
+        assert!(state.get("optimize").is_none());
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+    }
+}
+
+#[test]
 fn task_form_selects_existing_branch_without_creating_another_branch() {
     let f = Fixture::new();
     f.init();
@@ -1915,7 +1947,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     p.wait("feature/alpha");
     p.wait("feature/beta");
     assert!(!p.text.contains("feature/remote"));
-    p.send(b"\x1b[B\t\r");
+    p.send(b"\x1b[B\x1b[B\t\r");
     p.wait("使用已有分支");
     // 默认取消，候选选择本身不创建资源。
     p.send(b"\r");
@@ -1950,7 +1982,7 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         p.send(b"upstream/feat/collision");
         p.wait("upstream/feat/collision");
         // 本地与远端候选显示同名，第二项才是远端跟踪分支。
-        p.send(b"\x1b[B");
+        p.send(b"\x1b[B\x1b[B");
         p.send(accept);
         p.wait("使用已有分支");
         // 默认取消后再次提交，仍须保持同一远端候选。
@@ -2094,8 +2126,8 @@ fn enter_uses_highlighted_remote_and_rejects_registered_tasks() {
         p.send(b"km");
         p.wait("upstream/feat/km_story");
         p.clear_output();
-        // 不按 Tab，直接使用高亮候选。
-        p.send(b"\x1b[B\r");
+        // 不按 Tab，主动选择第二项后直接使用高亮候选。
+        p.send(b"\x1b[B\x1b[B\r");
         if stale {
             p.wait("已存在，请从任务列表进入");
             assert_eq!(fs::read(&state_path).unwrap(), before);
@@ -2175,7 +2207,7 @@ fn selected_source_cannot_disappear_or_replace_a_recorded_source_silently() {
         if !recorded {
             f.git(&["update-ref", "-d", "refs/remotes/upstream/feat/km_story"]);
         }
-        p.send(b"\r");
+        p.send(b"\x1b[B\r");
         p.wait(if recorded {
             "已存在，请从任务列表进入"
         } else {
@@ -2906,4 +2938,33 @@ fn new_form_uses_latest_remote_base_by_default() {
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.wait_exit().success());
+}
+
+#[test]
+fn task_creation_enters_workbench_while_startup_writes_files() {
+    let f = Fixture::new();
+    f.init();
+    fs::create_dir_all(f.repo.join(".twig")).unwrap();
+    fs::write(
+        f.repo.join(".twig/config.toml"),
+        r#"[tmux]
+panes = [{ command = ["sh", "-c", "i=0; while [ $i -lt 100 ]; do touch startup-$i; i=$((i+1)); sleep 0.02; done; echo STARTUP_DONE"] }]
+"#,
+    ).unwrap();
+    let mut p = f.terminal(false);
+    p.wait("auth");
+    p.send(b"2n");
+    p.task_form_ready();
+    p.send(b"writer\r");
+    p.wait(" · 全局 Codex ");
+    p.wait_screen("STARTUP_DONE");
+    p.created_task(&f, "writer");
+    assert!(
+        f.repo
+            .with_file_name("repo.worktrees")
+            .join("writer/startup-99")
+            .is_file()
+    );
+    p.send(b"q");
+    p.wait("TERMINAL_RESTORED:0");
 }

@@ -2,7 +2,7 @@
 
 命令行阅读：`twig guide installation`。
 
-运行环境需要 Git、**tmux 3.8 或更新版本**和 Unix `ps`；源码安装还需要 Rust/Cargo 和 Make。
+运行环境需要 Git、**tmux 3.8 或更新版本**（Linux 或 macOS）；源码安装还需要 Rust/Cargo 和 Make。
 
 tmux 3.8 是当前支持基线：Ubuntu 24.04 和 macOS Tahoe 26（Apple Silicon）的 Rust 测试均使用该版本通过，Linux 另通过独立 Control Mode PTY 验收。CI 的 Rust 检查、独立 Control Mode 脚本和 Agent 隔离验收均覆盖这两个平台，最新验收结果以对应提交的 CI 为准。3.8 之后的版本需关注其兼容性，并非每个版本都已验收。
 

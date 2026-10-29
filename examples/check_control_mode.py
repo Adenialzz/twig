@@ -5,6 +5,7 @@
 """PTY 验收：先 cargo build --example control_mode，再 uv run 本文件。"""
 
 import fcntl
+import faulthandler
 import base64
 import os
 from pathlib import Path
@@ -19,6 +20,39 @@ import termios
 import time
 
 import pyte
+from wcwidth import wcwidth
+
+
+class Screen(pyte.Screen):
+    @property
+    def display(self):
+        # pyte 0.8.2 的 display 对局部重绘留下的宽字符空占位格取 data[0]，
+        # 会抛 IndexError。仅在读取文本时把孤立占位格显示为空格，不改屏幕状态。
+        lines = []
+        for y in range(self.lines):
+            cells = []
+            x = 0
+            while x < self.columns:
+                data = self.buffer[y][x].data or " "
+                cells.append(data)
+                x += 2 if wcwidth(data[0]) == 2 else 1
+            lines.append("".join(cells))
+        return lines
+
+
+def check_screen():
+    screen = Screen(8, 1)
+    stream = pyte.ByteStream(screen)
+    # 按字节分片也必须支持完整中文、组合字符及局部覆盖的中间帧。
+    for byte in "中文e\u0301".encode():
+        stream.feed(bytes([byte]))
+    assert screen.display == ["中文é   "]
+    stream.feed(b"\r\x1b[7mA")
+    assert screen.display == ["A 文é   "]
+    assert screen.buffer[0][0].reverse
+    assert screen.buffer[0][1].data == ""
+    stream.feed(b"\x1b[0m\x1b[2K")
+    assert screen.display == [" " * 8]
 
 
 class Frontend:
@@ -31,7 +65,7 @@ class Frontend:
         self.before = termios.tcgetattr(self.master)
         # PENDIN 是内核重排待输入的瞬时标志，不属于需要还原的 raw 模式配置。
         self.before[3] &= ~termios.PENDIN
-        self.screen = pyte.Screen(100, 30)
+        self.screen = Screen(100, 30)
         self.stream = pyte.ByteStream(self.screen)
         self.output = bytearray()
 
@@ -74,6 +108,7 @@ class Frontend:
         self.until(lambda: needle in "\n".join(self.screen.display), needle)
 
     def until(self, predicate, description):
+        print(f"等待：{description}", flush=True)
         until = time.monotonic() + 5
         while time.monotonic() < until:
             self.read_output(0.05)
@@ -101,14 +136,19 @@ class Frontend:
         )
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.kill()
-            self.process.wait()
-        os.close(self.master)
-        os.close(self.slave)
+        print(f"清理前端：PID {self.process.pid}", flush=True)
+        try:
+            if self.process.poll() is None:
+                self.process.kill()
+                # macOS 的 PTY 退出也可能等待输出排空；等待期间仍须读取 master。
+                self.until(lambda: self.process.poll() is not None, "清理前端退出")
+        finally:
+            os.close(self.master)
+            os.close(self.slave)
 
 
 def main():
+    check_screen()
     binary = Path(__file__).resolve().parents[1] / "target/debug/examples/control_mode"
     with tempfile.TemporaryDirectory(prefix="twig-vim-pty-") as root:
         socket = root + "/tmux.sock"
@@ -116,6 +156,7 @@ def main():
         target.write_text("ORIGINAL_MARKER\n")
 
         def mux(*args):
+            print(f"tmux：{args}", flush=True)
             return subprocess.check_output(["tmux", "-S", socket, *args], timeout=10)
 
         print("阶段：启动隔离 tmux", flush=True)
@@ -185,7 +226,8 @@ def main():
             # 在第十行暂停，等选区已经显示才继续，避免较慢 CI 在选区确认前耗尽负载。
             load_gate = Path(root) / "load-ready"
             load_script = Path(root) / "load.sh"
-            load_script.write_text("i=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; "
+            # 明确负载的中断行为，避免不同 /bin/sh 对循环内子进程 SIGINT 的处理差异。
+            load_script.write_text("trap 'exit 130' INT\ni=0; while [ $i -lt 120 ]; do printf 'LOAD_%s\\n' $i; "
                                    f"if [ $i -eq 10 ]; then while [ ! -f {shlex.quote(str(load_gate))} ]; do sleep 0.01; done; fi; "
                                    "i=$((i+1)); sleep 0.01; done; printf 'LOAD_%s\\n' FINISHED\n")
             second.send(f"PS1='LOAD_READY> '; sh {shlex.quote(str(load_script))}\r".encode())
@@ -200,7 +242,8 @@ def main():
                 # 中断可能清空终端输入队列；先确认 Shell 已恢复，再发送下一条命令。
                 second.send(b"\x03")
                 second.until(
-                    lambda: any(line.strip() == "LOAD_READY>" for line in second.screen.display),
+                    # SIGINT 回显可能与新提示符同行（^CLOAD_READY>）。
+                    lambda: any(line.rstrip().endswith("LOAD_READY>") for line in second.screen.display),
                     "Ctrl-C 后返回 Shell",
                 )
                 assert "LOAD_FINISHED" not in mux("capture-pane", "-p", "-S", "-150").decode().splitlines(), "负载自然结束，未被 Ctrl-C 中断"
@@ -286,15 +329,27 @@ def main():
             fourth.cursor(6)
             fourth.detach()
             print("通过：Zsh vi 模式光标切换、跨 Pane 样式同步、重连恢复与退出重置")
+            print("阶段：清理仍在运行的前端", flush=True)
+            unfinished = Frontend(binary, socket)
+            clients.append(unfinished)
+            unfinished.wait("ZSH_READY>")
+            # 故意不 detach，覆盖断言失败时仍有活跃前端的清理路径。
         finally:
-            for client in clients:
-                client.close()
-            subprocess.run(
-                ["tmux", "-S", socket, "kill-server"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
+            try:
+                for client in clients:
+                    client.close()
+            finally:
+                subprocess.run(
+                    ["tmux", "-S", socket, "kill-server"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+        assert all(client.process.poll() is not None for client in clients)
+        print("通过：所有前端均已退出，隔离 tmux 已清理", flush=True)
 
 
 if __name__ == "__main__":
+    # 包括原生调用与清理在内的硬超时，避免只得到 CI 的 20 分钟取消日志。
+    faulthandler.dump_traceback_later(60, exit=True)
     main()
+    faulthandler.cancel_dump_traceback_later()

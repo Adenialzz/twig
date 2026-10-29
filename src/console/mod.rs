@@ -1039,13 +1039,17 @@ fn run_inner(
                 KeyCode::Down if form.completing_branch() => {
                     let count = form.matching_branches().count();
                     if count > 0 {
-                        form.branch_selection = (form.branch_selection + 1) % count;
+                        form.branch_selection =
+                            Some(form.branch_selection.map_or(0, |i| (i + 1) % count));
                     }
                 }
                 KeyCode::Up if form.completing_branch() => {
                     let count = form.matching_branches().count();
                     if count > 0 {
-                        form.branch_selection = (form.branch_selection + count - 1) % count;
+                        form.branch_selection = Some(
+                            form.branch_selection
+                                .map_or(count - 1, |i| (i + count - 1) % count),
+                        );
                     }
                 }
                 KeyCode::Backspace if form.field < 2 => {

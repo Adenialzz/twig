@@ -1,4 +1,5 @@
 //! 持久化业务操作：客户端断开不取消执行，未知结果不自动重试。
+mod store;
 use super::output::Output;
 use crate::{Action, config::Project, registry};
 use anyhow::{Context, Result, bail, ensure};
@@ -8,12 +9,12 @@ use serde_json::{Value, json};
 use std::{
     cell::RefCell,
     collections::BTreeMap,
-    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use store::Store;
 
 #[derive(Args, Clone, Serialize, Deserialize)]
 pub struct Cli {
@@ -65,7 +66,7 @@ pub struct Operation {
 #[derive(Clone)]
 pub struct Service {
     registry: PathBuf,
-    file: PathBuf,
+    store: Store,
     records: Arc<Mutex<BTreeMap<String, Operation>>>,
     plans: Arc<Mutex<BTreeMap<String, Plan>>>,
     queue: mpsc::SyncSender<String>,
@@ -76,17 +77,9 @@ fn now() -> u64 {
         .unwrap()
         .as_secs()
 }
-fn save(file: &Path, records: &BTreeMap<String, Operation>) -> Result<()> {
-    let mut temp = tempfile::NamedTempFile::new_in(file.parent().unwrap())?;
-    serde_json::to_writer(&mut temp, records)?;
-    temp.as_file().sync_all()?;
-    temp.persist(file)?;
-    Ok(())
-}
-
 // 已接受的操作不能因存储故障一直显示为运行中，或把未持久化的终态当作成功。
-fn save_accepted(file: &Path, records: &mut BTreeMap<String, Operation>, id: &str) -> Result<()> {
-    if let Err(error) = save(file, records) {
+fn save_accepted(store: &Store, records: &mut BTreeMap<String, Operation>, id: &str) -> Result<()> {
+    if let Err(error) = store.save(records.get(id).context("操作记录不存在")?) {
         let operation = records.get_mut(id).context("操作记录不存在")?;
         operation.status = "needs_inspection".into();
         operation.error = Some(format!("操作记录保存失败，请恢复存储后核对资源：{error:#}"));
@@ -96,14 +89,7 @@ fn save_accepted(file: &Path, records: &mut BTreeMap<String, Operation>, id: &st
 }
 impl Service {
     pub fn start(registry: &Path, directory: &Path) -> Result<(Self, thread::JoinHandle<()>)> {
-        let file = directory.join("operations.json");
-        let mut records: BTreeMap<String, Operation> = match fs::read(&file) {
-            Ok(data) => {
-                serde_json::from_slice(&data).context("操作记录损坏，保留文件并停止启动")?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(e) => return Err(e.into()),
-        };
+        let (store, mut records) = Store::open(directory)?;
         for record in records
             .values_mut()
             .filter(|r| matches!(r.status.as_str(), "running" | "queued"))
@@ -111,20 +97,18 @@ impl Service {
             record.status = "needs_inspection".into();
             record.error =
                 Some("后台在操作完成前退出；请核对资源和确认有效性，不自动重新执行".into());
-        }
-        if !records.is_empty() {
-            save(&file, &records)?;
+            store.save(record)?;
         }
         let (queue, receiver) = mpsc::sync_channel::<String>(64);
         let service = Self {
             registry: registry.to_owned(),
-            file,
+            store,
             records: Arc::new(Mutex::new(records)),
             plans: Arc::new(Mutex::new(BTreeMap::new())),
             queue,
         };
         let registry = service.registry.clone();
-        let file = service.file.clone();
+        let store = service.store.clone();
         let records = service.records.clone();
         let worker = thread::spawn(move || {
             while let Ok(id) = receiver.recv() {
@@ -140,17 +124,17 @@ impl Service {
                             let operation = records.get_mut(&id).unwrap();
                             operation.status = "needs_inspection".into();
                             operation.error = Some("同目标前序操作需核对，本操作未执行".into());
-                            save_accepted(&file, &mut records, &id)?;
+                            save_accepted(&store, &mut records, &id)?;
                             return Ok(());
                         }
                         let operation = records.get_mut(&id).context("操作记录不存在")?;
                         operation.status = "running".into();
                         let plan = operation.plan.clone();
-                        save_accepted(&file, &mut records, &id)?;
+                        save_accepted(&store, &mut records, &id)?;
                         plan
                     };
                     let progress_records = records.clone();
-                    let progress_file = file.clone();
+                    let progress_store = store.clone();
                     let progress_id = id.clone();
                     CHECKPOINT.with(|callback| {
                         *callback.borrow_mut() = Some(Box::new(move |stage| {
@@ -158,7 +142,7 @@ impl Service {
                             let operation =
                                 records.get_mut(&progress_id).context("操作记录不存在")?;
                             operation.stages.push(stage.into());
-                            save_accepted(&progress_file, &mut records, &progress_id)
+                            save_accepted(&progress_store, &mut records, &progress_id)
                         }))
                     });
                     let (output, result) = super::output::capture(|| {
@@ -184,7 +168,7 @@ impl Service {
                         .into();
                         operation.error = result.err().map(|e| format!("{e:#}"));
                     }
-                    save_accepted(&file, &mut records, &id)
+                    save_accepted(&store, &mut records, &id)
                 };
                 if let Err(error) = run() {
                     super::log::error(&format!("操作 {id} 记录失败，需核对：{error:#}"));
@@ -371,7 +355,7 @@ impl Service {
                         error: None,
                     },
                 );
-                if let Err(error) = save(&self.file, &records) {
+                if let Err(error) = self.store.save(&records[&id]) {
                     records.remove(&id);
                     return Err(error).context("操作未接受：无法保存提交记录");
                 }
@@ -379,7 +363,7 @@ impl Service {
                     let record = records.get_mut(&id).unwrap();
                     record.status = "failed".into();
                     record.error = Some(format!("未执行：操作队列不可用：{error}"));
-                    save_accepted(&self.file, &mut records, &id)?;
+                    save_accepted(&self.store, &mut records, &id)?;
                 }
                 Ok(json!(id))
             }
@@ -405,7 +389,7 @@ impl Service {
                 let previous = record.clone();
                 record.status = "resolved".into();
                 record.error = Some("用户已核对资源并解除阻塞；此标记不表示原操作成功".into());
-                if let Err(error) = save(&self.file, &records) {
+                if let Err(error) = self.store.save(record) {
                     records.insert(id.into(), previous);
                     return Err(error);
                 }
@@ -444,6 +428,25 @@ pub(crate) fn fingerprint(registry: &Path, action: &Action) -> Result<Value> {
             _ => None,
         };
         let task_path = name.and_then(|name| state.get(name)).map(|task| &task.path);
+        let directory = task_path
+            .or_else(|| {
+                matches!(action, Action::Open { name, .. } if name == "main")
+                    .then_some(&config.main)
+            })
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| {
+                use std::os::unix::fs::MetadataExt;
+                (metadata.dev(), metadata.ino())
+            });
+        let window = name
+            .map(|name| crate::tmux::window(&config, &project, name).context("无法确认归属"))
+            .transpose()?;
+        if matches!(action, Action::Open { .. }) {
+            // 打开只固定目标身份；启动程序写文件或 Git 提交不改变资源归属。
+            // 执行时仍在项目锁内实时核对 Worktree 分支和路径归属。
+            return Ok(json!({"path":path,"common":project.common,"config":config,
+                "task":name.and_then(|name| state.get(name)),"directory":directory,"window":window}));
+        }
         let files = task_path
             .filter(|path| path.is_dir())
             .map(|path| {
@@ -457,15 +460,6 @@ pub(crate) fn fingerprint(registry: &Path, action: &Action) -> Result<Value> {
                     ],
                 )
             })
-            .transpose()?;
-        let directory = task_path
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.dev(), metadata.ino())
-            });
-        let window = name
-            .map(|name| crate::tmux::window(&config, &project, name).context("无法确认归属"))
             .transpose()?;
         let refs = crate::git::git(&config.main, &["show-ref"])?;
         let worktrees = crate::git::git(&config.main, &["worktree", "list", "--porcelain"])?;
@@ -575,6 +569,7 @@ pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     fn finished(service: &Service, id: &str) -> Operation {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -620,7 +615,8 @@ mod tests {
         )
         .unwrap();
         let params = json!({"plan":plan.id,"request":"stable-request","confirmed":true});
-        fs::create_dir(&service.file).unwrap();
+        fs::remove_dir(&service.store.directory).unwrap();
+        fs::write(&service.store.directory, "blocked").unwrap();
         assert!(service.handle("operation.submit", params.clone()).is_err());
         assert!(
             service
@@ -628,7 +624,8 @@ mod tests {
                 .is_err()
         );
         assert!(service.records.lock().unwrap().is_empty());
-        fs::remove_dir(&service.file).unwrap();
+        fs::remove_file(&service.store.directory).unwrap();
+        super::super::private_directory(&service.store.directory).unwrap();
         let id = service.handle("operation.submit", params.clone()).unwrap();
         assert_eq!(id, service.handle("operation.submit", params).unwrap());
         assert!(
@@ -640,9 +637,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(finished(&service, id.as_str().unwrap()).status, "succeeded");
-        let saved: BTreeMap<String, Operation> =
-            serde_json::from_slice(&fs::read(temp.path().join("operations.json")).unwrap())
-                .unwrap();
+        let (_, saved) = Store::open(temp.path()).unwrap();
         assert_eq!(saved.len(), 1);
         drop(service);
         worker.join().unwrap();
@@ -677,9 +672,9 @@ mod tests {
             output: Output::default(),
             error: None,
         };
-        save(
-            &temp.path().join("operations.json"),
-            &BTreeMap::from([("operation".into(), record)]),
+        fs::write(
+            temp.path().join("operations.json"),
+            serde_json::to_vec(&BTreeMap::from([("operation".to_owned(), record)])).unwrap(),
         )
         .unwrap();
         let (service, worker) = Service::start(&registry, temp.path()).unwrap();
@@ -692,9 +687,20 @@ mod tests {
                 )
                 .is_err()
         );
+        // 旧格式迁移后，原请求仍只返回原操作，不能再次执行。
+        assert_eq!(
+            service
+                .handle(
+                    "operation.submit",
+                    json!({"plan":"plan","request":"request"})
+                )
+                .unwrap(),
+            "operation"
+        );
+        assert_eq!(finished(&service, "request").status, "needs_inspection");
         // 解除标记保存失败时，不得在内存提前放开同目标操作。
-        fs::remove_file(&service.file).unwrap();
-        fs::create_dir(&service.file).unwrap();
+        fs::remove_file(service.store.path("operation").unwrap()).unwrap();
+        fs::create_dir(service.store.path("operation").unwrap()).unwrap();
         assert!(
             service
                 .handle(
@@ -704,7 +710,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(finished(&service, "operation").status, "needs_inspection");
-        fs::remove_dir(&service.file).unwrap();
+        fs::remove_dir(service.store.path("operation").unwrap()).unwrap();
         service
             .handle(
                 "operation.resolve",
@@ -744,16 +750,19 @@ mod tests {
             .lock()
             .unwrap()
             .insert(record.id.clone(), record);
-        save(&service.file, &service.records.lock().unwrap()).unwrap();
-        fs::remove_file(&service.file).unwrap();
-        fs::create_dir(&service.file).unwrap();
+        service
+            .store
+            .save(&service.records.lock().unwrap()["accepted"])
+            .unwrap();
+        fs::remove_file(service.store.path("accepted").unwrap()).unwrap();
+        fs::create_dir(service.store.path("accepted").unwrap()).unwrap();
         service.queue.send("accepted".into()).unwrap();
         assert_eq!(finished(&service, "accepted").status, "needs_inspection");
         // 进度与最终结果写入失败使用同一失败语义，不保留运行中或宣称成功。
         for status in ["running", "succeeded", "failed"] {
             let mut records = service.records.lock().unwrap();
             records.get_mut("accepted").unwrap().status = status.into();
-            assert!(save_accepted(&service.file, &mut records, "accepted").is_err());
+            assert!(save_accepted(&service.store, &mut records, "accepted").is_err());
             assert_eq!(records["accepted"].status, "needs_inspection");
             assert!(
                 records["accepted"]
@@ -777,7 +786,7 @@ mod tests {
                 .to_string()
                 .contains("待核对")
         );
-        fs::remove_dir(&service.file).unwrap();
+        fs::remove_dir(service.store.path("accepted").unwrap()).unwrap();
         // 已排队的同目标操作也要在执行前检查，不能只拦截新提交。
         let mut queued = service.records.lock().unwrap()["accepted"].clone();
         queued.id = "queued-next".into();

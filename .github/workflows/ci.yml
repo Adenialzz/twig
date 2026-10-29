@@ -135,7 +135,11 @@ jobs:
       - name: 构建工作台验收入口
         run: cargo build --locked --example control_mode
       - name: 终端 PTY 验收
-        run: uv run examples/check_control_mode.py
+        run: |
+          for attempt in {1..10}; do
+            echo "终端验收第 $attempt 次"
+            uv run examples/check_control_mode.py
+          done
 
   agent:
     name: agent (${{ matrix.os }})
