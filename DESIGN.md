@@ -942,3 +942,11 @@ Console 新建表单默认勾选「更新远端 base」，Tab/Shift+Tab 在三�
 命令和文件修改使用紧凑操作行，区分执行中/完成/失败/拒绝。命令默认预览两个终端行，输出预览三个终端行；失败显示末尾输出及可用退出码，取消重复错误条目。文件修改默认显示前三个路径、类型和总数；F4 展开全部。限制按实际列宽计算，省略提示可见。
 
 验证：cargo fmt --check、cargo clippy --locked --all-targets -- -D warnings、cargo test --locked 通过，共 183 项 Rust 测试。包括移植的上游表格/折行用例，以及中文窄屏、Markdown 样式、代码高亮、未闭合围栏、工具失败尾部和文件摘要测试。正式 debug binary 与 Control Mode example 已构建；独立 Codex 0.164.0 服务、模拟模型/飞书及 tmux socket 下 check_agent.py、check_control_mode.py 全部通过。终端有限输出响应单样本为 0.226 秒，不代表吞吐保证。未安装、提交或推送；用户可用本 Worktree 的 target/debug/twig chat 体验首版。
+
+## 2026-10-29：定位 macOS 终端验收间歇失败与清理挂起
+
+PR #29 的 macOS terminal job 在“重连、保存与历史复制”后挂至 20 分钟超时。加入等待日志、60 秒 faulthandler 堆栈硬超时并顺序重复验收后，定位到两类原始失败：Shell 测试循环收到 Ctrl-C 后仍继续运行，以及分屏局部重绘中文后 pyte 0.8.2 的 display 访问空占位格抛 IndexError。原来的失败清理 kill 后直接 wait，不读取 PTY，进一步掩盖原始错误；改为有界轮询并持续读取输出后，第 9 次验收直接暴露了 pyte 堆栈，不再挂住。
+
+验收负载显式 trap SIGINT 并退出，提示符判断允许 `^CLOAD_READY>` 同行回显，保留自然结束检查和两秒响应限制。测试 Screen 只在文本读取时将孤立宽字符占位格视为空格，保留原屏幕状态和属性；最小 ANSI 回归覆盖逐字节 UTF-8、组合字符、中文局部覆盖、反显与清行。清理使用 finally 确保尝试关闭独立 tmux；固定验收还覆盖未 detach 的活跃前端。产品工作台代码未修改，CI 双平台顺序运行 10 次且遇错立即失败。
+
+本地完整 Rust 检查通过；修复前用 `中文\rA` 可稳定复现 pyte IndexError，额外故障注入验证活跃前端被清理且原始异常保留。双平台连续验收结果以 PR 最新 CI 为准。

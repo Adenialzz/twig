@@ -20,6 +20,39 @@ import termios
 import time
 
 import pyte
+from wcwidth import wcwidth
+
+
+class Screen(pyte.Screen):
+    @property
+    def display(self):
+        # pyte 0.8.2 的 display 对局部重绘留下的宽字符空占位格取 data[0]，
+        # 会抛 IndexError。仅在读取文本时把孤立占位格显示为空格，不改屏幕状态。
+        lines = []
+        for y in range(self.lines):
+            cells = []
+            x = 0
+            while x < self.columns:
+                data = self.buffer[y][x].data or " "
+                cells.append(data)
+                x += 2 if wcwidth(data[0]) == 2 else 1
+            lines.append("".join(cells))
+        return lines
+
+
+def check_screen():
+    screen = Screen(8, 1)
+    stream = pyte.ByteStream(screen)
+    # 按字节分片也必须支持完整中文、组合字符及局部覆盖的中间帧。
+    for byte in "中文e\u0301".encode():
+        stream.feed(bytes([byte]))
+    assert screen.display == ["中文é   "]
+    stream.feed(b"\r\x1b[7mA")
+    assert screen.display == ["A 文é   "]
+    assert screen.buffer[0][0].reverse
+    assert screen.buffer[0][1].data == ""
+    stream.feed(b"\x1b[0m\x1b[2K")
+    assert screen.display == [" " * 8]
 
 
 class Frontend:
@@ -32,7 +65,7 @@ class Frontend:
         self.before = termios.tcgetattr(self.master)
         # PENDIN 是内核重排待输入的瞬时标志，不属于需要还原的 raw 模式配置。
         self.before[3] &= ~termios.PENDIN
-        self.screen = pyte.Screen(100, 30)
+        self.screen = Screen(100, 30)
         self.stream = pyte.ByteStream(self.screen)
         self.output = bytearray()
 
@@ -115,6 +148,7 @@ class Frontend:
 
 
 def main():
+    check_screen()
     binary = Path(__file__).resolve().parents[1] / "target/debug/examples/control_mode"
     with tempfile.TemporaryDirectory(prefix="twig-vim-pty-") as root:
         socket = root + "/tmux.sock"
@@ -295,6 +329,11 @@ def main():
             fourth.cursor(6)
             fourth.detach()
             print("通过：Zsh vi 模式光标切换、跨 Pane 样式同步、重连恢复与退出重置")
+            print("阶段：清理仍在运行的前端", flush=True)
+            unfinished = Frontend(binary, socket)
+            clients.append(unfinished)
+            unfinished.wait("ZSH_READY>")
+            # 故意不 detach，覆盖断言失败时仍有活跃前端的清理路径。
         finally:
             try:
                 for client in clients:
@@ -305,6 +344,8 @@ def main():
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     timeout=5,
                 )
+        assert all(client.process.poll() is not None for client in clients)
+        print("通过：所有前端均已退出，隔离 tmux 已清理", flush=True)
 
 
 if __name__ == "__main__":
