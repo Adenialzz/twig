@@ -7,8 +7,33 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Wrap},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeState {
+    Busy,
+    Waiting,
+    Idle,
+    Done,
+    Failed,
+    Stopped,
+}
+
+impl ClaudeState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Busy => "运行中",
+            Self::Waiting => "等待处理",
+            Self::Idle => "空闲",
+            Self::Done => "最近一轮结束",
+            Self::Failed => "失败",
+            Self::Stopped => "已停止",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionNotice {
+    pub claude: Option<ClaudeState>,
     pub message: bool,
     pub project: String,
     pub task: String,
@@ -28,9 +53,14 @@ pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
             .filter(|c| !c.is_control())
             .collect::<String>()
     };
+    let title = notice
+        .claude
+        .map(|state| format!(" Claude 状态变化 · {} ", state.label()));
     draw_card(
         frame,
-        if notice.message {
+        if let Some(title) = &title {
+            title
+        } else if notice.message {
             " Agent 收到新消息 "
         } else {
             " ✓ Codex 本轮已完成 "
@@ -100,6 +130,7 @@ mod tests {
                     draw(
                         frame,
                         &CompletionNotice {
+                            claude: None,
                             message: false,
                             project: "demo".into(),
                             task: "notify".into(),
@@ -277,6 +308,7 @@ mod picker_tests {
     fn task(name: &str) -> UnreadTask {
         UnreadTask {
             notice: CompletionNotice {
+                claude: None,
                 message: false,
                 project: "demo".into(),
                 task: name.into(),

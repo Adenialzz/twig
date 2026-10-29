@@ -42,6 +42,8 @@ impl Deliveries {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Completion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<twig_cli::notification::ClaudeState>,
     pub message: bool,
     pub project: String,
     pub path: PathBuf,
@@ -88,6 +90,7 @@ impl Notifications {
         }
         self.sequence += 1;
         let notice = CompletionNotice {
+            claude: event.claude,
             message: event.message,
             project: event.project.clone(),
             task: event.task,
@@ -164,6 +167,7 @@ mod tests {
         for (project, task) in [("a", "one"), ("a", "two"), ("b", "one")] {
             notices.receive(
                 Completion {
+                    claude: None,
                     message: false,
                     project: project.into(),
                     path: format!("/{project}/{task}").into(),
@@ -199,6 +203,7 @@ mod tests {
         for (project, task) in [("a", "one"), ("b", "two"), ("a", "one")] {
             notices.receive(
                 Completion {
+                    claude: None,
                     message: false,
                     project: project.into(),
                     path: format!("/{project}/{task}").into(),
@@ -228,6 +233,7 @@ mod tests {
                 notices.receive(
                     Completion {
                         message,
+                        claude: None,
                         project: "demo".into(),
                         task: "work".into(),
                         path: "/work".into(),
@@ -253,6 +259,7 @@ mod tests {
         for task in ["one", "two"] {
             notices.receive(
                 Completion {
+                    claude: None,
                     message: false,
                     project: "demo".into(),
                     path: format!("/{task}").into(),
@@ -290,6 +297,7 @@ mod visibility_tests {
             let mut notices = Notifications::default();
             notices.receive(
                 Completion {
+                    claude: None,
                     message: false,
                     project: "demo".into(),
                     path: "/task".into(),
@@ -499,6 +507,7 @@ mod delivery_tests {
             if let (Some(project), Some(task)) = (&binding.project, &binding.task) {
                 tasks.receive(
                     Completion {
+                        claude: None,
                         message: true,
                         project: project.clone(),
                         task: task.clone(),
@@ -518,6 +527,7 @@ mod delivery_tests {
         tasks.read("demo", Path::new("/work"));
         tasks.receive(
             Completion {
+                claude: None,
                 message: true,
                 project: "demo".into(),
                 task: "work".into(),

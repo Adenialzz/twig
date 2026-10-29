@@ -501,6 +501,12 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
                         .or_insert((0, status_style(thread, stale)));
                     entry.0 += 1;
                 }
+                for session in claude_sessions(&app.snapshot, &repo.name, None) {
+                    let entry = counts
+                        .entry(format!("Claude {}", session.label()))
+                        .or_insert((0, claude_style(session, &app.snapshot)));
+                    entry.0 += 1;
+                }
                 for (index, (label, (count, style))) in counts.into_iter().enumerate() {
                     if index > 0 {
                         spans.push(Span::raw(" · "));
@@ -581,13 +587,19 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or_default()
         })
         .collect();
-    // 当前项目没有关联会话时隐藏 Codex 列，普通任务不显示占位符。
-    let codex = sessions.iter().any(|s| !s.is_empty());
+    // 当前项目没有关联会话时隐藏 Agent 列，普通任务不显示占位符。
+    let codex = sessions.iter().any(|s| !s.is_empty())
+        || !claude_sessions(
+            &app.snapshot,
+            app.project.as_deref().unwrap_or_default(),
+            None,
+        )
+        .is_empty();
     let compact = area.width < if codex { 80 } else { 50 };
     let (headers, widths): (Vec<_>, Vec<_>) = match (compact, codex) {
-        (true, true) => (vec!["任务", "Git / 窗口", "Codex"], vec![40, 32, 28]),
+        (true, true) => (vec!["任务", "Git / 窗口", "Agent"], vec![40, 32, 28]),
         (true, false) => (vec!["任务", "Git / 窗口"], vec![55, 45]),
-        (false, true) => (vec!["任务", "Git", "窗口", "Codex"], vec![34, 28, 12, 26]),
+        (false, true) => (vec!["任务", "Git", "窗口", "Agent"], vec![34, 28, 12, 26]),
         (false, false) => (vec!["任务", "Git", "窗口"], vec![45, 40, 15]),
     };
     let widths: Vec<_> = widths.into_iter().map(Constraint::Percentage).collect();
@@ -630,8 +642,18 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             let mut counts = std::collections::BTreeMap::new();
             for thread in sessions {
                 let entry = counts
-                    .entry(thread.label())
+                    .entry(format!("Codex {}", thread.label()))
                     .or_insert((0, status_style(thread, stale)));
+                entry.0 += 1;
+            }
+            for session in claude_sessions(
+                &app.snapshot,
+                app.project.as_deref().unwrap_or_default(),
+                Some(&task.path),
+            ) {
+                let entry = counts
+                    .entry(format!("Claude {}", session.label()))
+                    .or_insert((0, claude_style(session, &app.snapshot)));
                 entry.0 += 1;
             }
             let mut spans = Vec::new();
@@ -690,10 +712,14 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 fn status_style(thread: &crate::codex::Thread, stale: bool) -> Style {
+    priority_style(thread.priority(), stale)
+}
+
+fn priority_style(priority: u8, stale: bool) -> Style {
     Style::default().fg(if stale {
         Color::DarkGray
     } else {
-        match thread.priority() {
+        match priority {
             0 => Color::Yellow,
             1 => Color::Red,
             2 => Color::Cyan,
@@ -702,19 +728,105 @@ fn status_style(thread: &crate::codex::Thread, stale: bool) -> Style {
     })
 }
 
+fn claude_sessions<'a>(
+    snapshot: &'a data::Snapshot,
+    project: &str,
+    path: Option<&std::path::Path>,
+) -> Vec<&'a crate::claude::Session> {
+    let mut sessions: Vec<_> = snapshot
+        .claude
+        .iter()
+        .filter(|session| {
+            session
+                .key()
+                .and_then(|key| snapshot.claude_associations.get(&key))
+                .is_some_and(|(owner, task)| {
+                    owner == project && path.is_none_or(|path| path == task)
+                })
+        })
+        .collect();
+    sessions.sort_by(|a, b| {
+        a.priority()
+            .cmp(&b.priority())
+            .then(a.session_id.cmp(&b.session_id))
+    });
+    sessions
+}
+
+fn claude_style(session: &crate::claude::Session, snapshot: &data::Snapshot) -> Style {
+    priority_style(
+        session.priority(),
+        snapshot.claude_error.is_some() || is_stale(snapshot.claude_checked),
+    )
+}
+
+enum ObservedSession<'a> {
+    Codex(&'a crate::codex::Thread),
+    Claude(&'a crate::claude::Session),
+}
+impl ObservedSession<'_> {
+    fn id(&self) -> &str {
+        match self {
+            Self::Codex(thread) => &thread.id,
+            Self::Claude(session) => session
+                .session_id
+                .as_deref()
+                .or(session.id.as_deref())
+                .unwrap_or(""),
+        }
+    }
+    fn title(&self) -> &str {
+        match self {
+            Self::Codex(t) => t.title(),
+            Self::Claude(s) => s.title(),
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            Self::Codex(t) => format!("Codex {}", t.label()),
+            Self::Claude(s) => format!("Claude {}", s.label()),
+        }
+    }
+    fn priority(&self) -> u8 {
+        match self {
+            Self::Codex(t) => t.priority(),
+            Self::Claude(s) => s.priority(),
+        }
+    }
+    fn stale(&self, snapshot: &data::Snapshot) -> bool {
+        match self {
+            Self::Codex(_) => snapshot.codex_error.is_some() || is_stale(snapshot.codex_checked),
+            Self::Claude(_) => snapshot.claude_error.is_some() || is_stale(snapshot.claude_checked),
+        }
+    }
+}
+
 // 只读取全局快照；不使用项目选择、搜索、历史分页或焦点状态。
 // 返回带会话标记的行和会话总数，布局据此收缩空监控。
 fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
     let snapshot = &app.snapshot;
-    let stale = snapshot.codex_error.is_some() || is_stale(snapshot.codex_checked);
     let mut grouped = std::collections::BTreeMap::<_, Vec<_>>::new();
     for thread in &snapshot.threads {
         if let Some(owner) = snapshot.associations.get(&thread.id) {
-            grouped.entry(owner).or_default().push(thread);
+            grouped
+                .entry(owner)
+                .or_default()
+                .push(ObservedSession::Codex(thread));
+        }
+    }
+    for session in &snapshot.claude {
+        if let Some(owner) = session
+            .key()
+            .and_then(|key| snapshot.claude_associations.get(&key))
+        {
+            grouped
+                .entry(owner)
+                .or_default()
+                .push(ObservedSession::Claude(session));
         }
     }
     for threads in grouped.values_mut() {
-        threads.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
+        threads.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id().cmp(b.id())));
     }
     let mut projects: Vec<_> = snapshot
         .repos
@@ -780,7 +892,15 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                     .filter(|other| safe(other.title()) == title)
                     .count()
                     > 1;
-                let label = format!("● {}", safe(&thread.label()));
+                let label = format!(
+                    "● {}{}",
+                    safe(&thread.label()),
+                    if thread.stale(snapshot) {
+                        "（过期）"
+                    } else {
+                        ""
+                    }
+                );
                 let padding = 12_usize
                     .saturating_sub(Line::from(label.as_str()).width())
                     .max(2);
@@ -799,7 +919,7 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                     ),
                     Span::styled(
                         format!("{label}{}", " ".repeat(padding)),
-                        status_style(thread, stale),
+                        priority_style(thread.priority(), thread.stale(snapshot)),
                     ),
                     Span::raw(if title.is_empty() {
                         "未命名会话".into()
@@ -811,7 +931,7 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                     spans.push(Span::styled(
                         format!(
                             " · {}",
-                            safe(&thread.id).chars().take(8).collect::<String>()
+                            safe(thread.id()).chars().take(8).collect::<String>()
                         ),
                         Style::default().fg(Color::DarkGray),
                     ));
@@ -828,9 +948,12 @@ fn monitor(frame: &mut Frame, area: Rect, app: &App) {
     let (mut rows, total) = monitor_rows(app);
     let panel = block(
         format!(
-            " 全局 Codex · {}{} ",
+            " 全局 Agent · {}{} ",
             total,
-            if codex_stale(app) {
+            if codex_stale(app)
+                || snapshot.claude_error.is_some()
+                || is_stale(snapshot.claude_checked)
+            {
                 " · 状态过期"
             } else {
                 ""
@@ -842,13 +965,23 @@ fn monitor(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(panel, area);
     if rows.is_empty() {
         frame.render_widget(
-            Paragraph::new(if snapshot.codex_error.is_some() {
-                "Codex 不可用，详见底部状态"
-            } else if snapshot.codex_checked.is_none() {
-                "正在读取全局会话…"
-            } else {
-                "暂无已加载的关联会话"
-            })
+            Paragraph::new(format!(
+                "{}\n{}",
+                if snapshot.codex_error.is_some() {
+                    "Codex 不可用，详见底部状态"
+                } else if snapshot.codex_checked.is_none() {
+                    "正在读取全局会话…"
+                } else {
+                    "暂无已加载的关联会话"
+                },
+                if snapshot.claude_error.is_some() {
+                    "Claude 不可用，详见任务详情"
+                } else if snapshot.claude_checked.is_none() {
+                    "正在读取 Claude 状态…"
+                } else {
+                    "Claude 暂无关联会话"
+                }
+            ))
             .style(Style::default().fg(Color::DarkGray))
             .wrap(Wrap { trim: false }),
             inner,
@@ -942,6 +1075,16 @@ fn detail_header(app: &App) -> Vec<Line<'static>> {
 
 fn sessions(frame: &mut Frame, area: Rect, app: &App) {
     let sessions = app.threads();
+    let claude = app
+        .task()
+        .map(|task| {
+            claude_sessions(
+                &app.snapshot,
+                app.project.as_deref().unwrap_or_default(),
+                Some(&task.path),
+            )
+        })
+        .unwrap_or_default();
     let panel = block(
         format!(
             " 任务详情 · i {}信息 · PgUp/PgDn ",
@@ -971,14 +1114,15 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
     .split(inner);
     frame.render_widget(
         Paragraph::new(format!(
-            "Codex {}{} · {} 个会话",
+            "Codex {}{} · {} 个会话 / Claude {}",
             if app.history { "历史" } else { "已加载" },
             if app.history && app.descendants {
                 "+子目录"
             } else {
                 ""
             },
-            sessions.len()
+            sessions.len(),
+            claude.len()
         ))
         .style(Style::default().fg(Color::DarkGray)),
         portions[0],
@@ -1004,6 +1148,36 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
     let mut lines = Vec::new();
+    if let Some(error) = &app.snapshot.claude_error {
+        lines.push(Line::styled(
+            format!("Claude 不可用 / 旧状态过期：{}", safe(error)),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    for session in claude {
+        let stale = app.snapshot.claude_error.is_some() || is_stale(app.snapshot.claude_checked);
+        lines.push(Line::styled(
+            format!(
+                "Claude · {} · {}{}",
+                safe(session.title()),
+                safe(&session.label()),
+                if stale { "（状态过期）" } else { "" }
+            ),
+            claude_style(session, &app.snapshot),
+        ));
+        if app.metadata {
+            lines.push(field(
+                "ID",
+                session
+                    .session_id
+                    .as_deref()
+                    .or(session.id.as_deref())
+                    .unwrap_or("未知"),
+            ));
+            lines.push(field("类型", &session.kind));
+            lines.push(field("目录", &session.cwd.display().to_string()));
+        }
+    }
     if let Some(thread) = selected.map(|index| sessions[index]) {
         let stale = app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked);
         lines.push(Line::from(vec![
@@ -1660,7 +1834,7 @@ mod tests {
                 selection.update(width - 1, height - 1);
                 let copied = selection.text();
                 assert!(!copied.is_empty());
-                for background in ["Console", "全局 Codex", "│", "┌", "┘"] {
+                for background in ["Console", "全局 Agent", "│", "┌", "┘"] {
                     assert!(!copied.contains(background), "{copied}");
                 }
             }
@@ -1889,6 +2063,51 @@ mod tests {
     }
 
     #[test]
+    fn claude_monitor_and_details_keep_multiple_sessions_and_provider_freshness() {
+        let mut app = fixture();
+        app.snapshot.claude_checked = Some(Instant::now());
+        for (id, status) in [("claude-one", "busy"), ("claude-two", "waiting")] {
+            let session: crate::claude::Session = serde_json::from_value(json!({
+                "cwd":"/alpha", "kind":"interactive", "startedAt":1,
+                "sessionId":id, "name":id, "status":status,
+                "waitingFor":"permission prompt"
+            }))
+            .unwrap();
+            app.snapshot
+                .claude_associations
+                .insert(session.key().unwrap(), ("alpha".into(), "/alpha".into()));
+            app.snapshot.claude.push(session);
+        }
+        let before = render(&app, 100, 20, monitor);
+        let output = text(&before);
+        assert!(output.contains("claude-one") && output.contains("claude-two"));
+        assert!(output.contains("Claude 等待处理"));
+        app.history = true;
+        app.filters = ["absent".into(), "absent".into(), "absent".into()];
+        assert_eq!(before, render(&app, 100, 20, monitor));
+        app.filters = Default::default();
+        app.history = false;
+        app.project = Some("alpha".into());
+        app.task = Some("/alpha".into());
+        let detail = text(&render(&app, 100, 30, sessions));
+        assert!(detail.contains("claude-one") && detail.contains("claude-two"));
+        app.snapshot.claude_error = Some("mock unavailable".into());
+        let output = text(&render(&app, 100, 20, monitor));
+        assert!(
+            output
+                .lines()
+                .any(|line| line.contains("Claude") && line.contains("过期"))
+        );
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.contains("● Codex") && line.contains("过期"))
+        );
+        assert!(text(&render(&app, 100, 30, sessions)).contains("mock unavailable"));
+        assert!(text(&render(&app, 55, 5, monitor)).contains("另有"));
+    }
+
+    #[test]
     fn monitor_marks_overflow_staleness_and_unavailable_service() {
         let mut app = fixture();
         let output = text(&render(&app, 55, 6, monitor));
@@ -2025,7 +2244,7 @@ mod tests {
                     super::draw(frame, app)
                 }));
                 assert!(
-                    output.contains("全局 Codex"),
+                    output.contains("全局 Agent"),
                     "{width}x{height}, focus {focus}"
                 );
             }

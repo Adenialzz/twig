@@ -3,7 +3,7 @@ pub(crate) mod data;
 pub(crate) mod form;
 mod hyperlink;
 pub(crate) mod inbox;
-mod notifications;
+pub(crate) mod notifications;
 pub(crate) mod query;
 pub(crate) mod selection;
 mod ui;
