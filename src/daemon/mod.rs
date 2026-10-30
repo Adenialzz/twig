@@ -1,4 +1,5 @@
 //! Twig 本机后台：单例、受限 Unix socket 与有界同步请求处理。
+mod details;
 mod feishu;
 mod log;
 pub mod operations;
@@ -33,7 +34,7 @@ use std::{
 };
 
 pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 // 生命周期协议独立于业务视图，更新客户端后仍能有序停止旧后台。
 const CONTROL_VERSION: u32 = 1;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;
@@ -561,6 +562,7 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
     let instance = restart_id.unwrap_or_else(crate::agent::message_id);
     let restart_plan = Mutex::new(None::<RestartPlan>);
     let (tx, rx) = mpsc::sync_channel::<UnixStream>(32);
+    let details = details::Details::start(stopping.clone());
     let input = Arc::new(Mutex::new(rx));
     let result = thread::scope(|scope| -> Result<()> {
         for _ in 0..4 {
@@ -574,6 +576,7 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
             let chat = &chat;
             let agent_error = &agent_error;
             let feishu = &feishu.health;
+            let details = &details;
             scope.spawn(move || {
                 crate::console::query::install(stopping.clone());
                 loop {
@@ -607,8 +610,9 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
                                 },
                                 method if method.starts_with("form.") => queries::handle(&paths.registry,method,request.params),
                                 "details" => {
-                                    let snapshot=state.lock().unwrap().snapshot();
-                                    Ok(serde_json::to_value(queries::details(snapshot,serde_json::from_value(request.params)?)?)?)
+                                    let client = request.params["client"].as_str().context("缺少历史查询客户端 ID")?.to_owned();
+                                    let query = serde_json::from_value(request.params["request"].clone())?;
+                                    Ok(serde_json::to_value(details.poll(client, query, || state.lock().unwrap().snapshot())?)?)
                                 },
                                 "query.execute" => {
                                     let action:crate::Action=serde_json::from_value(request.params)?;
@@ -625,7 +629,7 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
                                         thread::sleep(Duration::from_millis(20));
                                     }
                                 },
-                                method @ ("inbox"|"viewing"|"disconnect"|"record_use") => state.lock().unwrap().handle(method,request.params),
+                                method @ ("inbox"|"viewing"|"disconnect") => state.lock().unwrap().handle(method,request.params),
                                 method if method.starts_with("operation.") => operations.handle(method, request.params),
                                 _ => bail!("未知后台方法：{}", request.method),
                             }
@@ -664,6 +668,8 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
         drop(tx);
         Ok(())
     });
+    stopping.store(true, Ordering::Relaxed);
+    drop(details);
     agent_stop.store(true, Ordering::Relaxed);
     agent_worker
         .join()

@@ -43,6 +43,35 @@ mod tests {
     }
 
     #[test]
+    fn offline_read_receipts_persist_and_preserve_unobserved_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        let disk = Inbox::new(&config).unwrap();
+        disk.record(event("old", true), false).unwrap();
+        disk.record(event("controller", false), false).unwrap();
+        let remote = Inbox::remote(&config, "client".into()).unwrap();
+        remote.load().unwrap();
+        disk.record(event("new", true), false).unwrap();
+        remote.read_task("demo", Path::new("/work")).unwrap();
+        drop(remote);
+        let restored = Inbox::remote(&config, "new-client".into()).unwrap();
+        let ids: HashSet<_> = restored
+            .load()
+            .unwrap()
+            .unread
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, HashSet::from(["new".into(), "controller".into()]));
+        restored.read_controller().unwrap();
+        assert_eq!(disk.load().unwrap().unread[0].id, "new");
+        fs::write(&disk.path, b"broken").unwrap();
+        assert!(Inbox::remote(&config, "broken-client".into()).is_err());
+        assert!(restored.read_task("demo", Path::new("/work")).is_err());
+        assert_eq!(fs::read(&disk.path).unwrap(), b"broken");
+    }
+
+    #[test]
     fn stable_remote_view_is_local_and_only_acknowledges_observed_events() {
         let temp = tempfile::tempdir().unwrap();
         let inbox = Inbox::remote(&temp.path().join("config.toml"), "client".into()).unwrap();
@@ -284,7 +313,7 @@ impl Inbox {
 
     pub fn remote(registry: &Path, client: String) -> Result<Self> {
         let mut inbox = Self::new(registry)?;
-        let initial = inbox.load().unwrap_or_default();
+        let initial = inbox.load()?;
         inbox.remote = Some(Remote {
             registry: registry.to_owned(),
             client,
@@ -356,6 +385,13 @@ impl Inbox {
                 })
                 .map(|event| event.id.clone())
                 .collect();
+            // 使用本地文件重新读取并按事件 ID 合并；保存成功才清除内存，
+            // 避免离线退出丢失已读，也不会清掉其他客户端尚未看见的新事件。
+            Self {
+                path: self.path.clone(),
+                remote: None,
+            }
+            .discard(&read)?;
             cache.state.unread.retain(|event| !read.contains(&event.id));
             cache.read.extend(read);
             cache.target = target;

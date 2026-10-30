@@ -186,22 +186,6 @@ impl State {
                 presence().lock().unwrap().remove(id);
                 Ok(Value::Null)
             }
-            "record_use" => {
-                let (project, task): (String, String) = serde_json::from_value(value)?;
-                let entry = crate::registry::entry(&self.registry, &project)?;
-                let repository = crate::config::Project::discover_at(
-                    &crate::registry::expand(&entry.path)?,
-                    &self.registry,
-                )?;
-                let config = repository.config()?;
-                ensure!(
-                    crate::tmux::window(&config, &repository, &task)?.is_some(),
-                    "窗口已失效"
-                );
-                crate::registry::record_use(&self.registry, &project, &task)?;
-                self.refresh += 1;
-                Ok(Value::Null)
-            }
             _ => anyhow::bail!("未知状态请求"),
         }
     }
