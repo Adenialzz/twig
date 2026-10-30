@@ -1767,3 +1767,78 @@ fn managed_task_lifecycle_requires_daemon_before_changing_resources() {
         );
     }
 }
+
+#[test]
+fn crashed_backend_record_can_be_inspected_and_resolved_offline() {
+    use std::os::fd::AsRawFd;
+    let f = Fixture::new();
+    f.ok(&["new", "local", "recorded", "--no-fetch", "--no-open"]);
+    let records: serde_json::Value = serde_json::from_str(&f.ok(&["operation", "ls"])).unwrap();
+    let mut record = records
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|record| record["plan"]["action"]["New"]["name"] == "recorded")
+        .unwrap()
+        .clone();
+    support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
+    support::daemon::stop_under(f._temp.path());
+    let root = fs::read_dir(f.registry_path().parent().unwrap().join("daemon"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    record["id"] = "orphan-agent".into();
+    record["request"] = "orphan-request".into();
+    record["status"] = "running".into();
+    record["plan"]["action"]["New"]["agent"] = true.into();
+    let path = root.join("operations/orphan-agent.json");
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("instance.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    f.fail(
+        &["operation", "resolve", "orphan-agent", "--yes"],
+        "后台不可用",
+    );
+    let untouched: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        untouched["status"], "running",
+        "持锁实例存在时不能回退到离线修改"
+    );
+    drop(lock);
+    let shown: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", "orphan-agent"])).unwrap();
+    assert_eq!(shown["status"], "needs_inspection");
+    f.fail(
+        &["new", "local", "blocked", "--no-fetch", "--no-open"],
+        "待核对",
+    );
+    f.ok(&["operation", "resolve", "orphan-agent", "--yes"]);
+    f.ok(&["new", "local", "allowed", "--no-fetch", "--no-open"]);
+    assert!(f.root.join("recorded").is_dir());
+}
+
+#[test]
+fn removal_failure_keeps_captured_file_list_and_original_error() {
+    let f = Fixture::new();
+    fs::write(f.repo.join(".gitignore"), "protected-cache\n").unwrap();
+    f.git(&["add", ".gitignore"]);
+    f.git(&["commit", "-m", "ignore cache"]);
+    f.ok(&["new", "local", "unmerged", "--no-fetch", "--no-open"]);
+    let task = f.root.join("unmerged");
+    fs::write(task.join("protected-cache"), "preserve").unwrap();
+    fs::write(task.join("feature"), "unmerged work").unwrap();
+    f.git(&["-C", task.to_str().unwrap(), "add", "feature"]);
+    f.git(&["-C", task.to_str().unwrap(), "commit", "-m", "feature"]);
+    let result = f.run(&["rm", "local", "unmerged", "--yes", "--delete-ignored"]);
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("protected-cache"), "{error}");
+    assert!(error.contains("尚未合并"), "{error}");
+    assert!(task.join("protected-cache").is_file());
+}

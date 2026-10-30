@@ -54,14 +54,20 @@ fn pending(records: &Records, action: &Action) -> Result<()> {
         !records.values().any(|record| matches!(
             record.status.as_str(),
             "queued" | "running" | "needs_inspection"
-        ) && operations::resource(&record.plan.action)
-            == operations::resource(action)),
+        ) && operations::conflicts(&record.plan.action, action)),
         "同目标有结果待核对或正在执行的操作，请检查 twig operation ls"
     );
     Ok(())
 }
 pub fn check_pending(registry: &Path, action: &Action) -> Result<()> {
-    pending(&Store::read(&directory(registry)?)?, action)
+    let root = directory(registry)?;
+    if Store::read(&root)?.is_empty() {
+        return Ok(());
+    }
+    // 调用方持有执行锁，遗留本地 running 不可能仍在执行。
+    let (store, mut records) = Store::open(&root)?;
+    recover_saved(&store, &mut records)?;
+    pending(&records, action)
 }
 fn managed(registry: &Path, action: &Action) -> Result<bool> {
     match action {
@@ -84,7 +90,7 @@ fn managed(registry: &Path, action: &Action) -> Result<bool> {
     }
 }
 pub fn client(registry: &Path, action: Action) -> Result<()> {
-    let output = execute(registry, action)?;
+    let output = execute_with_progress(registry, action, true)?;
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
     if let Some((path, target)) = output.terminal {
@@ -92,16 +98,18 @@ pub fn client(registry: &Path, action: Action) -> Result<()> {
     }
     Ok(())
 }
-pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
+pub fn execute(registry: &Path, action: Action) -> Result<Output> {
+    execute_with_progress(registry, action, false)
+}
+fn execute_with_progress(registry: &Path, mut action: Action, cli: bool) -> Result<Output> {
     if managed(registry, &action)? {
-        return operations::execute_remote(registry, action);
+        return operations::execute_remote(registry, action, cli);
     }
     if matches!(action, Action::Ls { .. }) {
         let (output, result) = daemon::output::capture(|| {
             crate::execute_business(registry.to_owned(), action, &Value::Null)
         });
-        result?;
-        return Ok(output);
+        return daemon::output::checked(output, result);
     }
     if let Action::Add { path, root, .. } = &mut action {
         *path = registry::expand(path)?;
@@ -166,7 +174,9 @@ pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
         },
     );
     store.save(&records[&id])?;
-    eprintln!("操作 {id}");
+    if cli {
+        eprintln!("操作 {id}");
+    }
     let records = std::rc::Rc::new(std::cell::RefCell::new(records));
     let progress_records = records.clone();
     let progress_store = store.clone();
@@ -184,7 +194,7 @@ pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
         if result.is_err() {
             progress_failed.set(true);
         }
-        if std::env::var_os("TWIG_OPERATION_PROGRESS").is_some() {
+        if cli && std::env::var_os("TWIG_OPERATION_PROGRESS").is_some() {
             eprintln!("操作进度：{stage}（{progress_id}）");
         }
         result
@@ -209,8 +219,19 @@ pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
         .save(record)
         .with_context(|| format!("操作 {id} 结果保存失败，请核对资源，不要重跑"))?;
     daemon::REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    result.with_context(|| format!("操作 {id} 失败；twig operation show {id} 查看详情"))?;
+    result.with_context(|| {
+        format!(
+            "{}{}操作 {id} 失败；twig operation show {id} 查看详情",
+            output.stdout, output.stderr
+        )
+    })?;
     Ok(output)
+}
+fn recover_saved(store: &Store, records: &mut Records) -> Result<()> {
+    for id in recover(records) {
+        store.save(&records[&id])?;
+    }
+    Ok(())
 }
 fn recover(records: &mut Records) -> Vec<String> {
     let mut changed = Vec::new();
@@ -238,15 +259,23 @@ pub fn operation_cli(registry: &Path, command: Command) -> Result<()> {
             recover(&mut local);
         }
     }
+    let paths = daemon::Paths::new(registry)?;
+    let mut backend = Store::read(&paths.dir)?;
+    if !backend.is_empty()
+        && let Some(_offline) = daemon::offline_lock(&paths, false)?
+    {
+        backend = Store::read(&paths.dir)?;
+        recover(&mut backend);
+    }
     let result = match command {
         Command::Ls => {
-            let mut records = Store::read(&daemon::Paths::new(registry)?.dir)?;
+            let mut records = backend;
             records.extend(local);
             serde_json::to_value(records)?
         }
         Command::Show { id } if local.contains_key(&id) => serde_json::to_value(&local[&id])?,
         Command::Show { id } => {
-            let records = Store::read(&daemon::Paths::new(registry)?.dir)?;
+            let records = backend;
             serde_json::to_value(
                 records
                     .get(&id)
@@ -258,7 +287,7 @@ pub fn operation_cli(registry: &Path, command: Command) -> Result<()> {
             crate::confirm("已核对真实资源和遗留进程，并解除操作阻塞？", yes)?;
             let _lock = execution_lock(registry)?;
             let (store, mut records) = Store::open(&root)?;
-            recover(&mut records);
+            recover_saved(&store, &mut records)?;
             let record = records.get_mut(&id).context("操作不存在")?;
             ensure!(
                 record.status == "needs_inspection",
@@ -269,7 +298,28 @@ pub fn operation_cli(registry: &Path, command: Command) -> Result<()> {
             store.save(record)?;
             Value::Null
         }
-        command => return operations::remote_cli(registry, command),
+        Command::Resolve { id, yes } => {
+            let paths = daemon::Paths::new(registry)?;
+            let Some(_offline) = daemon::offline_lock(&paths, true)? else {
+                return operations::remote_cli(registry, Command::Resolve { id, yes });
+            };
+            crate::confirm(
+                "后台已退出；已核对真实资源和遗留进程，并解除操作阻塞？",
+                yes,
+            )?;
+            let _execution = execution_lock(registry)?;
+            let (store, mut records) = Store::open(&paths.dir)?;
+            recover_saved(&store, &mut records)?;
+            let record = records.get_mut(&id).context("操作不存在")?;
+            ensure!(
+                record.status == "needs_inspection",
+                "只有待核对操作可解除标记"
+            );
+            record.status = "resolved".into();
+            record.error = Some("用户已核对资源并解除阻塞；不表示原操作成功".into());
+            store.save(record)?;
+            Value::Null
+        }
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
@@ -287,4 +337,42 @@ pub fn record_use(registry: &Path, project: &str, task: &str) -> Result<()> {
         "窗口已失效"
     );
     registry::record_use(registry, project, task)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn backend_check_persists_recovery_of_interrupted_local_operations() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("config.toml");
+        let _lock = execution_lock(&registry).unwrap();
+        let root = directory(&registry).unwrap();
+        let (store, _) = Store::open(&root).unwrap();
+        let action = Action::Open {
+            project: "demo".into(),
+            name: "main".into(),
+        };
+        let record = Operation {
+            id: "local-test".into(),
+            request: "request".into(),
+            status: "running".into(),
+            plan: operations::Plan {
+                id: "plan".into(),
+                expires: operations::now() + 60,
+                action: action.clone(),
+                fingerprint: Value::Null,
+                branches: vec![],
+                common: None,
+                prompt: None,
+            },
+            stages: vec![],
+            output: Output::default(),
+            error: None,
+        };
+        store.save(&record).unwrap();
+        assert!(check_pending(&registry, &action).is_err());
+        let restored = Store::read(&root).unwrap();
+        assert_eq!(restored["local-test"].status, "needs_inspection");
+    }
 }

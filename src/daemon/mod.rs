@@ -124,6 +124,30 @@ struct Instance {
     _lock: File,
     socket: PathBuf,
 }
+// 持有此锁才允许离线修改后台记录；新后台也必须取得同一把锁。
+pub(crate) fn offline_lock(paths: &Paths, create: bool) -> Result<Option<File>> {
+    if !create && !paths.dir.join("instance.lock").try_exists()? {
+        return Ok(None);
+    }
+    ensure!(paths.dir.is_dir(), "未找到后台操作目录");
+    private_directory(&paths.dir)?;
+    let lock = OpenOptions::new()
+        .create(create)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(paths.dir.join("instance.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(lock));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(error.into())
+    }
+}
 impl Instance {
     fn acquire(paths: &Paths) -> Result<Self> {
         fs::create_dir_all(&paths.dir)?;
