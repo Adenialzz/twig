@@ -1831,6 +1831,25 @@ mod tests {
     }
 
     #[test]
+    fn long_backend_error_keeps_search_visible() {
+        let mut app = fixture();
+        app.snapshot.delivery_error = Some(format!(
+            "未读同步失败：Twig 后台不可用；请执行 twig --config /{}/registry.toml daemon start",
+            "long-directory/".repeat(20)
+        ));
+        app.searching = true;
+        app.search_input = "auth".into();
+        for width in [38, 80, 140] {
+            let screen = text(&render(&app, width, 24, |frame, _, app| {
+                super::draw(frame, app)
+            }));
+            let lines: Vec<_> = screen.lines().collect();
+            assert!(lines[22].starts_with("未读同步失败"));
+            assert!(lines[23].starts_with("搜索：/auth"), "{screen}");
+        }
+    }
+
+    #[test]
     fn global_monitor_is_independent_of_navigation_search_and_history() {
         let mut app = fixture();
         let before = render(&app, 55, 12, monitor);
