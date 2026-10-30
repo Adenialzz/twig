@@ -1047,6 +1047,7 @@ fn run_inner(
                             if drag.is_none() && pane.rect.contains((x, y).into()) {
                                 let count = clicks.next(&pane.id, x, y, Instant::now());
                                 let mut selected = Selection::new(pane, x, y);
+                                selected.capture_history(&mut client, pane.scroll_offset)?;
                                 selected.select_click(count);
                                 selection = Some(selected);
                             }
@@ -1085,6 +1086,19 @@ fn run_inner(
                         }
                     }
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                        if let Some(selected) = &mut selection
+                            && selected.dragging
+                        {
+                            if selected.rect.contains((x, y).into()) {
+                                selected.scroll(mouse.kind == MouseEventKind::ScrollUp, x, y);
+                                if let Some(pane) = panes.iter_mut().find(|p| p.id == selected.pane)
+                                {
+                                    pane.scroll_offset = selected.scroll_offset();
+                                    pending.insert(pane.id.clone());
+                                }
+                            }
+                            continue;
+                        }
                         selection = None;
                         if let Some(pane) = panes
                             .iter_mut()

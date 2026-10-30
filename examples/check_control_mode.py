@@ -239,6 +239,34 @@ def main():
             second.until(lambda: "已请求复制" not in "\n".join(second.screen.display), "连击复制提示自动消失")
             second.send(b"\x1b[<65;2;3M" * 12)
             second.wait("SCROLL_059")
+            # 按住左键跨屏滚动，往返滚动仍保留锚点，后台输出不进入冻结选区。
+            second.settle()
+            row = next(y for y, line in enumerate(second.screen.display) if "SCROLL_059" in line)
+            col = second.screen.display[row].index("SCROLL_059")
+            second.output.clear()
+            second.send(f"\x1b[<0;{col+10};{row+1}M".encode())
+            second.settle()
+            mux("send-keys", "printf 'DURING_SELECTION\\n'", "Enter")
+            wheel_up = f"\x1b[<64;{col+1};{row+1}M".encode()
+            wheel_down = f"\x1b[<65;{col+1};{row+1}M".encode()
+            second.send(wheel_up * 12)
+            second.until(lambda: "SCROLL_023" in second.screen.display[row], "拖选向上跨屏")
+            second.send(wheel_down * 6)
+            second.until(lambda: "SCROLL_041" in second.screen.display[row], "拖选反向滚动")
+            second.send(wheel_up * 6)
+            second.until(lambda: "SCROLL_023" in second.screen.display[row], "拖选恢复跨屏范围")
+            assert b"\x1b]52;" not in second.output
+            second.send(f"\x1b[<0;{col+1};{row+1}m".encode())
+            second.until(lambda: b"\x1b]52;" in second.output, "跨屏松开复制")
+            copies = re.findall(rb"\x1b\]52;c;([^\x07]*)\x07", second.output)
+            assert [base64.b64decode(value).decode() for value in copies] == [
+                "\n".join(f"SCROLL_{i:03d}" for i in range(23, 60))
+            ]
+            expected_copy = "\n".join(f"SCROLL_{i:03d}" for i in range(23, 60))
+            second.wait(f"已请求复制 {len(expected_copy)} chars")
+            second.until(lambda: "已请求复制" not in "\n".join(second.screen.display), "跨屏复制提示消失")
+            second.send(b"\x1b")
+            second.until(lambda: not second.screen.buffer[row][col].reverse, "跨屏选区清除")
             # 有限输出负载：约 120 行，用于交互延迟回归，不是吞吐压测。
             # 在第十行暂停，等选区已经显示才继续，避免较慢 CI 在选区确认前耗尽负载。
             load_gate = Path(root) / "load-ready"
@@ -300,8 +328,10 @@ def main():
                     assert receiver.read_bytes() == b"", "未启用鼠标时不能发送转义序列"
                 else:
                     second.until(lambda: receiver.read_bytes() == expected, "滚轮协议 " + mode)
-                    # 左键点击和拖选不发送给程序。
+                    # 拖选期间同 Pane 和其他 Pane 的滚轮均不发送给程序。
                     second.send(f"\x1b[<0;{left+2};{top+3}M\x1b[<32;{left+5};{top+3}M"
+                                f"\x1b[<64;{left+5};{top+3}M\x1b[<65;{left+5};{top+3}M"
+                                f"\x1b[<64;2;3M\x1b[<65;2;3M"
                                 f"\x1b[<0;{left+5};{top+3}m".encode())
                     second.settle()
                     assert receiver.read_bytes() == expected
