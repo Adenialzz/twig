@@ -838,6 +838,15 @@ fn monitor_and_footer_drag_and_triple_click_stay_in_their_regions() {
 fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
     fn check_dialog(p: &mut Pty, title: &str, word: &str, width: u16, height: u16, deletion: bool) {
         p.wait_screen(title);
+        // PTY 可在标题和正文之间分片；等底部提示到达再读取点击坐标，
+        // 否则可能把上一帧正文里的同名词当作当前弹窗的目标。
+        p.wait_screen(match title {
+            "登记已有仓库" => "Enter 下一步 · Esc 取消",
+            "新建任务" => "新建任务", // 调用前 task_form_ready 已等待候选加载完成。
+            "使用已有分支" => "Esc 返回表单",
+            "删除任务" => "PgUp/PgDn 滚动清单及错误",
+            _ => unreachable!(),
+        });
         let w = (width - 4).min(if deletion { 78 } else { 72 });
         let h = (height - 2).min(if deletion { 22 } else { 20 });
         let (left, top) = ((width - w) / 2 + 1, (height - h) / 2 + 1);
