@@ -153,7 +153,7 @@ pub struct Worker {
 impl Worker {
     pub fn start(registry: PathBuf) -> Result<Self> {
         let inbox = Inbox::remote(&registry, crate::agent::message_id())?;
-        let saved = inbox.load().unwrap_or_default();
+        let saved = inbox.load()?;
         let (tx, rx) = mpsc::channel::<Request>();
         let updates = Updates::default();
         let out = updates.clone();
@@ -234,12 +234,15 @@ impl Worker {
                     detail_retry_at = None;
                     detail = Snapshot::default();
                     if request.history || request.turn.is_some() {
-                        match crate::daemon::call::<Snapshot>(
+                        match crate::daemon::call::<Option<Snapshot>>(
                             &registry,
                             "details",
-                            serde_json::json!(request),
+                            serde_json::json!({"client": client, "request": request}),
                         ) {
-                            Ok(snapshot) => detail = snapshot,
+                            Ok(Some(snapshot)) => detail = snapshot,
+                            Ok(None) => {
+                                detail_retry_at = Some(Instant::now() + Duration::from_millis(250))
+                            }
                             Err(error) => {
                                 detail.query_error(&request, format!("{error:#}"));
                             }
@@ -334,6 +337,44 @@ impl Drop for Worker {
     }
 }
 
+fn refresh_registry(snapshot: &mut Snapshot, registry: &Path) {
+    match repositories(registry) {
+        Ok((mut repos, zed)) => {
+            for repo in &mut repos {
+                if let Some(old) = snapshot
+                    .repos
+                    .iter()
+                    .find(|old| old.name == repo.name && old.path == repo.path)
+                {
+                    for task in &mut repo.tasks {
+                        if let Some(old) = old.tasks.iter().find(|old| {
+                            old.name == task.name
+                                && old.path == task.path
+                                && (task.name == "main" || old.branch == task.branch)
+                        }) {
+                            task.git = old.git.clone();
+                            task.window = old.window.clone();
+                            task.error = old.error.clone();
+                            task.checked = old.checked;
+                            if task.name == "main" {
+                                task.branch = old.branch.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            snapshot.repos = repos;
+            snapshot.zed = zed;
+            snapshot.registry_error = None;
+            snapshot.registry_checked = Some(Instant::now());
+        }
+        Err(error) => {
+            snapshot.zed = None;
+            snapshot.registry_error = Some(format!("登记表读取失败，旧数据过期：{error:#}"));
+        }
+    }
+}
+
 // 核心采集不连接 Codex、不读写通知；独立线程避免可选服务阻塞导航。
 fn collect_core(
     registry: PathBuf,
@@ -349,6 +390,8 @@ fn collect_core(
     let mut refresh = 0;
     let mut project = None;
     let mut scan: Option<GitScan> = None;
+    let mut unpublished = false;
+    let mut published_at = Instant::now();
     while !cancel.load(Ordering::Relaxed) {
         for next in requests.try_iter() {
             request = next;
@@ -362,42 +405,7 @@ fn collect_core(
         let force = request.refresh != refresh;
         refresh = request.refresh;
         if force || due(registry_at, 10) {
-            match repositories(&registry) {
-                Ok((mut repos, zed)) => {
-                    for repo in &mut repos {
-                        if let Some(old) = snapshot
-                            .repos
-                            .iter()
-                            .find(|old| old.name == repo.name && old.path == repo.path)
-                        {
-                            for task in &mut repo.tasks {
-                                if let Some(old) = old.tasks.iter().find(|old| {
-                                    old.name == task.name
-                                        && old.path == task.path
-                                        && (task.name == "main" || old.branch == task.branch)
-                                }) {
-                                    task.git = old.git.clone();
-                                    task.window = old.window.clone();
-                                    task.error = old.error.clone();
-                                    task.checked = old.checked;
-                                    if task.name == "main" {
-                                        task.branch = old.branch.clone();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    snapshot.repos = repos;
-                    snapshot.zed = zed;
-                    snapshot.registry_error = None;
-                    snapshot.registry_checked = Some(Instant::now());
-                }
-                Err(error) => {
-                    snapshot.zed = None;
-                    snapshot.registry_error =
-                        Some(format!("登记表读取失败，旧数据过期：{error:#}"));
-                }
-            }
+            refresh_registry(&mut snapshot, &registry);
             updates.publish_core(&snapshot);
             registry_at = Some(Instant::now());
         }
@@ -432,7 +440,12 @@ fn collect_core(
             if current.paths.is_empty() {
                 scan = None;
             }
+            unpublished = true;
+        }
+        if unpublished && (scan.is_none() || published_at.elapsed() >= Duration::from_millis(100)) {
             updates.publish_core(&snapshot);
+            unpublished = false;
+            published_at = Instant::now();
         }
         thread::sleep(Duration::from_millis(if scan.is_some() { 1 } else { 50 }));
     }
@@ -844,41 +857,7 @@ fn collect(
         let mut dirty = false;
         let mut associations_changed = false;
         if force || due(registry_at, 10) {
-            match repositories(&registry) {
-                Ok((mut repos, zed)) => {
-                    for repo in &mut repos {
-                        if let Some(old) = snapshot
-                            .repos
-                            .iter()
-                            .find(|r| r.name == repo.name && r.path == repo.path)
-                        {
-                            for task in &mut repo.tasks {
-                                if let Some(t) = old.tasks.iter().find(|t| {
-                                    t.name == task.name
-                                        && t.path == task.path
-                                        && (task.name == "main" || t.branch == task.branch)
-                                }) {
-                                    task.git = t.git.clone();
-                                    task.window = t.window.clone();
-                                    task.error = t.error.clone();
-                                    task.checked = t.checked;
-                                    if task.name == "main" {
-                                        task.branch = t.branch.clone();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    snapshot.repos = repos;
-                    snapshot.zed = zed;
-                    snapshot.registry_error = None;
-                    snapshot.registry_checked = Some(Instant::now());
-                }
-                Err(e) => {
-                    snapshot.zed = None;
-                    snapshot.registry_error = Some(format!("登记表读取失败，旧数据过期：{e:#}"))
-                }
-            }
+            refresh_registry(&mut snapshot, &registry);
             registry_at = Some(Instant::now());
             dirty = true;
             // 先发布项目列表，Codex 或 Git 慢时仍可开始导航。

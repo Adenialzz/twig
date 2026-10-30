@@ -192,6 +192,7 @@ impl Fixture {
         let mut command = Command::new("sh");
         self.env(&mut command);
         command.env("TWIG_SLOW_CODEX", if slow { "1" } else { "0" });
+        command.env("TWIG_OPERATION_PROGRESS", "1");
         command.args([
             "-c",
             r#"
@@ -1147,6 +1148,11 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'ENTERED_%s\\n' SHELL\r");
         p.wait("ENTERED_SHELL");
+        assert!(
+            !p.text.contains("操作 local-"),
+            "全屏界面不能直接输出操作 ID"
+        );
+        assert!(!p.text.contains("操作进度："), "全屏界面不能直接输出进度");
         assert_ne!(fs::read(&f.registry).unwrap(), before_entry);
         let registry: toml::Value =
             toml::from_str(&fs::read_to_string(&f.registry).unwrap()).unwrap();
@@ -1535,6 +1541,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     let stop = Arc::new(AtomicBool::new(false));
     let offline = Arc::new(AtomicBool::new(false));
     let turn_failure = Arc::new(AtomicBool::new(false));
+    let slow_history = Arc::new(AtomicBool::new(true));
     let methods = Arc::new(Mutex::new(Vec::new()));
     let done = stop.clone();
     let disconnected = offline.clone();
@@ -1557,6 +1564,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
             let failed_turn = failed_turn.clone();
             let seen = seen.clone();
             let cwd = cwd.clone();
+            let slow_history = slow_history.clone();
             connections.push(thread::spawn(move || {
             socket.set_nonblocking(false).unwrap();
             socket
@@ -1606,6 +1614,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                         json!({"thread":thread_value("LIVE_THREAD",json!({"type":"active","activeFlags":["waitingOnApproval"]}))})
                     }
                     "thread/list" => {
+                        if slow_history.swap(false, Ordering::Relaxed) { thread::sleep(Duration::from_secs(3)); }
                         assert_eq!(v["params"]["useStateDbOnly"], true);
                         if v["params"]["cursor"].is_null() {
                             let mut temporary =

@@ -102,7 +102,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 | Agent | `Enter` / `Alt-Enter` | 发送 / 换行 |
 | Agent | `Ctrl-C` | 有输入时清空，无输入时退出 Twig |
 
-通知未读会持久化，退出重进仍保留，进入对应任务或 Agent 后清除。默认保存在 `~/.twig/notifications.json`，不修改配置文件；重启后补查已建立采集基线的新事件。工作台中的 `Ctrl-C` 发送给 Pane 内程序；Console 的表单、搜索和帮助有各自的键位规则。完整操作见 [Console](docs/console.md) 和 [主控指南](docs/agent.md)。
+通知未读会持久化，退出重进仍保留，进入对应任务或 Agent 后清除；后台离线时进入普通任务也会保存已读，不清除尚未看到的新事件。默认保存在 `~/.twig/notifications.json`，不修改配置文件；重启后补查已建立采集基线的新事件。工作台中的 `Ctrl-C` 发送给 Pane 内程序；Console 的表单、搜索和帮助有各自的键位规则。完整操作见 [Console](docs/console.md) 和 [主控指南](docs/agent.md)。
 
 项目和任务列表按最近成功创建任务或进入工作台的时间排序，重启后保留；仅浏览不更新，重排保留当前选择。
 
@@ -110,7 +110,7 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 
 - 普通任务的 `add/ls/new/open/stop/rm`、Console 导航和工作台始终在本地执行，使用调用进程的环境；后台是否在线不改变执行路径。Twig 不启动、重启或停止共享 Codex daemon。
 - 主控、受管任务的创建/打开/停止/删除、持续通知及飞书需要 Twig 后台。后台断开不影响普通任务；受管操作明确报错，不回退或重发。
-- 本地核心操作被强制中断时不会保证继续执行；操作记录和已有资源保留，通过 `twig operation ls/show/resolve` 核对。已启动的 tmux 任务继续独立运行。
+- 本地核心操作被强制中断时不会保证继续执行；操作记录和已有资源保留，通过 `twig operation ls/show/resolve` 核对。后台退出后的待核对操作也可离线解除，无需为恢复普通任务启动后台。已启动的 tmux 任务继续独立运行。
 - 受管任务通过 `new --agent` 新建，不自动迁移或接管旧任务。普通任务的已有 Codex session 是否可通信，需核对当前 daemon 中的会话并取得用户授权。
 - 消息送达和一轮回复完成都不代表任务通过验收。投递结果未知时按消息 ID 核对，不自动重发。
 - 新建分支默认 fetch base 的远端 upstream，从最新远端提交创建，不改动本地 base 或工作目录；`--no-fetch` 使用本地 base。复用已有分支不 fetch，其他任务管理不联网，不自动 pull、push 或合并。
