@@ -118,11 +118,11 @@ impl Service {
                 let run = || -> Result<()> {
                     let plan = {
                         let mut records = records.lock().unwrap();
-                        let target = resource(&records[&id].plan.action);
+                        let action = &records[&id].plan.action;
                         if records.values().any(|other| {
                             other.id != id
                                 && other.status == "needs_inspection"
-                                && resource(&other.plan.action) == target
+                                && conflicts(&other.plan.action, action)
                         }) {
                             let operation = records.get_mut(&id).unwrap();
                             operation.status = "needs_inspection".into();
@@ -252,12 +252,9 @@ impl Service {
                     Action::Rm { options, .. } => options.yes = true,
                     _ => {}
                 }
-                let target = resource(&plan.action);
                 ensure!(
-                    !records
-                        .values()
-                        .any(|r| r.status == "needs_inspection"
-                            && resource(&r.plan.action) == target),
+                    !records.values().any(|r| r.status == "needs_inspection"
+                        && conflicts(&r.plan.action, &plan.action)),
                     "同目标有结果待核对的操作，请先检查 operation ls"
                 );
                 let id = crate::agent::message_id();
@@ -398,7 +395,7 @@ pub(crate) fn prepare(registry: &Path, action: Action) -> Result<Plan> {
                 true,
             )
         });
-        result?;
+        let output = super::output::checked(output, result)?;
         if let Some(prompt) = &mut plan.prompt {
             *prompt = format!("{}{}\n{prompt}", output.stdout, output.stderr);
         }
@@ -406,6 +403,24 @@ pub(crate) fn prepare(registry: &Path, action: Action) -> Result<Plan> {
     Ok(plan)
 }
 
+// 未指定项目不等于共享同一个资源；登记按别名/路径冲突，Agent 单独串行核对。
+pub(crate) fn conflicts(a: &Action, b: &Action) -> bool {
+    match (a, b) {
+        (
+            Action::Add {
+                name: a, path: ap, ..
+            },
+            Action::Add {
+                name: b, path: bp, ..
+            },
+        ) => a == b || ap == bp,
+        (Action::Add { name, .. }, other) | (other, Action::Add { name, .. }) => {
+            resource(other) == Some(name.as_str())
+        }
+        (Action::Agent(_), Action::Agent(_)) => true,
+        _ => resource(a).zip(resource(b)).is_some_and(|(a, b)| a == b),
+    }
+}
 pub(crate) fn resource(action: &Action) -> Option<&str> {
     match action {
         Action::New { project, .. }
@@ -499,7 +514,7 @@ pub(crate) fn remote_cli(registry: &Path, command: Command) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
-pub(crate) fn execute_remote(registry: &Path, mut action: Action) -> Result<Output> {
+pub(crate) fn execute_remote(registry: &Path, mut action: Action, cli: bool) -> Result<Output> {
     if matches!(
         &action,
         Action::Ls { .. }
@@ -539,7 +554,7 @@ pub(crate) fn execute_remote(registry: &Path, mut action: Action) -> Result<Outp
     loop {
         let record: Operation = super::call(registry, "operation.get", json!(id))
             .with_context(|| format!("操作 {id} 的结果待核对；请运行 twig operation show {id}"))?;
-        if std::env::var_os("TWIG_OPERATION_PROGRESS").is_some() {
+        if cli && std::env::var_os("TWIG_OPERATION_PROGRESS").is_some() {
             let stage = record
                 .stages
                 .last()
@@ -567,6 +582,34 @@ pub(crate) fn execute_remote(registry: &Path, mut action: Action) -> Result<Outp
 mod tests {
     use super::*;
     use std::fs;
+    #[test]
+    fn unrelated_operation_kinds_do_not_share_an_empty_resource() {
+        let add = |name: &str, path: &str| Action::Add {
+            name: name.into(),
+            path: path.into(),
+            base: None,
+            target: None,
+            root: None,
+            print_name: false,
+        };
+        let agent = Action::Agent(crate::agent::Cli {
+            command: crate::agent::Action::Init,
+        });
+        assert!(!conflicts(&add("a", "/a"), &agent));
+        assert!(!conflicts(&agent, &add("a", "/a")));
+        assert!(conflicts(&agent, &agent));
+        assert!(!conflicts(&add("a", "/a"), &add("b", "/b")));
+        assert!(conflicts(&add("a", "/a"), &add("a", "/b")));
+        assert!(conflicts(&add("a", "/a"), &add("b", "/a")));
+        let open = Action::Open {
+            project: "a".into(),
+            name: "main".into(),
+        };
+        assert!(conflicts(&open, &add("a", "/a")));
+        assert!(conflicts(&add("a", "/a"), &open));
+        assert!(!conflicts(&open, &add("b", "/b")));
+    }
+
     fn finished(service: &Service, id: &str) -> Operation {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -728,7 +771,10 @@ mod tests {
             service
                 .handle(
                     "operation.prepare",
-                    serde_json::to_value(Action::Ls { project: None }).unwrap(),
+                    serde_json::to_value(Action::Agent(crate::agent::Cli {
+                        command: crate::agent::Action::Init,
+                    }))
+                    .unwrap(),
                 )
                 .unwrap(),
         )

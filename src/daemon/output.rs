@@ -46,3 +46,31 @@ pub fn capture(action: impl FnOnce() -> anyhow::Result<()>) -> (Output, anyhow::
 macro_rules! output { ($($arg:tt)*) => { $crate::daemon::output::line(format!($($arg)*), false) }; }
 #[macro_export]
 macro_rules! diagnostic { ($($arg:tt)*) => { $crate::daemon::output::line(format!($($arg)*), true) }; }
+
+/// 不丢弃执行或预检查失败前已产生的诊断。
+pub fn checked(output: Output, result: anyhow::Result<()>) -> anyhow::Result<Output> {
+    use anyhow::Context;
+    if output.stdout.is_empty() && output.stderr.is_empty() {
+        result?;
+    } else {
+        result.with_context(|| format!("{}{}", output.stdout, output.stderr))?;
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn failure_keeps_captured_diagnostics_and_original_cause() {
+        let (output, result) = super::capture(|| {
+            crate::output!("执行信息");
+            crate::diagnostic!("受保护文件：keep.txt");
+            anyhow::bail!("拒绝删除")
+        });
+        let error = super::checked(output, result).err().unwrap();
+        let text = format!("{error:#}");
+        for expected in ["执行信息", "keep.txt", "拒绝删除"] {
+            assert!(text.contains(expected), "{text}");
+        }
+    }
+}
