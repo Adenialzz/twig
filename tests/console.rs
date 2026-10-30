@@ -220,6 +220,7 @@ struct Pty {
     text: String,
     bytes: Vec<u8>,
     screen_bytes: Vec<u8>,
+    read_budget: usize,
     original: libc::termios,
 }
 impl Pty {
@@ -248,7 +249,8 @@ impl Pty {
             }
             assert!(
                 started.elapsed() < Duration::from_secs(5),
-                "复制超时：{}",
+                "复制超时：期望 {count} 次，实际 {copies:?}\n屏幕：{}\n输出：{}",
+                self.screen_text(),
                 self.text
             );
             thread::sleep(Duration::from_millis(10));
@@ -305,6 +307,7 @@ impl Pty {
             text: String::new(),
             bytes: Vec::new(),
             screen_bytes: Vec::new(),
+            read_budget: usize::MAX,
             original,
         }
     }
@@ -340,6 +343,7 @@ impl Pty {
     fn read_output(&mut self) {
         let previous_len = self.bytes.len();
         let mut bytes = [0; 16384];
+        let mut remaining = self.read_budget;
         // 每轮限制读取次数，让持续输出也不能阻止超时和退出检查。
         for _ in 0..16 {
             let mut ready = libc::pollfd {
@@ -357,11 +361,16 @@ impl Pty {
             if result == 0 || ready.revents & libc::POLLIN == 0 {
                 break;
             }
-            match self.master.read(&mut bytes) {
+            let capacity = bytes.len().min(remaining);
+            match self.master.read(&mut bytes[..capacity]) {
                 Ok(0) => break,
                 Ok(n) => {
                     self.bytes.extend_from_slice(&bytes[..n]);
                     self.screen_bytes.extend_from_slice(&bytes[..n]);
+                    remaining -= n;
+                    if remaining == 0 {
+                        break;
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 // Linux 在 PTY 的 slave 关闭后返回 EIO，macOS 返回 EOF。
@@ -819,8 +828,18 @@ fn monitor_and_footer_drag_and_triple_click_stay_in_their_regions() {
 
 #[test]
 fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
-    fn check_dialog(p: &mut Pty, title: &str, word: &str, width: u16, height: u16, deletion: bool) {
+    fn check_dialog(
+        p: &mut Pty,
+        title: &str,
+        footer: &str,
+        word: &str,
+        width: u16,
+        height: u16,
+        deletion: bool,
+    ) {
         p.wait_screen(title);
+        // 标题可能先于正文到达；等待当前弹窗底部的独有文案，不能用半帧定位。
+        p.wait_screen(footer);
         let w = (width - 4).min(if deletion { 78 } else { 72 });
         let h = (height - 2).min(if deletion { 22 } else { 20 });
         let (left, top) = ((width - w) / 2 + 1, (height - h) / 2 + 1);
@@ -833,6 +852,10 @@ fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
             .find(|(_, line)| line.contains(word))
             .unwrap();
         let col = ratatui::text::Line::from(&line[..line.find(word).unwrap()]).width();
+        assert!(
+            col >= left as usize && col < (left + w - 2) as usize,
+            "点击坐标落在弹窗外：{title} ({col}, {row})\n{screen}"
+        );
         p.clear_output();
         // 背景拖动不得产生复制，也不得计入弹窗连击。
         p.send(b"\x1b[<0;1;1M\x1b[<32;5;2M\x1b[<0;5;2m");
@@ -868,42 +891,78 @@ fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
         p.wait_screen_absent("已请求复制");
         assert!(p.screen_text().contains(title), "首次 Esc 不能关闭弹窗");
     }
-    let f = Fixture::new();
-    f.init();
-    f.git(&["branch", "existing"]);
-    let registry = fs::read(&f.registry).unwrap();
-    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
-    let state = fs::read(&state_path).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
-    f.env(&mut command);
-    command
-        .env("SSH_CONNECTION", "twig-pty-test")
-        .arg("--config")
-        .arg(&f.registry);
-    let mut p = Pty::spawn(command);
-    p.wait_screen("demo");
-    p.send(b"1n");
-    check_dialog(&mut p, "登记已有仓库", "Git", 140, 36, false);
-    p.send(b"\x1b");
-    p.wait_screen_absent("登记已有仓库");
-    p.resize(80, 24);
-    p.send(b"2n");
-    p.task_form_ready();
-    check_dialog(&mut p, "新建任务", "demo", 80, 24, false);
-    p.send(b"existing\r");
-    check_dialog(&mut p, "使用已有分支", "existing", 80, 24, false);
-    p.send(b"\x1b");
-    p.wait_screen_absent("使用已有分支");
-    p.send(b"\x1b");
-    p.wait_screen_absent("新建任务");
-    p.send(b"/auth\rdd");
-    check_dialog(&mut p, "删除任务", "demo", 80, 24, true);
-    p.send(b"\x1b");
-    p.wait_screen_absent("删除任务");
-    p.send(b"q");
-    assert!(p.wait_exit().success());
-    assert_eq!(fs::read(&f.registry).unwrap(), registry);
-    assert_eq!(fs::read(state_path).unwrap(), state);
+    // 同时覆盖正常读取与标题、正文分片到达。
+    for read_budget in [usize::MAX, 128] {
+        let f = Fixture::new();
+        f.init();
+        f.git(&["branch", "existing"]);
+        let registry = fs::read(&f.registry).unwrap();
+        let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+        let state = fs::read(&state_path).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+        f.env(&mut command);
+        command
+            .env("SSH_CONNECTION", "twig-pty-test")
+            .arg("--config")
+            .arg(&f.registry);
+        let mut p = Pty::spawn(command);
+        p.wait_screen("demo");
+        p.read_budget = read_budget;
+        p.send(b"1n");
+        check_dialog(
+            &mut p,
+            "登记已有仓库",
+            "Enter 下一步 · Esc 取消",
+            "Git",
+            140,
+            36,
+            false,
+        );
+        p.send(b"\x1b");
+        p.wait_screen_absent("登记已有仓库");
+        p.resize(80, 24);
+        p.send(b"2n");
+        p.task_form_ready();
+        check_dialog(
+            &mut p,
+            "新建任务",
+            "Enter 按输入创建 · Esc 取消",
+            "demo",
+            80,
+            24,
+            false,
+        );
+        p.send(b"existing\r");
+        check_dialog(
+            &mut p,
+            "使用已有分支",
+            "Esc 返回表单",
+            "existing",
+            80,
+            24,
+            false,
+        );
+        p.send(b"\x1b");
+        p.wait_screen_absent("使用已有分支");
+        p.send(b"\x1b");
+        p.wait_screen_absent("新建任务");
+        p.send(b"/auth\rdd");
+        check_dialog(
+            &mut p,
+            "删除任务",
+            "PgUp/PgDn 滚动清单及错误",
+            "demo",
+            80,
+            24,
+            true,
+        );
+        p.send(b"\x1b");
+        p.wait_screen_absent("删除任务");
+        p.send(b"q");
+        assert!(p.wait_exit().success());
+        assert_eq!(fs::read(&f.registry).unwrap(), registry);
+        assert_eq!(fs::read(state_path).unwrap(), state);
+    }
 }
 
 #[test]
