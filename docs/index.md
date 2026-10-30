@@ -1,6 +1,6 @@
 # twig 用户手册
 
-twig 用 Git Worktree 和 tmux 管理并行任务环境，并可通过主控 Codex Agent 派活和跟进。人和 Agent 使用同一份文档，按问题逐步深入即可。
+twig 用 Git Worktree 和 tmux 管理并行任务环境，并可通过主控 Codex Agent 派活和跟进。核心 CLI、Console 和工作台无需后台，Agent/飞书按需启用。人和 Agent 使用同一份文档，按问题逐步深入即可。
 
 ## 从哪里开始
 

@@ -39,7 +39,7 @@ ssh_host = "me@devbox:2222"
 
 Console 任务详情顶部显示「用 Zed 打开 ↗」，其 `zed://ssh/...` 链接自动带上所选任务的绝对 Worktree 路径，主工作目录也支持。在支持 OSC 8 的终端中 Cmd/Ctrl + 点击，由本机打开 Zed 并连接服务器。Twig 不执行远程 `zed` 命令，也不主动唤起本机程序；本机终端、系统协议关联和 Zed 必须支持该链接。若终端启用了鼠标上报，打开链接的修饰键以终端设置为准。
 
-未配置时，详情显示设置提示和当前配置文件路径，不阻止导航；格式错误按配置错误报告，不继续提供旧链接。保存后在 Console 按 `r` 刷新，或等待后台下一次配置采集。首次升级需更新并重启 Twig 后台及 Console。拖选期间暂停提供链接，清除选区后恢复；没有键盘直接打开功能。
+未配置时，详情显示设置提示和当前配置文件路径，不阻止导航；格式错误按配置错误报告，不继续提供旧链接。保存后在 Console 按 `r` 刷新，或等待 Console 下一次配置采集。升级后重新打开 Console 即可。拖选期间暂停提供链接，清除选区后恢复；没有键盘直接打开功能。
 
 ## 项目启动配置
 
@@ -79,4 +79,4 @@ Console 任务详情顶部显示「用 Zed 打开 ↗」，其 `zed://ssh/...` �
 
 ## 可选主控数据
 
-主控默认保存于 `~/.twig/controller/`，包含 workspace 和 runtime.json；遵循 `--config` 隔离，详情见 [主控 Agent](agent.md)。受管任务登记记录增加 `agent_thread`，工作树创建 `.twig/state.md`，由共享 Git `info/exclude` 精确忽略。普通任务不创建这些资源，不迁移旧任务。飞书主动通知地址通过 Twig 后台环境 `TWIG_FEISHU_WEBHOOK_URL` 传入；双向机器人另使用 APP_ID、APP_SECRET 和允许用户列表，申请、完整变量名和配置步骤见[飞书机器人指南](feishu.md)。后台操作和渠道状态位于配置旁 `daemon/<配置身份>/`，不写入 config.toml。
+主控默认保存于 `~/.twig/controller/`，包含 workspace 和 runtime.json；遵循 `--config` 隔离，详情见 [主控 Agent](agent.md)。受管任务登记记录增加 `agent_thread`，工作树创建 `.twig/state.md`，由共享 Git `info/exclude` 精确忽略。普通任务不创建这些资源，不迁移旧任务。飞书主动通知地址通过 Twig 后台环境 `TWIG_FEISHU_WEBHOOK_URL` 传入；双向机器人另使用 APP_ID、APP_SECRET 和允许用户列表，申请、完整变量名和配置步骤见[飞书机器人指南](feishu.md)。本地核心操作位于配置旁 `operations/<配置身份>/operations/<ID>.json`，与后台操作分开保存，共用执行锁；`operation ls/show` 汇总读取。后台操作和渠道状态位于配置旁 `daemon/<配置身份>/`，不写入 config.toml。

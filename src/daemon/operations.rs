@@ -1,5 +1,5 @@
 //! 持久化业务操作：客户端断开不取消执行，未知结果不自动重试。
-mod store;
+pub(crate) mod store;
 use super::output::Output;
 use crate::{Action, config::Project, registry};
 use anyhow::{Context, Result, bail, ensure};
@@ -46,6 +46,9 @@ pub struct Plan {
 }
 type Checkpoint = Box<dyn Fn(&str) -> Result<()>>;
 thread_local! { static CHECKPOINT: RefCell<Option<Checkpoint>> = const { RefCell::new(None) }; }
+pub(crate) fn checkpoint(callback: Option<Checkpoint>) {
+    CHECKPOINT.with(|slot| *slot.borrow_mut() = callback);
+}
 pub fn progress(stage: &str) -> Result<()> {
     CHECKPOINT.with(|callback| match callback.borrow().as_ref() {
         Some(callback) => callback(stage),
@@ -71,7 +74,7 @@ pub struct Service {
     plans: Arc<Mutex<BTreeMap<String, Plan>>>,
     queue: mpsc::SyncSender<String>,
 }
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -115,11 +118,11 @@ impl Service {
                 let run = || -> Result<()> {
                     let plan = {
                         let mut records = records.lock().unwrap();
-                        let target = resource(&records[&id].plan.action);
+                        let action = &records[&id].plan.action;
                         if records.values().any(|other| {
                             other.id != id
                                 && other.status == "needs_inspection"
-                                && resource(&other.plan.action) == target
+                                && conflicts(&other.plan.action, action)
                         }) {
                             let operation = records.get_mut(&id).unwrap();
                             operation.status = "needs_inspection".into();
@@ -146,6 +149,8 @@ impl Service {
                         }))
                     });
                     let (output, result) = super::output::capture(|| {
+                        let _execution = crate::core::execution_lock(&registry)?;
+                        crate::core::check_pending(&registry, &plan.action)?;
                         progress("核对确认计划与实时资源")?;
                         ensure!(plan.expires >= now(), "确认计划已过期，请重新确认");
                         ensure!(
@@ -200,94 +205,7 @@ impl Service {
                     ),
                     "此入口不是后台业务操作"
                 );
-                let mut plan = Plan {
-                    id: crate::agent::message_id(),
-                    expires: now() + 300,
-                    fingerprint: fingerprint(&self.registry, &action)?,
-                    action,
-                    branches: vec![],
-                    common: None,
-                    prompt: None,
-                };
-                if let Action::New {
-                    project,
-                    name,
-                    expected_branch: None,
-                    ..
-                } = &plan.action
-                {
-                    let entry = registry::entry(&self.registry, project)?;
-                    let project =
-                        Project::discover_at(&registry::expand(&entry.path)?, &self.registry)?;
-                    ensure!(
-                        !project.state()?.contains_key(name),
-                        "任务 {name} 已存在；请使用 open"
-                    );
-                    plan.branches = crate::existing_branches(&project.config()?, name)?;
-                    plan.common = Some(project.common);
-                }
-                match &plan.action {
-                    Action::Stop {
-                        name, yes: false, ..
-                    } => plan.prompt = Some(format!("关闭 {name} 窗口并终止其中的全部进程？")),
-                    Action::Rm {
-                        name: Some(name),
-                        options,
-                        ..
-                    } if !options.yes => {
-                        plan.prompt = Some(format!(
-                            "移除任务 {name} 的窗口和 Worktree{}{}？",
-                            if options.keep_branch {
-                                "，保留分支"
-                            } else {
-                                "及本地分支"
-                            },
-                            if options.delete_ignored {
-                                "（包含被忽略文件）"
-                            } else {
-                                ""
-                            }
-                        ))
-                    }
-                    _ => {}
-                }
-                if let Action::Rm {
-                    project: alias,
-                    name: Some(name),
-                    options,
-                    expected_task,
-                } = &plan.action
-                {
-                    let entry = registry::entry(&self.registry, alias)?;
-                    let repository =
-                        Project::discover_at(&registry::expand(&entry.path)?, &self.registry)?;
-                    if let Some(expected) = expected_task {
-                        let (common, branch, path): (PathBuf, String, PathBuf) =
-                            serde_json::from_str(expected)?;
-                        let state = repository.state()?;
-                        let task = crate::feature(&state, name)?;
-                        ensure!(
-                            repository.common == common
-                                && task.branch == branch
-                                && task.path == path,
-                            "任务归属已变化，请取消并重新确认删除"
-                        );
-                    }
-                    let (output, result) = super::output::capture(|| {
-                        crate::remove(
-                            &repository,
-                            &repository.config()?,
-                            &mut repository.state()?,
-                            name,
-                            options,
-                            true,
-                        )
-                    });
-                    result?;
-                    if let Some(prompt) = &mut plan.prompt {
-                        *prompt = format!("{}{}\n{prompt}", output.stdout, output.stderr);
-                    }
-                }
+                let plan = prepare(&self.registry, action)?;
                 let mut plans = self.plans.lock().unwrap();
                 plans.retain(|_, p| p.expires >= now());
                 ensure!(plans.len() < 1024, "待确认操作过多，请稍后重试");
@@ -334,12 +252,9 @@ impl Service {
                     Action::Rm { options, .. } => options.yes = true,
                     _ => {}
                 }
-                let target = resource(&plan.action);
                 ensure!(
-                    !records
-                        .values()
-                        .any(|r| r.status == "needs_inspection"
-                            && resource(&r.plan.action) == target),
+                    !records.values().any(|r| r.status == "needs_inspection"
+                        && conflicts(&r.plan.action, &plan.action)),
                     "同目标有结果待核对的操作，请先检查 operation ls"
                 );
                 let id = crate::agent::message_id();
@@ -400,7 +315,113 @@ impl Service {
         }
     }
 }
-fn resource(action: &Action) -> Option<&str> {
+pub(crate) fn prepare(registry: &Path, action: Action) -> Result<Plan> {
+    let mut plan = Plan {
+        id: crate::agent::message_id(),
+        expires: now() + 300,
+        fingerprint: fingerprint(registry, &action)?,
+        action,
+        branches: vec![],
+        common: None,
+        prompt: None,
+    };
+    if let Action::New {
+        project,
+        name,
+        expected_branch: None,
+        ..
+    } = &plan.action
+    {
+        let entry = registry::entry(registry, project)?;
+        let project = Project::discover_at(&registry::expand(&entry.path)?, registry)?;
+        ensure!(
+            !project.state()?.contains_key(name),
+            "任务 {name} 已存在；请使用 open"
+        );
+        plan.branches = crate::existing_branches(&project.config()?, name)?;
+        plan.common = Some(project.common);
+    }
+    match &plan.action {
+        Action::Stop {
+            name, yes: false, ..
+        } => plan.prompt = Some(format!("关闭 {name} 窗口并终止其中的全部进程？")),
+        Action::Rm {
+            name: Some(name),
+            options,
+            ..
+        } if !options.yes => {
+            plan.prompt = Some(format!(
+                "移除任务 {name} 的窗口和 Worktree{}{}？",
+                if options.keep_branch {
+                    "，保留分支"
+                } else {
+                    "及本地分支"
+                },
+                if options.delete_ignored {
+                    "（包含被忽略文件）"
+                } else {
+                    ""
+                }
+            ))
+        }
+        _ => {}
+    }
+    if let Action::Rm {
+        project: alias,
+        name: Some(name),
+        options,
+        expected_task,
+    } = &plan.action
+    {
+        let entry = registry::entry(registry, alias)?;
+        let repository = Project::discover_at(&registry::expand(&entry.path)?, registry)?;
+        if let Some(expected) = expected_task {
+            let (common, branch, path): (PathBuf, String, PathBuf) =
+                serde_json::from_str(expected)?;
+            let state = repository.state()?;
+            let task = crate::feature(&state, name)?;
+            ensure!(
+                repository.common == common && task.branch == branch && task.path == path,
+                "任务归属已变化，请取消并重新确认删除"
+            );
+        }
+        let (output, result) = super::output::capture(|| {
+            crate::remove(
+                &repository,
+                &repository.config()?,
+                &mut repository.state()?,
+                name,
+                options,
+                true,
+            )
+        });
+        let output = super::output::checked(output, result)?;
+        if let Some(prompt) = &mut plan.prompt {
+            *prompt = format!("{}{}\n{prompt}", output.stdout, output.stderr);
+        }
+    }
+    Ok(plan)
+}
+
+// 未指定项目不等于共享同一个资源；登记按别名/路径冲突，Agent 单独串行核对。
+pub(crate) fn conflicts(a: &Action, b: &Action) -> bool {
+    match (a, b) {
+        (
+            Action::Add {
+                name: a, path: ap, ..
+            },
+            Action::Add {
+                name: b, path: bp, ..
+            },
+        ) => a == b || ap == bp,
+        (Action::Add { name, .. }, other) | (other, Action::Add { name, .. }) => {
+            resource(other) == Some(name.as_str())
+        }
+        (Action::Agent(_), Action::Agent(_)) => true,
+        _ => resource(a).zip(resource(b)).is_some_and(|(a, b)| a == b),
+    }
+}
+pub(crate) fn resource(action: &Action) -> Option<&str> {
     match action {
         Action::New { project, .. }
         | Action::Open { project, .. }
@@ -474,7 +495,7 @@ pub(crate) fn fingerprint(registry: &Path, action: &Action) -> Result<Value> {
     Ok(Value::Null)
 }
 
-pub fn cli(registry: &Path, command: Command) -> Result<()> {
+pub(crate) fn remote_cli(registry: &Path, command: Command) -> Result<()> {
     let result: Value = match command {
         Command::Ls => super::call(registry, "operation.list", Value::Null)?,
         Command::Show { id } => super::call(registry, "operation.get", json!(id))?,
@@ -493,16 +514,7 @@ pub fn cli(registry: &Path, command: Command) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
-pub fn client(registry: &Path, action: Action) -> Result<()> {
-    let output = execute(registry, action)?;
-    print!("{}", output.stdout);
-    eprint!("{}", output.stderr);
-    if let Some((path, target)) = output.terminal {
-        crate::console::run(registry.to_owned(), path, Some(target))?;
-    }
-    Ok(())
-}
-pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
+pub(crate) fn execute_remote(registry: &Path, mut action: Action, cli: bool) -> Result<Output> {
     if matches!(
         &action,
         Action::Ls { .. }
@@ -542,7 +554,7 @@ pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
     loop {
         let record: Operation = super::call(registry, "operation.get", json!(id))
             .with_context(|| format!("操作 {id} 的结果待核对；请运行 twig operation show {id}"))?;
-        if std::env::var_os("TWIG_OPERATION_PROGRESS").is_some() {
+        if cli && std::env::var_os("TWIG_OPERATION_PROGRESS").is_some() {
             let stage = record
                 .stages
                 .last()
@@ -570,6 +582,34 @@ pub fn execute(registry: &Path, mut action: Action) -> Result<Output> {
 mod tests {
     use super::*;
     use std::fs;
+    #[test]
+    fn unrelated_operation_kinds_do_not_share_an_empty_resource() {
+        let add = |name: &str, path: &str| Action::Add {
+            name: name.into(),
+            path: path.into(),
+            base: None,
+            target: None,
+            root: None,
+            print_name: false,
+        };
+        let agent = Action::Agent(crate::agent::Cli {
+            command: crate::agent::Action::Init,
+        });
+        assert!(!conflicts(&add("a", "/a"), &agent));
+        assert!(!conflicts(&agent, &add("a", "/a")));
+        assert!(conflicts(&agent, &agent));
+        assert!(!conflicts(&add("a", "/a"), &add("b", "/b")));
+        assert!(conflicts(&add("a", "/a"), &add("a", "/b")));
+        assert!(conflicts(&add("a", "/a"), &add("b", "/a")));
+        let open = Action::Open {
+            project: "a".into(),
+            name: "main".into(),
+        };
+        assert!(conflicts(&open, &add("a", "/a")));
+        assert!(conflicts(&add("a", "/a"), &open));
+        assert!(!conflicts(&open, &add("b", "/b")));
+    }
+
     fn finished(service: &Service, id: &str) -> Operation {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -731,7 +771,10 @@ mod tests {
             service
                 .handle(
                     "operation.prepare",
-                    serde_json::to_value(Action::Ls { project: None }).unwrap(),
+                    serde_json::to_value(Action::Agent(crate::agent::Cli {
+                        command: crate::agent::Action::Init,
+                    }))
+                    .unwrap(),
                 )
                 .unwrap(),
         )

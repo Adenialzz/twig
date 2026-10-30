@@ -3,6 +3,7 @@ mod codex;
 mod completion;
 mod config;
 mod console;
+mod core;
 mod daemon;
 mod git;
 mod guide;
@@ -27,7 +28,7 @@ use std::{
     name = "twig",
     version,
     about = "Git Worktree + tmux 任务环境管理",
-    after_help = "项目通过登记别名定位；任务命令显式指定项目和任务。裸 twig 打开交互控制台。\n\n业务依赖显式启动的 Twig 后台；帮助、guide 和只读补全可离线使用。\n\n开始使用：\n  twig daemon start\n  twig add myapp --path /path/to/repo\n  twig new myapp auth\n  twig ls myapp\n\n深入阅读：twig <命令> --help；twig guide；twig guide --all"
+    after_help = "项目通过登记别名定位；任务命令显式指定项目和任务。裸 twig 打开交互控制台。\n\n普通任务、Console 和工作台无需后台；Agent、受管任务与飞书需显式启动 Twig 后台。\n\n开始使用：\n  twig add myapp --path /path/to/repo\n  twig new myapp auth\n  twig ls myapp\n\n深入阅读：twig <命令> --help；twig guide；twig guide --all"
 )]
 struct Cli {
     /// 使用其他登记表及同目录项目状态（默认 ~/.twig/config.toml）
@@ -43,7 +44,7 @@ enum Action {
     #[command(after_help = "后台管理与托管说明：twig guide daemon")]
     #[serde(skip)]
     Daemon(daemon::Cli),
-    /// 查询后台已接受操作的进度与结果
+    /// 查询本地及后台操作的进度与结果
     Operation(daemon::operations::Cli),
     /// 阅读离线用户手册；不带主题时显示导航
     #[command(
@@ -221,10 +222,10 @@ fn execute(cli: Cli) -> Result<()> {
     let action = cli.command.unwrap_or(Action::Console);
     match action {
         Action::Daemon(args) => daemon::execute(&registry_path, args.command),
-        Action::Operation(args) => daemon::operations::cli(&registry_path, args.command),
+        Action::Operation(args) => core::operation_cli(&registry_path, args.command),
         Action::Console => console::run(registry_path, invocation_dir, None),
         Action::Chat => console::run_chat(registry_path, invocation_dir),
-        action => daemon::operations::client(&registry_path, action),
+        action => core::client(&registry_path, action),
     }
 }
 

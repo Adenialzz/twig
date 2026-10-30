@@ -194,11 +194,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
         .into()
     });
-    let mut status = vec![Line::from(connection)];
+    // 状态可能包含很长的配置路径，不能换行挤占搜索输入。
+    frame.render_widget(
+        Paragraph::new(connection),
+        Rect {
+            height: 1,
+            ..rows[2]
+        },
+    );
     if app.searching {
-        status.push(Line::from(format!("搜索：/{}", safe(&app.search_input))));
+        frame.render_widget(
+            Paragraph::new(format!("搜索：/{}", safe(&app.search_input))),
+            Rect::new(rows[2].x, rows[2].y + 1, rows[2].width, 1),
+        );
     }
-    frame.render_widget(Paragraph::new(status).wrap(Wrap { trim: false }), rows[2]);
     if app.searching {
         let candidates = app.command_candidates();
         if !candidates.is_empty() {
@@ -1568,6 +1577,25 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    #[test]
+    fn long_backend_error_keeps_search_visible() {
+        let mut app = fixture();
+        app.snapshot.delivery_error = Some(format!(
+            "未读同步失败：Twig 后台不可用；请执行 twig --config /{}/registry.toml daemon start",
+            "long-directory/".repeat(20)
+        ));
+        app.searching = true;
+        app.search_input = "auth".into();
+        for width in [38, 80, 140] {
+            let screen = text(&render(&app, width, 24, |frame, _, app| {
+                super::draw(frame, app)
+            }));
+            let lines: Vec<_> = screen.lines().collect();
+            assert!(lines[22].starts_with("未读同步失败"));
+            assert!(lines[23].starts_with("搜索：/auth"), "{screen}");
+        }
     }
 
     #[test]
