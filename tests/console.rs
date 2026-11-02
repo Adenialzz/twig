@@ -962,6 +962,7 @@ fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
         );
         p.send(b"\x1b");
         p.wait_screen_absent("使用已有分支");
+        p.wait_screen_absent("Esc 返回表单");
         p.send(b"\x1b");
         p.wait_screen_absent("新建任务");
         p.send(b"/auth\rdd");
@@ -976,6 +977,7 @@ fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
         );
         p.send(b"\x1b");
         p.wait_screen_absent("删除任务");
+        p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
         p.send(b"q");
         assert!(p.wait_exit().success());
         assert_eq!(fs::read(&f.registry).unwrap(), registry);
@@ -2689,6 +2691,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.wait_screen("Esc 返回表单");
     p.send(b"\r");
     p.wait_screen_absent("使用已有分支");
+    p.wait_screen_absent("Esc 返回表单");
     p.clear_output();
     p.send(b"\r");
     p.wait_screen("Esc 返回表单");
@@ -2846,6 +2849,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     // 切换来源重置为取消，Enter 返回表单。
     p.send(b"j\r");
     p.wait_screen_absent("使用已有分支");
+    p.wait_screen_absent("Esc 返回表单");
     p.clear_output();
     p.send(b"\r");
     p.wait_screen("Esc 返回表单");
@@ -3033,6 +3037,7 @@ fn slow_delete_query_can_be_cancelled_then_complete_and_delete() {
     p.wait_screen("正在查询");
     p.send(b"\x1b");
     p.wait_screen_absent("删除任务");
+    p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
     p.clear_output();
     p.send(b"dd");
     let started = Instant::now();
@@ -3068,6 +3073,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     // 默认取消，Enter 不产生写操作。
     p.send(b"\r");
     p.wait_screen_absent("删除任务");
+    p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
     assert!(path.is_dir());
     fs::write(path.join("unsaved"), "keep me").unwrap();
     p.send(b"/delete\r");
@@ -3153,40 +3159,45 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
 
 #[test]
 fn delete_ignored_defaults_on_and_keeps_default_cancel() {
-    let f = Fixture::core();
-    f.init();
-    let state: serde_json::Value = serde_json::from_slice(
-        &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
-    )
-    .unwrap();
-    let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
-    fs::write(f.repo.join(".git/info/exclude"), ".venv/\n").unwrap();
-    fs::create_dir(path.join(".venv")).unwrap();
-    fs::write(path.join(".venv/data"), "ignored").unwrap();
-    let mut p = f.terminal(false);
-    p.wait("auth");
-    p.send(b"\r/auth\rdd");
-    p.wait_screen("PgUp/PgDn 滚动清单及错误");
-    p.wait("同时删除被忽略文件");
-    p.send(b"\x1b[6~");
-    p.wait(".venv/");
-    // 默认勾选 ignored 删除；关闭后仍保护 ignored 文件。
-    p.send(b"j \t\r");
-    p.wait("删除失败");
-    assert!(path.join(".venv/data").exists());
-    // 切换选项会回到默认取消，Enter 不删除。
-    p.send(b"\x1b[B \r");
-    p.wait_screen_absent("删除任务");
-    assert!(path.join(".venv/data").exists());
-    p.clear_output();
-    p.send(b"dd");
-    p.wait_screen("PgUp/PgDn 滚动清单及错误");
-    p.send(b"\t\r");
-    p.wait_screen("已选中 demo / main");
-    assert!(!path.exists());
-    p.send(b"q");
-    p.wait("TERMINAL_RESTORED:0");
-    assert!(p.wait_exit().success());
+    // 关闭旧弹窗后必须等页脚清除，分片输出中的旧页脚不能作为新弹窗就绪信号。
+    for budget in [usize::MAX, 128] {
+        let f = Fixture::core();
+        f.init();
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+        )
+        .unwrap();
+        let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+        fs::write(f.repo.join(".git/info/exclude"), ".venv/\n").unwrap();
+        fs::create_dir(path.join(".venv")).unwrap();
+        fs::write(path.join(".venv/data"), "ignored").unwrap();
+        let mut p = f.terminal(false);
+        p.read_budget = budget;
+        p.wait("auth");
+        p.send(b"\r/auth\rdd");
+        p.wait_screen("PgUp/PgDn 滚动清单及错误");
+        p.wait("同时删除被忽略文件");
+        p.send(b"\x1b[6~");
+        p.wait(".venv/");
+        // 默认勾选 ignored 删除；关闭后仍保护 ignored 文件。
+        p.send(b"j \t\r");
+        p.wait("删除失败");
+        assert!(path.join(".venv/data").exists());
+        // 切换选项会回到默认取消，Enter 不删除。
+        p.send(b"\x1b[B \r");
+        p.wait_screen_absent("删除任务");
+        p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
+        assert!(path.join(".venv/data").exists());
+        p.clear_output();
+        p.send(b"dd");
+        p.wait_screen("PgUp/PgDn 滚动清单及错误");
+        p.send(b"\t\r");
+        p.wait_screen("已选中 demo / main");
+        assert!(!path.exists());
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+        assert!(p.wait_exit().success());
+    }
 }
 
 #[test]
