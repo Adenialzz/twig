@@ -58,6 +58,8 @@ pub struct Snapshot {
     pub claude: Vec<crate::claude::Session>,
     #[serde(default)]
     pub claude_error: Option<String>,
+    #[serde(default)]
+    pub claude_notification_error: Option<String>,
     #[serde(default, with = "crate::daemon::time")]
     pub claude_checked: Option<Instant>,
     #[serde(default)]
@@ -84,6 +86,11 @@ pub struct Request {
 }
 
 impl Snapshot {
+    fn backend_error(&mut self, error: String) {
+        self.codex_error = Some(error.clone());
+        self.claude_error = Some(error);
+    }
+
     fn query_error(&mut self, request: &Request, error: String) {
         if let Some(id) = &request.turn {
             self.turn = Some((id.clone(), Err(error.clone())));
@@ -274,16 +281,14 @@ impl Worker {
                             match serde_json::from_value(value["snapshot"].clone()) {
                                 Ok(snapshot) => latest = snapshot,
                                 Err(error) => {
-                                    latest.codex_error =
-                                        Some(format!("Agent 后台快照格式错误：{error}"))
+                                    latest.backend_error(format!("Agent 后台快照格式错误：{error}"))
                                 }
                             }
                         }
                     }
                     Err(error) => {
                         version = None;
-                        latest.codex_error =
-                            Some(format!("Agent 扩展不可用，旧状态过期：{error:#}"));
+                        latest.backend_error(format!("Agent 扩展不可用，旧状态过期：{error:#}"));
                     }
                 }
                 let key = serde_json::json!([
@@ -976,7 +981,8 @@ fn collect(
                             false,
                         )
                     });
-                    snapshot.claude_error = result
+                    snapshot.claude_error = None;
+                    snapshot.claude_notification_error = result
                         .err()
                         .map(|error| format!("Claude 提醒保存失败：{error:#}"));
                     snapshot.claude_checked = Some(Instant::now());
@@ -1239,6 +1245,19 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backend_disconnect_invalidates_both_providers() {
+        let mut snapshot = Snapshot {
+            codex_checked: Some(Instant::now()),
+            claude_checked: Some(Instant::now()),
+            ..Default::default()
+        };
+        snapshot.backend_error("disconnected".into());
+        assert_eq!(snapshot.codex_error.as_deref(), Some("disconnected"));
+        assert_eq!(snapshot.claude_error.as_deref(), Some("disconnected"));
+        assert!(snapshot.claude_notification_error.is_none());
+    }
+
     #[test]
     fn ownership_cache_reuses_inputs_and_refreshes_changed_paths() {
         let temp = tempfile::tempdir().unwrap();

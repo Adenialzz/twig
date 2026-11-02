@@ -497,17 +497,17 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
                         .is_some_and(|(name, _)| name == &repo.name)
                 }) {
                     let entry = counts
-                        .entry(thread.label())
+                        .entry((thread.priority(), format!("Codex {}", thread.label())))
                         .or_insert((0, status_style(thread, stale)));
                     entry.0 += 1;
                 }
                 for session in claude_sessions(&app.snapshot, &repo.name, None) {
                     let entry = counts
-                        .entry(format!("Claude {}", session.label()))
+                        .entry((session.priority(), format!("Claude {}", session.label())))
                         .or_insert((0, claude_style(session, &app.snapshot)));
                     entry.0 += 1;
                 }
-                for (index, (label, (count, style))) in counts.into_iter().enumerate() {
+                for (index, ((_, label), (count, style))) in counts.into_iter().enumerate() {
                     if index > 0 {
                         spans.push(Span::raw(" · "));
                     }
@@ -642,7 +642,7 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             let mut counts = std::collections::BTreeMap::new();
             for thread in sessions {
                 let entry = counts
-                    .entry(format!("Codex {}", thread.label()))
+                    .entry((thread.priority(), format!("Codex {}", thread.label())))
                     .or_insert((0, status_style(thread, stale)));
                 entry.0 += 1;
             }
@@ -652,18 +652,11 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 Some(&task.path),
             ) {
                 let entry = counts
-                    .entry(format!("Claude {}", session.label()))
+                    .entry((session.priority(), format!("Claude {}", session.label())))
                     .or_insert((0, claude_style(session, &app.snapshot)));
                 entry.0 += 1;
             }
-            let mut spans = Vec::new();
-            for (label, (count, style)) in counts {
-                if !spans.is_empty() {
-                    spans.push(Span::raw(" · "));
-                }
-                spans.push(Span::styled(safe(&format!("{label} {count}")), style));
-            }
-            let codex_cell = Cell::from(fit(Line::from(spans), *columns.last().unwrap()));
+            let codex_cell = Cell::from(agent_summary(counts, *columns.last().unwrap()));
             let mut cells = if compact {
                 let mut lines = vec![fit(Line::from(name), columns[0])];
                 lines.extend(branch.map(|b| fit(Line::from(b), columns[0])));
@@ -711,6 +704,43 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_stateful_widget(table, area, &mut state);
 }
+fn agent_summary(
+    counts: std::collections::BTreeMap<(u8, String), (usize, Style)>,
+    width: usize,
+) -> Line<'static> {
+    let total: usize = counts.values().map(|(count, _)| count).sum();
+    let mut spans = Vec::new();
+    let mut shown = 0;
+    for ((_, label), (count, style)) in counts {
+        let mut next = spans.clone();
+        if !next.is_empty() {
+            next.push(Span::raw(" · "));
+        }
+        next.push(Span::styled(safe(&format!("{label} {count}")), style));
+        let remaining = total - shown - count;
+        let suffix = if remaining > 0 {
+            format!(" · +{remaining}")
+        } else {
+            String::new()
+        };
+        if Line::from(next.clone()).width() + Line::from(suffix.as_str()).width() > width {
+            if spans.is_empty() {
+                let mut line = fit(
+                    Line::from(next),
+                    width.saturating_sub(Line::from(suffix.as_str()).width()),
+                );
+                line.spans.push(Span::raw(suffix));
+                return fit(line, width);
+            }
+            spans.push(Span::raw(format!(" · +{}", total - shown)));
+            return fit(Line::from(spans), width);
+        }
+        spans = next;
+        shown += count;
+    }
+    Line::from(spans)
+}
+
 fn status_style(thread: &crate::codex::Thread, stale: bool) -> Style {
     priority_style(thread.priority(), stale)
 }
@@ -946,21 +976,18 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
 fn monitor(frame: &mut Frame, area: Rect, app: &App) {
     let snapshot = &app.snapshot;
     let (mut rows, total) = monitor_rows(app);
-    let panel = block(
-        format!(
-            " 全局 Agent · {}{} ",
-            total,
-            if codex_stale(app)
-                || snapshot.claude_error.is_some()
-                || is_stale(snapshot.claude_checked)
-            {
-                " · 状态过期"
-            } else {
-                ""
-            }
-        ),
-        false,
-    );
+    let mut health = String::new();
+    for (name, error, checked) in [
+        ("Codex", &snapshot.codex_error, snapshot.codex_checked),
+        ("Claude", &snapshot.claude_error, snapshot.claude_checked),
+    ] {
+        if error.is_some() {
+            health.push_str(&format!(" · {name} 不可用"));
+        } else if is_stale(checked) {
+            health.push_str(&format!(" · {name} 状态过期"));
+        }
+    }
+    let panel = block(format!(" 全局 Agent · {total}{health} "), false);
     let inner = panel.inner(area);
     frame.render_widget(panel, area);
     if rows.is_empty() {
@@ -1154,6 +1181,12 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         ));
     }
+    if let Some(error) = &app.snapshot.claude_notification_error {
+        lines.push(Line::styled(
+            safe(error),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
     for session in claude {
         let stale = app.snapshot.claude_error.is_some() || is_stale(app.snapshot.claude_checked);
         lines.push(Line::styled(
@@ -1240,7 +1273,7 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
         }
     } else {
         lines.push(Line::styled(
-            "暂无匹配会话",
+            "暂无匹配的 Codex 会话",
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -2063,6 +2096,30 @@ mod tests {
     }
 
     #[test]
+    fn mixed_summary_prioritizes_attention_and_counts_hidden_sessions() {
+        let counts = std::collections::BTreeMap::from([
+            ((3, "Claude 空闲".into()), (2, Style::default())),
+            ((0, "Codex 等待审批".into()), (1, Style::default())),
+        ]);
+        let line = agent_summary(counts, 24);
+        let output: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(output.contains("Codex 等待审批"), "{output}");
+        assert!(output.contains("+2"), "{output}");
+        assert!(!output.contains("Claude"), "{output}");
+        assert!(line.width() <= 24);
+    }
+
+    #[test]
+    fn absent_provider_does_not_mark_healthy_provider_stale() {
+        let mut app = fixture();
+        app.snapshot.claude_error = Some("not installed".into());
+        let output = text(&render(&app, 100, 20, monitor));
+        assert!(output.contains("Claude 不可用"));
+        assert!(!output.contains("状态过期"));
+        assert!(!output.contains("（过期）"));
+    }
+
+    #[test]
     fn claude_monitor_and_details_keep_multiple_sessions_and_provider_freshness() {
         let mut app = fixture();
         app.snapshot.claude_checked = Some(Instant::now());
@@ -2091,6 +2148,17 @@ mod tests {
         app.task = Some("/alpha".into());
         let detail = text(&render(&app, 100, 30, sessions));
         assert!(detail.contains("claude-one") && detail.contains("claude-two"));
+        app.snapshot.claude_notification_error = Some("Claude 提醒保存失败：disk full".into());
+        let output = text(&render(&app, 100, 20, monitor));
+        assert!(!output.contains("过期"));
+        assert!(text(&render(&app, 100, 30, sessions)).contains("提醒保存失败"));
+        let threads = std::mem::take(&mut app.snapshot.threads);
+        let selected = app.thread.take();
+        let detail = text(&render(&app, 100, 30, sessions));
+        assert!(detail.contains("claude-one"));
+        assert!(detail.contains("暂无匹配的 Codex 会话"));
+        app.snapshot.threads = threads;
+        app.thread = selected;
         app.snapshot.claude_error = Some("mock unavailable".into());
         let output = text(&render(&app, 100, 20, monitor));
         assert!(
@@ -2115,7 +2183,7 @@ mod tests {
         assert!(output.contains("另有 1 个会话"));
         assert!(!output.contains("alpha 会话"));
         app.snapshot.codex_error = Some("offline".into());
-        assert!(text(&render(&app, 55, 8, monitor)).contains("状态过期"));
+        assert!(text(&render(&app, 55, 8, monitor)).contains("Codex 不可用"));
         app.snapshot.threads.clear();
         assert!(text(&render(&app, 55, 8, monitor)).contains("Codex 不可用"));
     }
