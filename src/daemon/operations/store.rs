@@ -10,11 +10,11 @@ use std::{
 };
 
 #[derive(Clone)]
-pub(super) struct Store {
-    pub(super) directory: PathBuf,
+pub(crate) struct Store {
+    pub(crate) directory: PathBuf,
 }
 impl Store {
-    pub(super) fn open(root: &Path) -> Result<(Self, BTreeMap<String, Operation>)> {
+    fn initialize(root: &Path) -> Result<Self> {
         let directory = root.join("operations");
         if !directory.try_exists()? {
             let legacy = root.join("operations.json");
@@ -41,8 +41,64 @@ impl Store {
             fs::rename(staging.path(), &directory)?;
             fs::File::open(root)?.sync_all()?;
         }
-        super::super::private_directory(&directory)?;
-        let store = Self { directory };
+        Ok(Self { directory })
+    }
+    pub(crate) fn open(root: &Path) -> Result<(Self, BTreeMap<String, Operation>)> {
+        let store = Self::initialize(root)?;
+        let records = Self::read(root)?;
+        for record in records.values() {
+            store.archive(record)?;
+        }
+        Ok((store, records))
+    }
+    pub(crate) fn open_active(root: &Path) -> Result<(Self, BTreeMap<String, Operation>)> {
+        let store = Self::initialize(root)?;
+        let mut records = Self::read_active(root)?;
+        for record in records.values() {
+            store.archive(record)?;
+        }
+        records.retain(|_, record| !finished(record));
+        Ok((store, records))
+    }
+    pub(crate) fn read(root: &Path) -> Result<BTreeMap<String, Operation>> {
+        let active = Self::read_active(root)?;
+        let archive = root.join("operations/archive");
+        let mut records = if archive.try_exists()? {
+            Self::read_directory(&archive)?
+        } else {
+            BTreeMap::new()
+        };
+        // 终态归档保存后才移除活动记录；若移除失败，活动记录继续阻止误放行。
+        records.extend(active);
+        Ok(records)
+    }
+    /// 只读查询不迁移、不创建目录；新目录存在时绝不回退到旧备份。
+    pub(crate) fn read_active(root: &Path) -> Result<BTreeMap<String, Operation>> {
+        let directory = root.join("operations");
+        if !directory.try_exists()? {
+            let legacy = root.join("operations.json");
+            return match fs::read(&legacy) {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .with_context(|| format!("操作记录损坏：{}", legacy.display())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+                Err(error) => Err(error.into()),
+            };
+        }
+        Self::read_directory(&directory)
+    }
+    fn read_directory(directory: &Path) -> Result<BTreeMap<String, Operation>> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(directory)?;
+        ensure!(
+            metadata.is_dir()
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0,
+            "操作目录必须属于当前用户且权限为 0700：{}",
+            directory.display()
+        );
+        let store = Self {
+            directory: directory.to_owned(),
+        };
         let mut records = BTreeMap::new();
         for entry in fs::read_dir(&store.directory)? {
             let entry = entry?;
@@ -51,23 +107,39 @@ impl Store {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            ensure!(
-                entry.file_type()?.is_file(),
-                "操作记录不是普通文件：{}",
-                path.display()
-            );
-            let record: Operation = serde_json::from_slice(&fs::read(&path)?)
+            let moved = if directory.file_name().is_some_and(|name| name == "archive") {
+                directory.parent().unwrap().join(entry.file_name())
+            } else {
+                directory.join("archive").join(entry.file_name())
+            };
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    fs::symlink_metadata(&moved)?.file_type()
+                }
+                Err(error) => return Err(error.into()),
+            };
+            ensure!(kind.is_file(), "操作记录不是普通文件：{}", path.display());
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // 完成记录可能在列目录之后原子移入 archive。
+                    fs::read(&moved)?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let record: Operation = serde_json::from_slice(&bytes)
                 .with_context(|| format!("操作记录损坏，保留文件并停止启动：{}", path.display()))?;
             ensure!(
-                store.path(&record.id)? == path,
+                store.path(&record.id)?.file_name() == path.file_name(),
                 "操作记录文件名与 ID 不一致：{}",
                 path.display()
             );
             records.insert(record.id.clone(), record);
         }
-        Ok((store, records))
+        Ok(records)
     }
-    pub(super) fn path(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) fn path(&self, id: &str) -> Result<PathBuf> {
         ensure!(
             !id.is_empty()
                 && id
@@ -75,11 +147,26 @@ impl Store {
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_')),
             "操作 ID 不能用作记录文件名：{id}"
         );
-        Ok(self.directory.join(format!("{id}.json")))
+        let archived = self.directory.join("archive").join(format!("{id}.json"));
+        let active = self.directory.join(format!("{id}.json"));
+        Ok(if active.try_exists()? || !archived.try_exists()? {
+            active
+        } else {
+            archived
+        })
     }
-    pub(super) fn save(&self, record: &Operation) -> Result<()> {
-        let path = self.path(&record.id)?;
-        let mut temp = tempfile::NamedTempFile::new_in(&self.directory)?;
+    pub(crate) fn save(&self, record: &Operation) -> Result<()> {
+        self.path(&record.id)?; // 校验 ID，不将外部输入拼成任意路径。
+        let active = self.directory.join(format!("{}.json", record.id));
+        let archive = self.directory.join("archive");
+        let archived = archive.join(format!("{}.json", record.id));
+        let path = if finished(record) {
+            super::super::private_directory(&archive)?;
+            &archived
+        } else {
+            &active
+        };
+        let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
         {
             let mut writer = BufWriter::new(temp.as_file_mut());
             serde_json::to_writer(&mut writer, record)?;
@@ -87,8 +174,30 @@ impl Store {
         }
         temp.as_file().sync_all()?;
         temp.persist(path)?;
+        fs::File::open(path.parent().unwrap())?.sync_all()?;
+        let obsolete = if finished(record) { &active } else { &archived };
+        match fs::remove_file(obsolete) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("新记录已保存，但旧位置未移除；请核对记录"),
+        }
         Ok(())
     }
+    fn archive(&self, record: &Operation) -> Result<()> {
+        let source = self.directory.join(format!("{}.json", record.id));
+        if finished(record) && source.try_exists()? {
+            let archive = self.directory.join("archive");
+            super::super::private_directory(&archive)?;
+            fs::rename(source, archive.join(format!("{}.json", record.id)))?;
+            fs::File::open(&archive)?.sync_all()?;
+            fs::File::open(&self.directory)?.sync_all()?;
+        }
+        Ok(())
+    }
+}
+
+fn finished(record: &Operation) -> bool {
+    matches!(record.status.as_str(), "succeeded" | "failed" | "resolved")
 }
 
 #[cfg(test)]
@@ -121,6 +230,68 @@ mod tests {
         let data = serde_json::to_vec(&records).unwrap();
         fs::write(root.join("operations.json"), &data).unwrap();
         data
+    }
+
+    #[test]
+    fn final_save_failure_preserves_active_blocker_and_archived_failures_are_retained() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _) = Store::open(temp.path()).unwrap();
+        let mut operation = record("active");
+        operation.status = "running".into();
+        store.save(&operation).unwrap();
+        fs::write(store.directory.join("archive"), "blocked archive").unwrap();
+        operation.status = "succeeded".into();
+        assert!(store.save(&operation).is_err());
+        assert_eq!(
+            Store::read_active(temp.path()).unwrap()["active"].status,
+            "running"
+        );
+        fs::remove_file(store.directory.join("archive")).unwrap();
+        operation.status = "failed".into();
+        store.save(&operation).unwrap();
+        assert!(Store::read_active(temp.path()).unwrap().is_empty());
+        assert_eq!(Store::read(temp.path()).unwrap()["active"].status, "failed");
+    }
+
+    #[test]
+    fn active_queries_skip_archived_history_without_deleting_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _) = Store::open(temp.path()).unwrap();
+        for n in 0..32 {
+            store.save(&record(&format!("done-{n}"))).unwrap();
+        }
+        let mut running = record("active");
+        running.status = "running".into();
+        store.save(&running).unwrap();
+        assert_eq!(Store::read_active(temp.path()).unwrap().len(), 1);
+        assert_eq!(Store::read(temp.path()).unwrap().len(), 33);
+        // 模拟最终状态已落盘、尚未归档时退出；下次打开只归档，不重跑。
+        let archived = store.path("done-0").unwrap();
+        fs::rename(&archived, store.directory.join("done-0.json")).unwrap();
+        assert_eq!(Store::open_active(temp.path()).unwrap().1.len(), 1);
+        assert!(archived.exists());
+        fs::write(&archived, "broken historical record").unwrap();
+        assert_eq!(Store::open_active(temp.path()).unwrap().1.len(), 1);
+        assert!(
+            Store::read(temp.path()).is_err(),
+            "历史查询仍须报告损坏，不丢弃记录"
+        );
+    }
+
+    #[test]
+    fn readonly_queries_never_create_or_migrate_and_prefer_published_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        assert!(Store::read(&missing).unwrap().is_empty());
+        assert!(!missing.exists());
+        legacy(temp.path(), BTreeMap::from([("one".into(), record("one"))]));
+        assert_eq!(Store::read(temp.path()).unwrap().len(), 1);
+        assert!(!temp.path().join("operations").exists());
+        let (store, _) = Store::open(temp.path()).unwrap();
+        fs::write(temp.path().join("operations.json"), "obsolete backup").unwrap();
+        assert_eq!(Store::read(temp.path()).unwrap().len(), 1);
+        fs::write(store.path("one").unwrap(), "broken current record").unwrap();
+        assert!(Store::read(temp.path()).is_err());
     }
 
     #[test]

@@ -73,8 +73,6 @@ pub struct Request {
     pub turn: Option<String>,
     pub refresh: u64,
     pub background: bool,
-    #[serde(default)]
-    pub projects: Vec<String>,
 }
 
 impl Snapshot {
@@ -89,31 +87,122 @@ impl Snapshot {
 }
 
 // 快照可覆盖；完成事件使用独立队列，不能丢弃。
+#[derive(Default)]
+struct Published {
+    snapshot: Snapshot,
+    core: Option<Snapshot>,
+    dirty: bool,
+}
 #[derive(Clone, Default)]
-pub struct Updates(Arc<Mutex<Option<Snapshot>>>);
+pub struct Updates {
+    state: Arc<Mutex<Published>>,
+    publishers: Arc<Mutex<AssociationCache>>,
+}
 impl Updates {
     pub fn take(&self) -> Option<Snapshot> {
-        self.0.lock().unwrap().take()
+        let mut state = self.state.lock().unwrap();
+        if !state.dirty {
+            return None;
+        }
+        state.dirty = false;
+        Some(state.snapshot.clone())
     }
     fn publish(&self, snapshot: &Snapshot) {
-        let snapshot = snapshot.clone();
-        *self.0.lock().unwrap() = Some(snapshot);
+        let mut publisher = self.publishers.lock().unwrap();
+        let core = self.state.lock().unwrap().core.clone();
+        let mut snapshot = snapshot.clone();
+        if let Some(core) = core {
+            Self::merge(&mut snapshot, &core);
+            publisher.apply(&mut snapshot);
+        }
+        let mut state = self.state.lock().unwrap();
+        state.snapshot = snapshot;
+        state.dirty = true;
+    }
+    fn publish_core(&self, core: &Snapshot) {
+        let mut publisher = self.publishers.lock().unwrap();
+        let mut snapshot = self.state.lock().unwrap().snapshot.clone();
+        // 归属解析含文件系统 I/O；UI 取快照的锁只保护内存交换。
+        Self::merge(&mut snapshot, core);
+        publisher.apply(&mut snapshot);
+        let mut state = self.state.lock().unwrap();
+        state.snapshot = snapshot;
+        state.core = Some(core.clone());
+        state.dirty = true;
+    }
+    fn merge(snapshot: &mut Snapshot, core: &Snapshot) {
+        snapshot.repos = core.repos.clone();
+        snapshot.zed = core.zed.clone();
+        snapshot.registry_error = core.registry_error.clone();
+        snapshot.registry_checked = core.registry_checked;
+    }
+}
+// 路径解析只在归属输入变化或登记表刷新时重做；普通状态发布复用结果。
+#[derive(Default)]
+struct AssociationCache {
+    tasks: Vec<(String, PathBuf)>,
+    threads: Vec<(String, PathBuf)>,
+    checked: Option<Instant>,
+    associations: BTreeMap<String, (String, PathBuf)>,
+}
+impl AssociationCache {
+    fn apply(&mut self, snapshot: &mut Snapshot) {
+        let tasks: Vec<_> = snapshot
+            .repos
+            .iter()
+            .filter(|r| r.error.is_none())
+            .flat_map(|r| {
+                r.tasks
+                    .iter()
+                    .map(move |t| (r.name.clone(), t.path.clone()))
+            })
+            .collect();
+        let threads: Vec<_> = snapshot
+            .threads
+            .iter()
+            .chain(&snapshot.history)
+            .map(|t| (t.id.clone(), t.cwd.clone()))
+            .collect();
+        if self.tasks != tasks
+            || self.threads != threads
+            || self.checked != snapshot.registry_checked
+        {
+            associate(snapshot);
+            self.tasks = tasks;
+            self.threads = threads;
+            self.checked = snapshot.registry_checked;
+            self.associations = snapshot.associations.clone();
+        } else {
+            snapshot.associations = self.associations.clone();
+        }
+    }
+}
+pub struct Requests {
+    primary: Sender<Request>,
+    core: Option<Sender<Request>>,
+}
+impl Requests {
+    pub fn send(&self, request: Request) -> Result<()> {
+        if let Some(core) = &self.core {
+            core.send(request.clone())?;
+        }
+        self.primary.send(request)?;
+        Ok(())
     }
 }
 
 pub struct Worker {
-    pub requests: Sender<Request>,
+    pub requests: Requests,
     pub updates: Updates,
     pub inbox: Inbox,
     pub chat: Arc<Mutex<ChatNotifications>>,
     cancel: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handles: Vec<JoinHandle<()>>,
 }
 impl Worker {
     pub fn start(registry: PathBuf) -> Result<Self> {
         let inbox = Inbox::remote(&registry, crate::agent::message_id())?;
-        let _ = inbox.sync();
-        let saved = inbox.load().unwrap_or_default();
+        let saved = inbox.load()?;
         let (tx, rx) = mpsc::channel::<Request>();
         let updates = Updates::default();
         let out = updates.clone();
@@ -125,6 +214,14 @@ impl Worker {
         )));
         let client = inbox.client_id().unwrap().to_owned();
         let remote_inbox = inbox.clone();
+        let (core_tx, core_rx) = mpsc::channel();
+        let core_registry = registry.clone();
+        let core_out = updates.clone();
+        let core_stop = cancel.clone();
+        let core_handle = thread::spawn(move || {
+            query::install(core_stop.clone());
+            collect_core(core_registry, core_rx, core_out, core_stop);
+        });
         let handle = thread::spawn(move || {
             let mut request = Request::default();
             let mut latest = Snapshot::default();
@@ -137,10 +234,15 @@ impl Worker {
                 for next in rx.try_iter() {
                     request = next;
                 }
+                let subscription = Request {
+                    background: true,
+                    refresh: request.refresh,
+                    ..Default::default()
+                };
                 let result = crate::daemon::call::<serde_json::Value>(
                     &registry,
                     "snapshot",
-                    serde_json::json!({"client":client,"request":request,"version":version,"instance":instance}),
+                    serde_json::json!({"client":client,"request":subscription,"version":version,"instance":instance}),
                 );
                 match result {
                     Ok(value) => {
@@ -153,16 +255,16 @@ impl Worker {
                             match serde_json::from_value(value["snapshot"].clone()) {
                                 Ok(snapshot) => latest = snapshot,
                                 Err(error) => {
-                                    latest.registry_error =
-                                        Some(format!("后台快照格式错误：{error}"))
+                                    latest.codex_error =
+                                        Some(format!("Agent 后台快照格式错误：{error}"))
                                 }
                             }
                         }
                     }
                     Err(error) => {
                         version = None;
-                        latest.registry_error =
-                            Some(format!("后台连接中断，旧数据过期：{error:#}"));
+                        latest.codex_error =
+                            Some(format!("Agent 扩展不可用，旧状态过期：{error:#}"));
                     }
                 }
                 let key = serde_json::json!([
@@ -181,12 +283,15 @@ impl Worker {
                     detail_retry_at = None;
                     detail = Snapshot::default();
                     if request.history || request.turn.is_some() {
-                        match crate::daemon::call::<Snapshot>(
+                        match crate::daemon::call::<Option<Snapshot>>(
                             &registry,
                             "details",
-                            serde_json::json!(request),
+                            serde_json::json!({"client": client, "request": request}),
                         ) {
-                            Ok(snapshot) => detail = snapshot,
+                            Ok(Some(snapshot)) => detail = snapshot,
+                            Ok(None) => {
+                                detail_retry_at = Some(Instant::now() + Duration::from_millis(250))
+                            }
                             Err(error) => {
                                 detail.query_error(&request, format!("{error:#}"));
                             }
@@ -208,7 +313,6 @@ impl Worker {
                 latest.history_scanned = detail.history_scanned;
                 latest.history_error = detail.history_error.clone();
                 latest.turn = detail.turn.clone();
-                latest.associations.extend(detail.associations.clone());
                 if let Err(error) = remote_inbox.sync() {
                     latest.delivery_error = Some(format!("未读同步失败：{error:#}"));
                 }
@@ -220,20 +324,25 @@ impl Worker {
                     thread::sleep(Duration::from_millis(50));
                 }
             }
-            let _ = remote_inbox.sync();
-            let _ = crate::daemon::call::<serde_json::Value>(
-                &registry,
-                "disconnect",
-                serde_json::json!(client),
-            );
+            if version.is_some() {
+                let _ = remote_inbox.sync();
+                let _ = crate::daemon::call::<serde_json::Value>(
+                    &registry,
+                    "disconnect",
+                    serde_json::json!(client),
+                );
+            }
         });
         Ok(Self {
-            requests: tx,
+            requests: Requests {
+                primary: tx,
+                core: Some(core_tx),
+            },
             updates,
             inbox,
             chat,
             cancel,
-            handle: Some(handle),
+            handles: vec![core_handle, handle],
         })
     }
     pub fn start_local(registry: PathBuf) -> Result<Self> {
@@ -255,21 +364,138 @@ impl Worker {
             collect(registry, rx, out, inbox_out, saved, stop, chat_out);
         });
         Ok(Self {
-            requests: tx,
+            requests: Requests {
+                primary: tx,
+                core: None,
+            },
             updates,
             inbox,
             chat,
             cancel,
-            handle: Some(handle),
+            handles: vec![handle],
         })
     }
 }
 impl Drop for Worker {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
+        for h in self.handles.drain(..) {
             let _ = h.join();
         }
+    }
+}
+
+fn refresh_registry(snapshot: &mut Snapshot, registry: &Path) {
+    match repositories(registry) {
+        Ok((mut repos, zed)) => {
+            for repo in &mut repos {
+                if let Some(old) = snapshot
+                    .repos
+                    .iter()
+                    .find(|old| old.name == repo.name && old.path == repo.path)
+                {
+                    for task in &mut repo.tasks {
+                        if let Some(old) = old.tasks.iter().find(|old| {
+                            old.name == task.name
+                                && old.path == task.path
+                                && (task.name == "main" || old.branch == task.branch)
+                        }) {
+                            task.git = old.git.clone();
+                            task.window = old.window.clone();
+                            task.error = old.error.clone();
+                            task.checked = old.checked;
+                            if task.name == "main" {
+                                task.branch = old.branch.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            snapshot.repos = repos;
+            snapshot.zed = zed;
+            snapshot.registry_error = None;
+            snapshot.registry_checked = Some(Instant::now());
+        }
+        Err(error) => {
+            snapshot.zed = None;
+            snapshot.registry_error = Some(format!("登记表读取失败，旧数据过期：{error:#}"));
+        }
+    }
+}
+
+// 核心采集不连接 Codex、不读写通知；独立线程避免可选服务阻塞导航。
+fn collect_core(
+    registry: PathBuf,
+    requests: Receiver<Request>,
+    updates: Updates,
+    cancel: Arc<AtomicBool>,
+) {
+    let mut snapshot = Snapshot::default();
+    let mut request = Request::default();
+    let mut registry_at = None;
+    let mut windows_at = None;
+    let mut git_at = None;
+    let mut refresh = 0;
+    let mut project = None;
+    let mut scan: Option<GitScan> = None;
+    let mut unpublished = false;
+    let mut published_at = Instant::now();
+    while !cancel.load(Ordering::Relaxed) {
+        for next in requests.try_iter() {
+            request = next;
+        }
+        if request.background {
+            scan = None;
+            git_at = None;
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let force = request.refresh != refresh;
+        refresh = request.refresh;
+        if force || due(registry_at, 10) {
+            refresh_registry(&mut snapshot, &registry);
+            updates.publish_core(&snapshot);
+            registry_at = Some(Instant::now());
+        }
+        if force || due(windows_at, 2) {
+            refresh_windows(&mut snapshot.repos);
+            updates.publish_core(&snapshot);
+            windows_at = Some(Instant::now());
+        }
+        if force || request.project != project {
+            scan = None;
+            git_at = None;
+            project = request.project.clone();
+        }
+        if scan.is_none() && due(git_at, 5) {
+            scan = snapshot
+                .repos
+                .iter()
+                .find(|repo| Some(&repo.name) == project.as_ref())
+                .and_then(|repo| GitScan::new(repo, request.path.as_deref()));
+            git_at = Some(Instant::now());
+        }
+        if let Some(current) = &mut scan {
+            if let Some(repo) = snapshot
+                .repos
+                .iter_mut()
+                .find(|repo| repo.name == current.project)
+            {
+                current.next(repo);
+            } else {
+                current.paths.clear();
+            }
+            if current.paths.is_empty() {
+                scan = None;
+            }
+            unpublished = true;
+        }
+        if unpublished && (scan.is_none() || published_at.elapsed() >= Duration::from_millis(100)) {
+            updates.publish_core(&snapshot);
+            unpublished = false;
+            published_at = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(if scan.is_some() { 1 } else { 50 }));
     }
 }
 
@@ -659,16 +885,8 @@ fn collect(
     let mut activity_at = None;
     let mut retry_at = None;
     let mut retry_delay = 2;
-    let mut git_at = None;
-    let mut git_project = None;
-    let mut git_scan: Option<GitScan> = None;
-    let mut next_project = 0;
-    let mut cursor: Option<String> = None;
-    let mut seen_cursors = HashSet::new();
     let mut handled_refresh = 0;
     let mut revision = crate::daemon::REVISION.load(Ordering::Relaxed);
-    let mut unpublished = false;
-    let mut published_at = Instant::now();
     while !cancel.load(Ordering::Relaxed) {
         for next in requests.try_iter() {
             request = next;
@@ -680,41 +898,7 @@ fn collect(
         let mut dirty = false;
         let mut associations_changed = false;
         if force || due(registry_at, 10) {
-            match repositories(&registry) {
-                Ok((mut repos, zed)) => {
-                    for repo in &mut repos {
-                        if let Some(old) = snapshot
-                            .repos
-                            .iter()
-                            .find(|r| r.name == repo.name && r.path == repo.path)
-                        {
-                            for task in &mut repo.tasks {
-                                if let Some(t) = old.tasks.iter().find(|t| {
-                                    t.name == task.name
-                                        && t.path == task.path
-                                        && (task.name == "main" || t.branch == task.branch)
-                                }) {
-                                    task.git = t.git.clone();
-                                    task.window = t.window.clone();
-                                    task.error = t.error.clone();
-                                    task.checked = t.checked;
-                                    if task.name == "main" {
-                                        task.branch = t.branch.clone();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    snapshot.repos = repos;
-                    snapshot.zed = zed;
-                    snapshot.registry_error = None;
-                    snapshot.registry_checked = Some(Instant::now());
-                }
-                Err(e) => {
-                    snapshot.zed = None;
-                    snapshot.registry_error = Some(format!("登记表读取失败，旧数据过期：{e:#}"))
-                }
-            }
+            refresh_registry(&mut snapshot, &registry);
             registry_at = Some(Instant::now());
             dirty = true;
             // 先发布项目列表，Codex 或 Git 慢时仍可开始导航。
@@ -725,8 +909,7 @@ fn collect(
             if query::cancelled() {
                 return;
             }
-            refresh_windows(&mut snapshot.repos);
-            updates.publish(&snapshot);
+            // 后台仅保留通知归属所需的登记信息；窗口由各 Console 核心采集。
             // 本地投递记录不依赖 daemon 连接或重试退避；采集本身不投递消息。
             let state = crate::agent::Store::new(&registry).and_then(|store| {
                 let state = store.load()?;
@@ -927,141 +1110,13 @@ fn collect(
             activity_at = Some(Instant::now());
             dirty = true;
         }
-        // 合并采集期间的新选择，只查询当前需要的项目。
-        for next in requests.try_iter() {
-            request = next;
-        }
-        if force || request.project != git_project || request.background {
-            git_scan = None;
-            git_at = None;
-            git_project = request.project.clone();
-        }
-        if !request.background {
-            if git_scan.is_none() && due(git_at, 5) {
-                git_scan = snapshot
-                    .repos
-                    .iter()
-                    .filter(|r| {
-                        request.projects.contains(&r.name)
-                            || Some(&r.name) == request.project.as_ref()
-                    })
-                    .nth(next_project)
-                    .and_then(|repo| GitScan::new(repo, request.path.as_deref()));
-                if git_scan.is_none() {
-                    next_project = 0;
-                    git_at = Some(Instant::now());
-                }
-            }
-            if let Some(scan) = &mut git_scan {
-                if let Some(repo) = snapshot.repos.iter_mut().find(|r| r.name == scan.project) {
-                    scan.next(repo);
-                    dirty = true;
-                } else {
-                    scan.paths.clear();
-                }
-                if scan.paths.is_empty() {
-                    git_scan = None;
-                    next_project += 1;
-                    git_at = None;
-                }
-            }
-        }
-        let key = request
-            .path
-            .clone()
-            .filter(|_| request.history)
-            .map(|path| (path, request.descendants));
-        if key != snapshot.history_key || force {
-            snapshot.history_key = key.clone();
-            snapshot.history.clear();
-            associations_changed = true;
-            snapshot.history_pages = 0;
-            snapshot.history_scanned = 0;
-            snapshot.history_more = true;
-            snapshot.history_error = None;
-            cursor = None;
-            seen_cursors.clear();
-            dirty = true;
-        }
-        if let Some((path, descendants)) = key
-            && snapshot.history_more
-            && snapshot.history_pages <= request.page
-            && snapshot.history_error.is_none()
-        {
-            let result = (|| -> Result<crate::codex::Page> {
-                let client = client.as_mut().context("Codex 未连接；r 重试")?;
-                client.history(
-                    if descendants {
-                        None
-                    } else {
-                        Some(path.as_path())
-                    },
-                    cursor.as_deref(),
-                )
-            })();
-            match result {
-                Ok(page) => {
-                    associations_changed = true;
-                    snapshot.history_scanned += page.data.len();
-                    snapshot.history_pages += 1;
-                    let mut owners = Owners::new(&snapshot.repos);
-                    let mut ids: HashSet<_> =
-                        snapshot.history.iter().map(|t| t.id.clone()).collect();
-                    for t in page.data {
-                        if !t.ephemeral
-                            && owners.get(&t.cwd)
-                                == request.project.clone().map(|p| (p, path.clone()))
-                            && ids.insert(t.id.clone())
-                        {
-                            snapshot.history.push(t);
-                        }
-                    }
-                    cursor = page.next_cursor;
-                    snapshot.history_more = cursor.is_some();
-                    if let Some(c) = &cursor
-                        && !seen_cursors.insert(c.clone())
-                    {
-                        snapshot.history_error = Some("Codex 返回重复分页游标".into());
-                        snapshot.history_more = false;
-                    }
-                }
-                Err(e) => {
-                    snapshot.history_error = Some(format!("{e:#}"));
-                    client = None;
-                }
-            }
-            dirty = true;
-        }
-        if let Some(id) = &request.turn
-            && (force || snapshot.turn.as_ref().is_none_or(|(old, _)| old != id))
-        {
-            let value = client
-                .as_mut()
-                .context("Codex 未连接")
-                .and_then(|c| c.latest_turn(id))
-                .map_err(|e| format!("{e:#}"));
-            if value.is_err() {
-                client = None;
-            }
-            snapshot.turn = Some((id.clone(), value));
-            dirty = true;
-        }
         if associations_changed {
             associate(&mut snapshot);
         }
-        unpublished |= dirty;
-        if unpublished
-            && (git_scan.is_none() || published_at.elapsed() >= Duration::from_millis(100))
-        {
+        if dirty {
             updates.publish(&snapshot);
-            unpublished = false;
-            published_at = Instant::now();
         }
-        thread::sleep(Duration::from_millis(if git_scan.is_some() {
-            1
-        } else {
-            50
-        }));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 pub(crate) fn associate(snapshot: &mut Snapshot) {
@@ -1078,19 +1133,68 @@ fn due(at: Option<Instant>, seconds: u64) -> bool {
 }
 
 pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<(String, String)> {
-    let output = crate::daemon::operations::execute(
+    let output = crate::core::execute(
         registry_path,
         crate::Action::Open {
             project: name.into(),
             name: task.into(),
         },
     )?;
-    let (_, target) = output.terminal.context("后台未返回终端目标")?;
+    let (_, target) = output.terminal.context("操作未返回终端目标")?;
     Ok((target.session, target.window))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ownership_cache_reuses_inputs_and_refreshes_changed_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("task");
+        std::fs::create_dir(&path).unwrap();
+        let mut snapshot = Snapshot {
+            repos: vec![repo("demo", path.clone())],
+            threads: vec![
+                serde_json::from_value(serde_json::json!({"id":"t","cwd":path,"status":null}))
+                    .unwrap(),
+            ],
+            ..Default::default()
+        };
+        let mut cache = AssociationCache::default();
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.contains_key("t"));
+        std::fs::remove_dir(&path).unwrap();
+        // 未改变的普通状态发布不做文件系统查询。
+        snapshot.associations.clear();
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.contains_key("t"));
+        snapshot.registry_checked = Some(Instant::now());
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.is_empty());
+        std::fs::create_dir(&path).unwrap();
+        snapshot.threads[0].id = "new".into();
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.contains_key("new"));
+        snapshot.repos[0].error = Some("失效".into());
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.is_empty());
+    }
+    #[test]
+    fn ui_can_take_last_snapshot_while_a_publisher_is_busy() {
+        let updates = Updates::default();
+        updates.publish(&Snapshot {
+            history_pages: 7,
+            ..Default::default()
+        });
+        let _busy = updates.publishers.lock().unwrap();
+        let reader = updates.clone();
+        let (output, input) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            output.send(reader.take().unwrap().history_pages).unwrap();
+        });
+        assert_eq!(input.recv_timeout(Duration::from_secs(1)).unwrap(), 7);
+        thread.join().unwrap();
+    }
+
     #[test]
     fn details_failure_is_associated_with_the_requested_turn() {
         let request = super::Request {

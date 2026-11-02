@@ -12,16 +12,23 @@ use std::{
     time::{Duration, Instant},
 };
 
-thread_local! { static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) }; }
+struct Query {
+    cancel: Arc<AtomicBool>,
+    timeout: Option<Duration>,
+}
+thread_local! { static QUERY: RefCell<Option<Query>> = const { RefCell::new(None) }; }
 
 pub fn install(cancel: Arc<AtomicBool>) {
-    CANCEL.with(|slot| *slot.borrow_mut() = Some(cancel));
+    install_with_timeout(cancel, Some(Duration::from_secs(2)));
+}
+pub fn install_with_timeout(cancel: Arc<AtomicBool>, timeout: Option<Duration>) {
+    QUERY.with(|slot| *slot.borrow_mut() = Some(Query { cancel, timeout }));
 }
 pub fn cancelled() -> bool {
-    CANCEL.with(|slot| {
+    QUERY.with(|slot| {
         slot.borrow()
             .as_ref()
-            .is_some_and(|c| c.load(Ordering::Relaxed))
+            .is_some_and(|q| q.cancel.load(Ordering::Relaxed))
     })
 }
 pub fn check() -> Result<()> {
@@ -32,10 +39,9 @@ pub fn check() -> Result<()> {
 }
 
 pub fn output(command: &mut Command) -> Result<Output> {
-    let enabled = CANCEL.with(|slot| slot.borrow().is_some());
-    if !enabled {
+    let Some(timeout) = QUERY.with(|slot| slot.borrow().as_ref().map(|q| q.timeout)) else {
         return Ok(command.output()?);
-    }
+    };
     check()?;
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;
@@ -54,13 +60,20 @@ pub fn output(command: &mut Command) -> Result<Output> {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if cancelled() || start.elapsed() >= Duration::from_secs(2) {
+        if cancelled() || timeout.is_some_and(|limit| start.elapsed() >= limit) {
             // 此 PID 是本次新建进程组的组长，绝不操作用户已有进程组。
             unsafe {
                 libc::kill(-(child.id() as i32), libc::SIGKILL);
             }
             let _ = child.wait();
-            bail!("查询取消或超过 2 秒：{:?}", command.get_program());
+            if cancelled() {
+                bail!("查询已取消：{:?}", command.get_program());
+            }
+            bail!(
+                "查询超过 {} 秒：{:?}",
+                timeout.unwrap().as_secs(),
+                command.get_program()
+            );
         }
         std::thread::sleep(Duration::from_millis(delay));
         delay = (delay * 2).min(10);
@@ -86,7 +99,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let worker = std::thread::spawn(move || {
-            install(worker_cancel);
+            install_with_timeout(worker_cancel, None);
             output(Command::new("sh").args(["-c", "sleep 30"]))
         });
         std::thread::sleep(Duration::from_millis(100));

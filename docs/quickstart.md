@@ -6,14 +6,13 @@
 
 twig 用 Git Worktree 和 tmux 管理本地任务环境。一个项目对应一个 tmux Session；一个任务对应一个分支、Worktree 和窗口，窗口可分成多个 Pane。
 
-项目通过登记别名定位，任务命令始终显式指定项目与任务，不根据当前目录猜测。普通任务由用户自行开发或运行 Agent；可选主控支持受管 Codex 任务的派活与跟进，见 [主控 Agent](agent.md)。Twig 不自动提交、合并或部署。
+项目通过登记别名定位，任务命令始终显式指定项目与任务，不根据当前目录猜测。普通任务由用户自行开发或运行 Agent；可选主控支持受管 Codex 任务的派活与跟进，见 [主控 Agent](agent.md)。普通任务、Console 和工作台不需要启动 Twig daemon 或 Codex。Twig 不自动提交、合并或部署。
 
 ## 登记已有仓库
 
 准备一个至少有一次提交的普通 Git 仓库；需要克隆时先自行运行 git clone。
 
 ```sh
-twig daemon start
 twig add myapp --path ~/projects/myapp
 twig ls
 twig ls myapp

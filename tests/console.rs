@@ -21,6 +21,7 @@ struct Fixture {
     bin: PathBuf,
     socket: String,
     tmux: String,
+    core_only: bool,
 }
 impl Fixture {
     fn new() -> Self {
@@ -60,6 +61,7 @@ impl Fixture {
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let f = Self {
+            core_only: false,
             registry: temp.path().join("registry.toml"),
             temp,
             repo,
@@ -93,7 +95,15 @@ impl Fixture {
         f.git(&["branch", "--set-upstream-to=base-source/main", "main"]);
         f
     }
+    fn core() -> Self {
+        let mut fixture = Self::new();
+        fixture.core_only = true;
+        fixture
+    }
     fn env(&self, c: &mut Command) {
+        if self.core_only {
+            c.env("TWIG_TEST_NO_DAEMON", "1");
+        }
         c.current_dir(self.temp.path())
             .env(
                 "PATH",
@@ -126,7 +136,9 @@ impl Fixture {
             .arg("--config")
             .arg(&self.registry)
             .args(args);
-        support::daemon::ensure(&c, &self.registry);
+        if !self.core_only {
+            support::daemon::ensure(&c, &self.registry);
+        }
         let o = c.output().unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     }
@@ -180,6 +192,7 @@ impl Fixture {
         let mut command = Command::new("sh");
         self.env(&mut command);
         command.env("TWIG_SLOW_CODEX", if slow { "1" } else { "0" });
+        command.env("TWIG_OPERATION_PROGRESS", "1");
         command.args([
             "-c",
             r#"
@@ -258,7 +271,12 @@ impl Pty {
     }
 
     fn spawn(mut command: Command) -> Self {
-        support::daemon::for_pty(&command);
+        if !command
+            .get_envs()
+            .any(|(key, value)| key == "TWIG_TEST_NO_DAEMON" && value.is_some())
+        {
+            support::daemon::for_pty(&command);
+        }
         let (mut master, mut slave) = (0, 0);
         let mut size = libc::winsize {
             ws_row: 36,
@@ -530,7 +548,7 @@ fn pty_exit_drains_output_larger_than_the_terminal_buffer() {
 
 #[test]
 fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     f.git(&["branch", "feature/demo"]);
     let real_git = Command::new("sh")
@@ -572,7 +590,7 @@ fn branch_loading_keeps_input_responsive_and_blocks_early_submission() {
 
 #[test]
 fn navigation_batches_worktree_and_window_queries() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     f.twig(&["new", "demo", "second", "--no-open"]);
     let real_git = Command::new("sh")
@@ -666,7 +684,7 @@ fn navigation_batches_worktree_and_window_queries() {
 #[test]
 fn navigation_drag_copies_text_and_preserves_readonly_state() {
     use base64::{Engine, engine::general_purpose::STANDARD};
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let registry = fs::read(&f.registry).unwrap();
     let mut command = Command::new("sh");
@@ -944,6 +962,7 @@ fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
         );
         p.send(b"\x1b");
         p.wait_screen_absent("使用已有分支");
+        p.wait_screen_absent("Esc 返回表单");
         p.send(b"\x1b");
         p.wait_screen_absent("新建任务");
         p.send(b"/auth\rdd");
@@ -958,6 +977,7 @@ fn form_copy_stays_inside_modal_and_escape_clears_before_closing() {
         );
         p.send(b"\x1b");
         p.wait_screen_absent("删除任务");
+        p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
         p.send(b"q");
         assert!(p.wait_exit().success());
         assert_eq!(fs::read(&f.registry).unwrap(), registry);
@@ -999,7 +1019,7 @@ fn noninteractive_console_is_explicit_and_completion_remains_readonly() {
 }
 #[test]
 fn zed_links_follow_tasks_and_config_without_writing_registry() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let original = fs::read_to_string(&f.registry).unwrap();
     let configured = format!("[zed]\nssh_host = 'me@devbox:2222'\n{original}");
@@ -1046,7 +1066,7 @@ fn zed_links_follow_tasks_and_config_without_writing_registry() {
 
 #[test]
 fn empty_and_broken_registry_keep_terminal_usable_and_do_not_write() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     let mut p = f.terminal(false);
     p.wait("尚未登记项目");
     p.send(b"q");
@@ -1061,7 +1081,7 @@ fn empty_and_broken_registry_keep_terminal_usable_and_do_not_write() {
 }
 #[test]
 fn navigation_search_resize_and_quit_work_during_slow_queries() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let state = fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
     let mut p = f.terminal(true);
@@ -1087,7 +1107,7 @@ fn navigation_search_resize_and_quit_work_during_slow_queries() {
 }
 #[test]
 fn task_visit_order_persists_and_browsing_is_readonly() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     thread::sleep(Duration::from_millis(2));
     f.twig(&["new", "demo", "second", "--no-open"]);
@@ -1161,8 +1181,38 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
 }
 
 #[test]
+fn busy_execution_lock_does_not_freeze_console_navigation_or_exit() {
+    let f = Fixture::core();
+    f.init();
+    let root = fs::read_dir(f.registry.parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("execution.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut p = f.terminal(false);
+    p.wait_screen("auth");
+    let started = Instant::now();
+    p.send(b"2/auth\r\r");
+    p.wait("有操作正在执行");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "不能等待其他操作释放锁"
+    );
+    drop(lock);
+}
+
+#[test]
 fn enter_main_and_task_releases_lock_and_restores_terminal() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     for keys in [b"/main\r\r".as_slice(), b"/auth\r\r".as_slice()] {
         let mut p = f.terminal(false);
@@ -1180,6 +1230,11 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
         p.wait(" · 全局 Codex ");
         p.send(b"printf 'ENTERED_%s\\n' SHELL\r");
         p.wait("ENTERED_SHELL");
+        assert!(
+            !p.text.contains("操作 local-"),
+            "全屏界面不能直接输出操作 ID"
+        );
+        assert!(!p.text.contains("操作进度："), "全屏界面不能直接输出进度");
         assert_ne!(fs::read(&f.registry).unwrap(), before_entry);
         let registry: toml::Value =
             toml::from_str(&fs::read_to_string(&f.registry).unwrap()).unwrap();
@@ -1225,7 +1280,7 @@ fn enter_main_and_task_releases_lock_and_restores_terminal() {
 
 #[test]
 fn workbench_split_resize_paste_disconnect_and_process_survival() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let mux = |args: &[&str]| {
         let out = Command::new(&f.tmux)
@@ -1284,7 +1339,7 @@ fn workbench_split_resize_paste_disconnect_and_process_survival() {
 
 #[test]
 fn workbench_switches_projects_and_rejects_its_own_session() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let other = f.temp.path().join("other");
     assert!(
@@ -1370,7 +1425,7 @@ fn workbench_switches_projects_and_rejects_its_own_session() {
 
 #[test]
 fn new_and_open_share_workbench_and_return_to_the_selected_task() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let target = f.repo.with_file_name("repo.worktrees").join("feat/unified");
     let mut previous_pids = None;
@@ -1568,6 +1623,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     let stop = Arc::new(AtomicBool::new(false));
     let offline = Arc::new(AtomicBool::new(false));
     let turn_failure = Arc::new(AtomicBool::new(false));
+    let slow_history = Arc::new(AtomicBool::new(true));
     let methods = Arc::new(Mutex::new(Vec::new()));
     let done = stop.clone();
     let disconnected = offline.clone();
@@ -1590,6 +1646,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
             let failed_turn = failed_turn.clone();
             let seen = seen.clone();
             let cwd = cwd.clone();
+            let slow_history = slow_history.clone();
             connections.push(thread::spawn(move || {
             socket.set_nonblocking(false).unwrap();
             socket
@@ -1639,6 +1696,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
                         json!({"thread":thread_value("LIVE_THREAD",json!({"type":"active","activeFlags":["waitingOnApproval"]}))})
                     }
                     "thread/list" => {
+                        if slow_history.swap(false, Ordering::Relaxed) { thread::sleep(Duration::from_secs(3)); }
                         assert_eq!(v["params"]["useStateDbOnly"], true);
                         if v["params"]["cursor"].is_null() {
                             let mut temporary =
@@ -2070,7 +2128,7 @@ fn main_window_collision_is_reported_without_taking_over_or_closing_it() {
 
 #[test]
 fn forms_register_create_retry_and_enter_task() {
-    let mut f = Fixture::new();
+    let mut f = Fixture::core();
     let spaced = f.temp.path().join("repo with spaces");
     fs::rename(&f.repo, &spaced).unwrap();
     f.repo = spaced;
@@ -2148,7 +2206,7 @@ fn forms_register_create_retry_and_enter_task() {
 #[test]
 fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
     for during_confirmation in [false, true] {
-        let f = Fixture::new();
+        let f = Fixture::core();
         f.init();
         if during_confirmation {
             f.git(&["branch", "pending"]);
@@ -2160,7 +2218,7 @@ fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
         p.task_form_ready();
         if during_confirmation {
             p.send(b"pending\r");
-            p.wait("使用已有分支");
+            p.wait_screen("Esc 返回表单");
             let mut state: serde_json::Value =
                 serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
             state["pending"] = serde_json::json!({"branch": "pending", "base": "main", "path": f.repo.with_file_name("repo.worktrees").join("pending")});
@@ -2250,7 +2308,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     p.wait("feature/beta");
     assert!(!p.text.contains("feature/remote"));
     p.send(b"\x1b[B\x1b[B\t\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     // 默认取消，候选选择本身不创建资源。
     p.send(b"\r");
     p.clear_output();
@@ -2258,7 +2316,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     assert_eq!(fs::read(&state_path).unwrap(), state_before);
     assert_eq!(refs(), before);
     p.send(b"\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\t\r");
     p.created_task(&f, "feature/beta");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -2286,13 +2344,13 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         // 本地与远端候选显示同名，第二项才是远端跟踪分支。
         p.send(b"\x1b[B\x1b[B");
         p.send(accept);
-        p.wait("使用已有分支");
+        p.wait_screen("Esc 返回表单");
         // 默认取消后再次提交，仍须保持同一远端候选。
         p.send(b"\r");
         p.task_form_ready();
         p.clear_output();
         p.send(b"\r");
-        p.wait("使用已有分支");
+        p.wait_screen("Esc 返回表单");
         p.send(b"\t\r");
         p.created_task(&f, "feat/collision");
         let state: serde_json::Value = serde_json::from_slice(
@@ -2343,7 +2401,7 @@ fn remote_candidates_fill_task_names_and_preserve_local_precedence() {
         p.wait("upstream/feat/remote");
         assert!(!p.text.contains("origin/HEAD"));
         p.send(b"\t\r");
-        p.wait("使用已有分支");
+        p.wait_screen("Esc 返回表单");
         if !local {
             // Tab 填入后仍保留所选的 upstream，不回到 origin。
             p.wait("upstream/feat/remote");
@@ -2549,7 +2607,7 @@ fn remote_candidate_handles_remote_names_with_slashes() {
     p.send(b"team/mirror/");
     p.wait("team/mirror/fix/login");
     p.send(b"\t\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\t\r");
     p.created_task(&f, "fix/login");
     let output = Command::new("git")
@@ -2630,11 +2688,13 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.send(b"2/new\r");
     p.task_form_ready();
     p.send(b"existing\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\r");
+    p.wait_screen_absent("使用已有分支");
+    p.wait_screen_absent("Esc 返回表单");
     p.clear_output();
     p.send(b"\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let before = fs::read(&state_path).unwrap();
     assert!(!String::from_utf8_lossy(&before).contains("existing"));
@@ -2648,7 +2708,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     f.git(&["worktree", "remove", occupied.to_str().unwrap()]);
     p.clear_output();
     p.send(b"\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\t\r");
     p.created_task(&f, "existing");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
@@ -2783,13 +2843,17 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     p.task_form_ready();
     // 手动输入后切到起点字段提交，不接受候选，仍允许选择来源。
     p.send(b"feat/remote\x1b[Z\r");
-    p.wait("origin/feat/remote");
+    p.wait_screen("Esc 返回表单");
+    p.wait_screen("origin/feat/remote");
     p.send(b"\t");
     // 切换来源重置为取消，Enter 返回表单。
     p.send(b"j\r");
+    p.wait_screen_absent("使用已有分支");
+    p.wait_screen_absent("Esc 返回表单");
     p.clear_output();
     p.send(b"\r");
-    p.wait("origin/feat/remote");
+    p.wait_screen("Esc 返回表单");
+    p.wait_screen("origin/feat/remote");
     p.send(b"j");
     p.wait("upstream/feat/remote");
     p.send(b"\t\r");
@@ -2816,7 +2880,7 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
 
 #[test]
 fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let config = fs::read(support::project_dir(&f.repo, &f.registry).join("config.json")).unwrap();
     let run = |name: &str| {
@@ -2842,7 +2906,7 @@ fn register_initialized_repository_reuses_alias_and_rejects_conflict() {
         config,
         fs::read(support::project_dir(&f.repo, &f.registry).join("config.json")).unwrap()
     );
-    let other = Fixture::new();
+    let other = Fixture::core();
     let registry = fs::read_to_string(&f.registry).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
     f.env(&mut command);
@@ -2948,8 +3012,54 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
 }
 
 #[test]
+fn slow_delete_query_can_be_cancelled_then_complete_and_delete() {
+    let f = Fixture::core();
+    f.init();
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    fs::write(f.bin.join("git"), "#!/bin/sh\ncase \" $* \" in *' --ignored '* ) if [ ! -f \"$TWIG_QUERY_DONE\" ]; then sleep 3; touch \"$TWIG_QUERY_DONE\"; fi;; esac\nexec \"$TWIG_REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(f.bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .env("TWIG_QUERY_DONE", f.temp.path().join("query-completed"))
+        .env(
+            "TWIG_REAL_GIT",
+            String::from_utf8(real_git.stdout).unwrap().trim(),
+        )
+        .arg("--config")
+        .arg(&f.registry);
+    let mut p = Pty::spawn(command);
+    p.wait_screen("auth");
+    p.send(b"2/auth\rdd");
+    p.wait_screen("正在查询");
+    p.send(b"\x1b");
+    p.wait_screen_absent("删除任务");
+    p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
+    p.clear_output();
+    p.send(b"dd");
+    let started = Instant::now();
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let task = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+    assert!(task.is_dir());
+    p.send(b"\t\r");
+    p.wait_screen("已选中 demo / main");
+    assert!(!task.exists());
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+    let state =
+        fs::read_to_string(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
+    assert!(!state.contains("auth"));
+}
+
+#[test]
 fn delete_task_confirmation_protection_and_keep_branch() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -2959,13 +3069,16 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     p.send(b"\r/main\r/delete\r");
     p.wait("不能删除主工作目录");
     p.send(b"/auth\r/delete\r");
-    p.wait("确认删除");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
     // 默认取消，Enter 不产生写操作。
     p.send(b"\r");
-    p.wait("主工作目录");
+    p.wait_screen_absent("删除任务");
+    p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
     assert!(path.is_dir());
     fs::write(path.join("unsaved"), "keep me").unwrap();
-    p.send(b"/delete\r\t\r");
+    p.send(b"/delete\r");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
+    p.send(b"\t\r");
     p.wait("删除失败");
     assert!(path.is_dir());
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
@@ -2987,7 +3100,7 @@ fn delete_task_confirmation_protection_and_keep_branch() {
 
 #[test]
 fn delete_task_removes_branch_and_rejects_changed_identity() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let mut state: serde_json::Value =
@@ -3014,7 +3127,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     p.send(b"\r/auth\rd");
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     p.send(b"d");
-    p.wait("确认删除");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
     // 默认勾选删除本地分支，确认后执行。
     state["auth"]["branch"] = "changed".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
@@ -3046,37 +3159,45 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
 
 #[test]
 fn delete_ignored_defaults_on_and_keeps_default_cancel() {
-    let f = Fixture::new();
-    f.init();
-    let state: serde_json::Value = serde_json::from_slice(
-        &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
-    )
-    .unwrap();
-    let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
-    fs::write(f.repo.join(".git/info/exclude"), ".venv/\n").unwrap();
-    fs::create_dir(path.join(".venv")).unwrap();
-    fs::write(path.join(".venv/data"), "ignored").unwrap();
-    let mut p = f.terminal(false);
-    p.wait("auth");
-    p.send(b"\r/auth\rdd");
-    p.wait("同时删除被忽略文件");
-    p.send(b"\x1b[6~");
-    p.wait(".venv/");
-    // 默认勾选 ignored 删除；关闭后仍保护 ignored 文件。
-    p.send(b"j \t\r");
-    p.wait("删除失败");
-    assert!(path.join(".venv/data").exists());
-    // 切换选项会回到默认取消，Enter 不删除。
-    p.send(b"\x1b[B \r");
-    p.wait("主工作目录");
-    assert!(path.join(".venv/data").exists());
-    p.clear_output();
-    p.send(b"dd\t\r");
-    p.wait_screen("已选中 demo / main");
-    assert!(!path.exists());
-    p.send(b"q");
-    p.wait("TERMINAL_RESTORED:0");
-    assert!(p.wait_exit().success());
+    // 关闭旧弹窗后必须等页脚清除，分片输出中的旧页脚不能作为新弹窗就绪信号。
+    for budget in [usize::MAX, 128] {
+        let f = Fixture::core();
+        f.init();
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap(),
+        )
+        .unwrap();
+        let path = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+        fs::write(f.repo.join(".git/info/exclude"), ".venv/\n").unwrap();
+        fs::create_dir(path.join(".venv")).unwrap();
+        fs::write(path.join(".venv/data"), "ignored").unwrap();
+        let mut p = f.terminal(false);
+        p.read_budget = budget;
+        p.wait("auth");
+        p.send(b"\r/auth\rdd");
+        p.wait_screen("PgUp/PgDn 滚动清单及错误");
+        p.wait("同时删除被忽略文件");
+        p.send(b"\x1b[6~");
+        p.wait(".venv/");
+        // 默认勾选 ignored 删除；关闭后仍保护 ignored 文件。
+        p.send(b"j \t\r");
+        p.wait("删除失败");
+        assert!(path.join(".venv/data").exists());
+        // 切换选项会回到默认取消，Enter 不删除。
+        p.send(b"\x1b[B \r");
+        p.wait_screen_absent("删除任务");
+        p.wait_screen_absent("PgUp/PgDn 滚动清单及错误");
+        assert!(path.join(".venv/data").exists());
+        p.clear_output();
+        p.send(b"dd");
+        p.wait_screen("PgUp/PgDn 滚动清单及错误");
+        p.send(b"\t\r");
+        p.wait_screen("已选中 demo / main");
+        assert!(!path.exists());
+        p.send(b"q");
+        p.wait("TERMINAL_RESTORED:0");
+        assert!(p.wait_exit().success());
+    }
 }
 
 #[test]
@@ -3244,7 +3365,7 @@ fn new_form_uses_latest_remote_base_by_default() {
 
 #[test]
 fn task_creation_enters_workbench_while_startup_writes_files() {
-    let f = Fixture::new();
+    let f = Fixture::core();
     f.init();
     fs::create_dir_all(f.repo.join(".twig")).unwrap();
     fs::write(
@@ -3269,4 +3390,65 @@ panes = [{ command = ["sh", "-c", "i=0; while [ $i -lt 100 ]; do touch startup-$
     );
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
+    assert!(p.wait_exit().success());
+}
+
+#[test]
+fn stalled_optional_backend_does_not_block_core_navigation_or_workbench() {
+    use std::{
+        os::unix::{fs::DirBuilderExt, net::UnixListener},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+    let f = Fixture::core();
+    f.init();
+    let registry = f.registry.canonicalize().unwrap();
+    let id = registry
+        .as_os_str()
+        .as_encoded_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+        });
+    let dir = PathBuf::from(format!("/tmp/twig-{}", unsafe { libc::geteuid() }));
+    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&dir) {
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+    let socket = dir.join(format!("{id:016x}.sock"));
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let signal = stop.clone();
+    let handle = thread::spawn(move || {
+        let mut connections = Vec::new();
+        while !signal.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => connections.push(stream), // 故意不回复任何 RPC。
+                Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    struct StalledBackend(Arc<AtomicBool>, Option<thread::JoinHandle<()>>, PathBuf);
+    impl Drop for StalledBackend {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            self.1.take().unwrap().join().unwrap();
+            fs::remove_file(&self.2).unwrap();
+        }
+    }
+    let _backend = StalledBackend(stop, Some(handle), socket);
+    let mut p = f.terminal(false);
+    p.wait_screen("auth");
+    p.send(b"2/auth\r\r");
+    p.wait(" · 全局 Codex ");
+    p.send(b"printf 'OPTIONAL_%s\\n' BACKEND\r");
+    p.wait("OPTIONAL_BACKEND");
+    p.clear_output();
+    p.send(b"\x17d");
+    p.wait("任务 / ");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
 }

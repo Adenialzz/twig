@@ -43,11 +43,41 @@ mod tests {
     }
 
     #[test]
+    fn offline_read_receipts_persist_and_preserve_unobserved_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        let disk = Inbox::new(&config).unwrap();
+        disk.record(event("old", true), false).unwrap();
+        disk.record(event("controller", false), false).unwrap();
+        let remote = Inbox::remote(&config, "client".into()).unwrap();
+        remote.load().unwrap();
+        disk.record(event("new", true), false).unwrap();
+        remote.read_task("demo", Path::new("/work")).unwrap();
+        drop(remote);
+        let restored = Inbox::remote(&config, "new-client".into()).unwrap();
+        let ids: HashSet<_> = restored
+            .load()
+            .unwrap()
+            .unread
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, HashSet::from(["new".into(), "controller".into()]));
+        restored.read_controller().unwrap();
+        assert_eq!(disk.load().unwrap().unread[0].id, "new");
+        fs::write(&disk.path, b"broken").unwrap();
+        assert!(Inbox::remote(&config, "broken-client".into()).is_err());
+        assert!(restored.read_task("demo", Path::new("/work")).is_err());
+        assert_eq!(fs::read(&disk.path).unwrap(), b"broken");
+    }
+
+    #[test]
     fn stable_remote_view_is_local_and_only_acknowledges_observed_events() {
         let temp = tempfile::tempdir().unwrap();
         let inbox = Inbox::remote(&temp.path().join("config.toml"), "client".into()).unwrap();
         let remote = inbox.remote.as_ref().unwrap();
         remote.cache.lock().unwrap().target = serde_json::json!({"project":"demo","path":"/work"});
+        remote.cache.lock().unwrap().connected = true;
         remote
             .cache
             .lock()
@@ -261,6 +291,7 @@ struct Remote {
 }
 #[derive(Default)]
 struct RemoteState {
+    connected: bool,
     state: State,
     seen: HashSet<String>,
     read: HashSet<String>,
@@ -282,10 +313,14 @@ impl Inbox {
 
     pub fn remote(registry: &Path, client: String) -> Result<Self> {
         let mut inbox = Self::new(registry)?;
+        let initial = inbox.load()?;
         inbox.remote = Some(Remote {
             registry: registry.to_owned(),
             client,
-            cache: Arc::new(Mutex::new(RemoteState::default())),
+            cache: Arc::new(Mutex::new(RemoteState {
+                state: initial,
+                ..Default::default()
+            })),
             sync_lock: Arc::new(Mutex::new(())),
         });
         Ok(inbox)
@@ -295,6 +330,13 @@ impl Inbox {
     }
     // 仅订阅线程调用网络；终端按键和绘制只读缓存，不在每轮 UI 回调等待 RPC。
     pub fn sync(&self) -> Result<()> {
+        let result = self.sync_remote();
+        if let Some(remote) = &self.remote {
+            remote.cache.lock().unwrap().connected = result.is_ok();
+        }
+        result
+    }
+    fn sync_remote(&self) -> Result<()> {
         let Some(remote) = &self.remote else {
             return Ok(());
         };
@@ -324,6 +366,7 @@ impl Inbox {
         if let Some(remote) = &self.remote {
             let mut cache = remote.cache.lock().unwrap();
             let changed = cache.target != target;
+            let connected = cache.connected;
             let read: HashSet<_> = cache
                 .state
                 .unread
@@ -342,13 +385,20 @@ impl Inbox {
                 })
                 .map(|event| event.id.clone())
                 .collect();
+            // 使用本地文件重新读取并按事件 ID 合并；保存成功才清除内存，
+            // 避免离线退出丢失已读，也不会清掉其他客户端尚未看见的新事件。
+            Self {
+                path: self.path.clone(),
+                remote: None,
+            }
+            .discard(&read)?;
             cache.state.unread.retain(|event| !read.contains(&event.id));
             cache.read.extend(read);
             cache.target = target;
             drop(cache);
             // 目标切换只确认一次，避免离开页面后的完成事件仍按旧租约静默。
             // 相同目标的逐帧更新完全本地；后台轮询与切换同步按客户端串行。
-            if changed {
+            if changed && connected {
                 self.sync()?;
             }
         }

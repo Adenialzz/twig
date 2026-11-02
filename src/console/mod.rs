@@ -462,7 +462,6 @@ impl App {
             turn: self.thread.clone().filter(|_| self.detail),
             refresh: self.refresh,
             background: false,
-            projects: vec![],
         }
     }
 }
@@ -565,13 +564,9 @@ fn open_terminal(
             twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
                 if recorded.as_deref() != Some(task) {
                     recorded = Some(task.to_owned());
-                    usage_error = crate::daemon::call::<serde_json::Value>(
-                        registry,
-                        "record_use",
-                        serde_json::json!([&target.project, task]),
-                    )
-                    .err()
-                    .map(|error| format!("{error:#}"));
+                    usage_error = crate::core::record_use(registry, &target.project, task)
+                        .err()
+                        .map(|error| format!("{error:#}"));
                 }
                 if let Some(notice) = jump.take() {
                     app.notifications.dismiss(&notice);
@@ -1001,6 +996,14 @@ fn run_inner(
             }
             if key.code == KeyCode::PageUp {
                 form.scroll = form.scroll.saturating_sub(2);
+                continue;
+            }
+            if form.reading()
+                && (key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)))
+            {
+                app.form = None;
                 continue;
             }
             if form.busy() {

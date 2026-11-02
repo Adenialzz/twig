@@ -1,9 +1,10 @@
 //! Twig 本机后台：单例、受限 Unix socket 与有界同步请求处理。
+mod details;
 mod feishu;
 mod log;
 pub mod operations;
 pub mod output;
-mod queries;
+pub(crate) mod queries;
 pub(crate) mod state;
 pub mod time;
 use anyhow::{Context, Result, bail, ensure};
@@ -33,7 +34,7 @@ use std::{
 };
 
 pub(crate) static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const VERSION: u32 = 5;
+const VERSION: u32 = 7;
 // 生命周期协议独立于业务视图，更新客户端后仍能有序停止旧后台。
 const CONTROL_VERSION: u32 = 1;
 const MAX_FRAME: u64 = 8 * 1024 * 1024;
@@ -120,14 +121,87 @@ pub(crate) fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-struct Instance {
+pub(crate) struct Instance {
     _lock: File,
     socket: PathBuf,
 }
+// 启动和离线维护先串行协调，再检查真正的后台单例锁。
+// 写入模式下 None 表示后台持锁；只读探测无法立即确认离线时也返回 None。
+pub(crate) struct OfflineLock {
+    _instance: File,
+    _maintenance: File,
+}
+fn maintenance_lock(paths: &Paths) -> Result<File> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(paths.dir.join("maintenance.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(lock)
+}
+// 只读探测不创建文件，也不等待正在启动或维护的进程。
+fn shared_probe(path: &Path) -> Result<Option<File>> {
+    let lock = match File::open(path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+        return Ok(Some(lock));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(error.into())
+    }
+}
+pub(crate) fn offline_lock(paths: &Paths, create: bool) -> Result<Option<OfflineLock>> {
+    if !create {
+        let Some(maintenance) = shared_probe(&paths.dir.join("maintenance.lock"))? else {
+            return Ok(None);
+        };
+        let Some(instance) = shared_probe(&paths.dir.join("instance.lock"))? else {
+            return Ok(None);
+        };
+        return Ok(Some(OfflineLock {
+            _instance: instance,
+            _maintenance: maintenance,
+        }));
+    }
+    ensure!(paths.dir.is_dir(), "未找到后台操作目录");
+    private_directory(&paths.dir)?;
+    let maintenance = maintenance_lock(paths)?;
+    let lock = OpenOptions::new()
+        .create(create)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(paths.dir.join("instance.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(Some(OfflineLock {
+            _instance: lock,
+            _maintenance: maintenance,
+        }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(error.into())
+    }
+}
 impl Instance {
-    fn acquire(paths: &Paths) -> Result<Self> {
+    pub(crate) fn acquire(paths: &Paths) -> Result<Self> {
         fs::create_dir_all(&paths.dir)?;
         fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700))?;
+        let _maintenance = maintenance_lock(paths)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -152,6 +226,10 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket);
+        // 显式结束租约，不能让其他线程 fork 后尚未 exec 的子进程延长单例寿命。
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -259,7 +337,15 @@ fn exchange(registry: &Path, method: &str, params: Value, version: u32) -> Resul
             paths.registry.display()
         )
     })?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let timeout = if matches!(
+        method,
+        "snapshot" | "details" | "inbox" | "viewing" | "disconnect"
+    ) {
+        2
+    } else {
+        30
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(timeout)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let request = Request {
         version,
@@ -529,6 +615,7 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
     let instance = restart_id.unwrap_or_else(crate::agent::message_id);
     let restart_plan = Mutex::new(None::<RestartPlan>);
     let (tx, rx) = mpsc::sync_channel::<UnixStream>(32);
+    let details = details::Details::start(stopping.clone());
     let input = Arc::new(Mutex::new(rx));
     let result = thread::scope(|scope| -> Result<()> {
         for _ in 0..4 {
@@ -542,6 +629,7 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
             let chat = &chat;
             let agent_error = &agent_error;
             let feishu = &feishu.health;
+            let details = &details;
             scope.spawn(move || {
                 crate::console::query::install(stopping.clone());
                 loop {
@@ -575,8 +663,9 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
                                 },
                                 method if method.starts_with("form.") => queries::handle(&paths.registry,method,request.params),
                                 "details" => {
-                                    let snapshot=state.lock().unwrap().snapshot();
-                                    Ok(serde_json::to_value(queries::details(snapshot,serde_json::from_value(request.params)?)?)?)
+                                    let client = request.params["client"].as_str().context("缺少历史查询客户端 ID")?.to_owned();
+                                    let query = serde_json::from_value(request.params["request"].clone())?;
+                                    Ok(serde_json::to_value(details.poll(client, query, || state.lock().unwrap().snapshot())?)?)
                                 },
                                 "query.execute" => {
                                     let action:crate::Action=serde_json::from_value(request.params)?;
@@ -593,7 +682,7 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
                                         thread::sleep(Duration::from_millis(20));
                                     }
                                 },
-                                method @ ("inbox"|"viewing"|"disconnect"|"record_use") => state.lock().unwrap().handle(method,request.params),
+                                method @ ("inbox"|"viewing"|"disconnect") => state.lock().unwrap().handle(method,request.params),
                                 method if method.starts_with("operation.") => operations.handle(method, request.params),
                                 _ => bail!("未知后台方法：{}", request.method),
                             }
@@ -632,6 +721,8 @@ fn run(registry: &Path, detached: bool, restart_id: Option<String>) -> Result<Op
         drop(tx);
         Ok(())
     });
+    stopping.store(true, Ordering::Relaxed);
+    drop(details);
     agent_stop.store(true, Ordering::Relaxed);
     agent_worker
         .join()
@@ -660,6 +751,73 @@ fn agent_queue(registry: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readonly_probe_never_creates_files_or_waits_for_other_readers() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(&temp.path().join("config.toml")).unwrap();
+        assert!(offline_lock(&paths, false).unwrap().is_none());
+        assert!(!paths.dir.exists());
+        fs::create_dir_all(&paths.dir).unwrap();
+        fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)).unwrap();
+        File::create(paths.dir.join("instance.lock")).unwrap();
+        assert!(offline_lock(&paths, false).unwrap().is_none());
+        assert!(!paths.dir.join("maintenance.lock").exists());
+        File::create(paths.dir.join("maintenance.lock")).unwrap();
+        let reader = offline_lock(&paths, false).unwrap().unwrap();
+        let registry = paths.registry.clone();
+        let (out, input) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            out.send(
+                offline_lock(&Paths::new(&registry).unwrap(), false)
+                    .unwrap()
+                    .is_some(),
+            )
+            .unwrap();
+        });
+        let result = input.recv_timeout(Duration::from_secs(1));
+        drop(reader);
+        worker.join().unwrap();
+        assert!(result.unwrap());
+        let writer = maintenance_lock(&paths).unwrap();
+        let registry = paths.registry.clone();
+        let (out, input) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            out.send(
+                offline_lock(&Paths::new(&registry).unwrap(), false)
+                    .unwrap()
+                    .is_none(),
+            )
+            .unwrap();
+        });
+        let result = input.recv_timeout(Duration::from_secs(1));
+        drop(writer);
+        worker.join().unwrap();
+        assert!(result.unwrap());
+    }
+    #[test]
+    fn startup_waits_for_offline_maintenance_without_false_running_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("config.toml");
+        let paths = Paths::new(&registry).unwrap();
+        fs::create_dir_all(&paths.dir).unwrap();
+        fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let offline = offline_lock(&paths, true).unwrap().unwrap();
+        let (out, input) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let instance = Instance::acquire(&Paths::new(&registry).unwrap());
+            out.send(instance).unwrap();
+        });
+        assert!(matches!(
+            input.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(offline);
+        let instance = input.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        assert!(offline_lock(&paths, true).unwrap().is_none());
+        assert!(Instance::acquire(&paths).is_err());
+        drop(instance);
+        worker.join().unwrap();
+    }
     #[test]
     fn updated_client_can_inspect_and_stop_released_daemons() {
         for version in [1, 2] {

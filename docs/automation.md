@@ -2,7 +2,7 @@
 
 命令行阅读：`twig guide automation`。人和 Agent 使用同一套命令与文档，不需要专用输出格式。
 
-业务依赖显式启动的 Twig 后台；使用 `twig daemon status` 检查连接、采集与队列，未知操作通过 `twig operation show ID` 核对。共享状态、未读和断连恢复见 [后台指南](daemon.md)。
+普通任务 CLI、Console 导航、创建/删除表单和工作台无需 Twig 后台。Agent、受管任务、持续监控与未读通知依赖显式启动的后台；用 `twig daemon status` 检查扩展状态。未知操作通过 `twig operation show ID` 核对，详见 [后台指南](daemon.md)。
 
 ## 先发现，再执行
 

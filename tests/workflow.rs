@@ -85,7 +85,6 @@ impl Fixture {
             .env("SHELL", "/bin/sh")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE");
-        support::daemon::ensure(&c, registry);
         c
     }
     fn run(&self, args: &[&str]) -> Output {
@@ -753,7 +752,6 @@ fn detects_conflicts_and_preserves_partial_creation() {
     );
     let mut command = f.command(&f.repo);
     command.env("TWIG_FAIL_TMUX", "1");
-    support::daemon::ensure(&command, &f.registry_path());
     let out = command
         .args(["new", "local", "--no-fetch", "--no-open", "partial"])
         .output()
@@ -1209,7 +1207,6 @@ fn default_global_storage_ignores_and_preserves_old_files() {
         .env("SHELL", "/bin/sh")
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
-    support::daemon::ensure(&c, &home.join(".twig/config.toml"));
     success(
         c.args(["add", "default", "--path", f.repo.to_str().unwrap()])
             .output()
@@ -1379,11 +1376,12 @@ fn listing_missing_registry_is_readonly_and_requires_no_repository() {
 }
 
 #[test]
-fn disconnected_submit_and_retry_create_only_one_task() {
+fn disconnected_submit_and_retry_keep_one_managed_operation() {
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     let f = Fixture::new();
+    support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
     let status: Value = serde_json::from_str(&f.ok(&["daemon", "status"])).unwrap();
     let socket = status["socket"].as_str().unwrap();
     let rpc = |method: &str, params: Value, read: bool| -> Value {
@@ -1408,7 +1406,7 @@ fn disconnected_submit_and_retry_create_only_one_task() {
     };
     let plan = rpc(
         "operation.prepare",
-        json!({"New":{"project":"local","name":"detached","base":null,"no_open":true,"agent":false,"expected_branch":null}}),
+        json!({"Agent":{"command":"Status"}}),
         true,
     );
     let params = json!({"plan":plan["id"],"request":"lost-response","confirmed":true});
@@ -1419,7 +1417,7 @@ fn disconnected_submit_and_retry_create_only_one_task() {
         let record = rpc("operation.get", json!("lost-response"), true);
         if record["status"] == "succeeded" {
             assert_eq!(record["id"], id);
-            assert!(record["stages"].as_array().unwrap().len() >= 3);
+            assert!(!record["stages"].as_array().unwrap().is_empty());
             break;
         }
         assert!(
@@ -1429,12 +1427,13 @@ fn disconnected_submit_and_retry_create_only_one_task() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert!(f.root.join("detached").is_dir());
+    let records = rpc("operation.list", Value::Null, true);
+    assert_eq!(records.as_object().unwrap().len(), 1);
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
             .matches("worktree ")
             .count(),
-        2
+        1
     );
 }
 
@@ -1530,40 +1529,54 @@ fn new_fetch_failure_leaves_no_task_record_and_can_retry_offline() {
 
 #[test]
 fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
-    use serde_json::{Value, json};
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::AsRawFd;
+    use std::process::Stdio;
+    use std::time::Duration;
     for change in ["files", "main", "directory", "branch", "window", "delete"] {
         let f = Fixture::new();
         f.ok(&["new", "local", "task", "--no-fetch", "--no-open"]);
         let path = f.root.join("task");
-        let status: Value = serde_json::from_str(&f.ok(&["daemon", "status"])).unwrap();
-        let rpc = |method: &str, params: Value| -> Value {
-            let mut stream = UnixStream::connect(status["socket"].as_str().unwrap()).unwrap();
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-                .unwrap();
-            writeln!(
-                stream,
-                "{}",
-                json!({"version":status["version"],"id":"test","method":method,"params":params})
-            )
+        let directory = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.join("execution.lock"))
             .unwrap();
-            let mut line = String::new();
-            BufReader::new(stream).read_line(&mut line).unwrap();
-            let response: Value = serde_json::from_str(&line).unwrap();
-            assert!(response["error"].is_null(), "{response}");
-            response["result"].clone()
-        };
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
         let name = if change == "main" { "main" } else { "task" };
-        let action = if change == "delete" {
-            json!({"Rm":{"project":"local","name":"task","options":{"yes":true,
-                "keep_branch":true,"target":null,"delete_ignored":false,
-                "console_delete_branch":false,"expected_ignored":null},"expected_task":null}})
+        let mut command = f.command(&f.repo);
+        if change == "delete" {
+            command.args(["rm", "local", "task", "--yes", "--keep-branch"]);
         } else {
-            json!({"Open":{"project":"local","name":name}})
-        };
-        let plan = rpc("operation.prepare", action);
+            command.args(["open", "local", name]);
+        }
+        let mut child = command
+            .env("TWIG_OPERATION_PROGRESS", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            for line in BufReader::new(stderr).lines() {
+                let line = line.unwrap();
+                if line.contains("等待执行锁") {
+                    ready.send(()).unwrap();
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+            text
+        });
+        waiting.recv_timeout(Duration::from_secs(10)).unwrap();
         match change {
             "files" | "main" | "delete" => {
                 let cwd = if change == "main" { &f.repo } else { &path };
@@ -1601,32 +1614,20 @@ fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
             }
             _ => unreachable!(),
         }
-        let id = rpc(
-            "operation.submit",
-            json!({"plan":plan["id"],"request":"open-check","confirmed":true}),
-        );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let record = loop {
-            let record = rpc("operation.get", id.clone());
-            if record["status"] != "queued" && record["status"] != "running" {
-                break record;
-            }
-            assert!(std::time::Instant::now() < deadline, "{record}");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        };
+        drop(lock);
+        let output = child.wait_with_output().unwrap();
+        let error = reader.join().unwrap();
+        assert!(!output.status.success());
         if matches!(change, "files" | "main") {
-            assert_eq!(record["status"], "succeeded", "{change}: {record}");
-            assert!(!record["output"]["terminal"].is_null(), "{record}");
+            assert!(error.contains("需要交互式终端"), "{change}: {error}");
         } else {
-            assert_eq!(record["status"], "failed", "{change}: {record}");
-            let error = record["error"].as_str().unwrap();
             assert!(
                 error.contains(if change == "branch" {
                     "Worktree 分支已改变"
                 } else {
                     "资源已变化"
                 }),
-                "{record}"
+                "{change}: {error}"
             );
             assert!(path.exists());
         }
@@ -1656,4 +1657,328 @@ fn deletion_rejects_unknown_pane_process_and_does_not_require_ps() {
     fs::set_permissions(f.bin.join("ps"), fs::Permissions::from_mode(0o755)).unwrap();
     f.ok(&["rm", "local", "safe", "-y"]);
     assert!(!f.root.join("safe").exists());
+}
+
+#[test]
+fn core_execution_uses_client_environment_even_with_daemon_online() {
+    let f = Fixture::new();
+    let mut backend = f.command(&f.repo);
+    backend.env("TWIG_FAIL_TMUX", "1");
+    support::daemon::ensure(&backend, &f.registry_path());
+    // 后台环境会拒绝 new-window；普通任务仍使用调用进程的环境。
+    f.ok(&["new", "local", "standalone", "--no-fetch", "--no-open"]);
+    let records: serde_json::Value = serde_json::from_str(&f.ok(&["operation", "ls"])).unwrap();
+    assert!(
+        records
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|id| id.starts_with("local-"))
+    );
+    support::daemon::stop_under(f._temp.path());
+    f.fail(
+        &[
+            "new",
+            "local",
+            "managed",
+            "--agent",
+            "--no-fetch",
+            "--no-open",
+        ],
+        "后台不可用",
+    );
+    assert!(!f.root.join("managed").exists());
+    assert!(!f.git(&["branch", "--list", "managed"]).contains("managed"));
+    f.ok(&["stop", "local", "standalone", "--yes"]);
+}
+
+#[test]
+fn interrupted_local_record_blocks_writes_and_is_resolvable_without_daemon() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "recorded", "--no-fetch", "--no-open"]);
+    let records: serde_json::Value = serde_json::from_str(&f.ok(&["operation", "ls"])).unwrap();
+    let (id, _) = records
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, record)| record["plan"]["action"]["New"]["name"] == "recorded")
+        .unwrap();
+    let directory = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let path = directory.join("operations").join(format!("{id}.json"));
+    fs::rename(
+        directory
+            .join("operations/archive")
+            .join(format!("{id}.json")),
+        &path,
+    )
+    .unwrap();
+    let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    journal["status"] = "running".into();
+    fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    use std::os::fd::AsRawFd;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(directory.join("execution.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let running: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", id])).unwrap();
+    assert_eq!(
+        running["status"], "running",
+        "活跃持锁操作不能被误判为已中断"
+    );
+    drop(lock);
+    let status: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", id])).unwrap();
+    assert_eq!(status["status"], "needs_inspection");
+    f.fail(
+        &["new", "local", "blocked", "--no-fetch", "--no-open"],
+        "待核对",
+    );
+    assert!(!f.root.join("blocked").exists());
+    f.ok(&["operation", "resolve", id, "--yes"]);
+    f.ok(&["new", "local", "allowed", "--no-fetch", "--no-open"]);
+    assert!(f.root.join("recorded").is_dir());
+    let status: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", id])).unwrap();
+    assert_eq!(status["status"], "resolved");
+}
+
+#[test]
+fn managed_task_lifecycle_requires_daemon_before_changing_resources() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "bound", "--no-fetch", "--no-open"]);
+    let path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
+    let mut state: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    state["bound"]["agent_thread"] = "isolated-binding".into();
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let windows = f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"]);
+    for args in [
+        vec!["open", "local", "bound"],
+        vec!["stop", "local", "bound", "--yes"],
+        vec!["rm", "local", "bound", "--yes"],
+    ] {
+        f.fail(&args, "后台不可用");
+        assert_eq!(
+            windows,
+            f.mux(&["list-windows", "-t", &f.session(), "-F", "#{window_id}"])
+        );
+        assert!(f.root.join("bound").is_dir());
+        assert_eq!(
+            state,
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&path).unwrap()).unwrap()
+        );
+    }
+}
+
+#[test]
+fn crashed_backend_record_can_be_inspected_and_resolved_offline() {
+    use std::os::fd::AsRawFd;
+    let f = Fixture::new();
+    f.ok(&["new", "local", "recorded", "--no-fetch", "--no-open"]);
+    let records: serde_json::Value = serde_json::from_str(&f.ok(&["operation", "ls"])).unwrap();
+    let completed = records.as_object().unwrap().keys().next().unwrap();
+    f.fail(&["operation", "resolve", completed], "只有待核对操作");
+    let mut record = records
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|record| record["plan"]["action"]["New"]["name"] == "recorded")
+        .unwrap()
+        .clone();
+    support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
+    support::daemon::stop_under(f._temp.path());
+    let root = fs::read_dir(f.registry_path().parent().unwrap().join("daemon"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    record["id"] = "orphan-agent".into();
+    record["request"] = "orphan-request".into();
+    record["status"] = "running".into();
+    record["plan"]["action"]["New"]["agent"] = true.into();
+    let path = root.join("operations/orphan-agent.json");
+    fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::rename(
+        root.join("maintenance.lock"),
+        root.join("maintenance.saved"),
+    )
+    .unwrap();
+    f.ok(&["operation", "ls"]);
+    let unknown: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", "orphan-agent"])).unwrap();
+    assert_eq!(
+        unknown["status"], "running",
+        "无法确认离线时不能推断进程退出"
+    );
+    assert!(
+        !root.join("maintenance.lock").exists(),
+        "只读命令不得创建维护锁"
+    );
+    fs::rename(
+        root.join("maintenance.saved"),
+        root.join("maintenance.lock"),
+    )
+    .unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("instance.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    f.fail(
+        &["operation", "resolve", "orphan-agent", "--yes"],
+        "后台不可用",
+    );
+    let untouched: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        untouched["status"], "running",
+        "持锁实例存在时不能回退到离线修改"
+    );
+    drop(lock);
+    let shown: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", "orphan-agent"])).unwrap();
+    assert_eq!(shown["status"], "needs_inspection");
+    f.fail(
+        &["new", "local", "blocked", "--no-fetch", "--no-open"],
+        "待核对",
+    );
+    // 在线解除不应等待正在运行的其他受管操作持有的执行锁。
+    let mut online = record.clone();
+    online["id"] = "online-agent".into();
+    online["request"] = "online-request".into();
+    fs::write(
+        root.join("operations/online-agent.json"),
+        serde_json::to_vec(&online).unwrap(),
+    )
+    .unwrap();
+    support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
+    let execution_root = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let execution = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(execution_root.join("execution.lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(execution.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+    let output = tempfile::tempfile().unwrap();
+    let mut child = f
+        .command(&f.repo)
+        .args(["operation", "resolve", "online-agent", "--yes"])
+        .stdout(output.try_clone().unwrap())
+        .stderr(output.try_clone().unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    drop(execution);
+    if status.is_none() {
+        child.wait().unwrap();
+    }
+    assert!(status.expect("在线 resolve 不得等待执行锁").success());
+    support::daemon::stop_under(f._temp.path());
+    f.fail(&["operation", "resolve", "unknown-id"], "操作不存在");
+    f.fail(&["operation", "resolve", "online-agent"], "只有待核对操作");
+    f.ok(&["operation", "resolve", "orphan-agent", "--yes"]);
+    f.ok(&["new", "local", "allowed", "--no-fetch", "--no-open"]);
+    assert!(f.root.join("recorded").is_dir());
+}
+
+#[test]
+fn removal_failure_keeps_captured_file_list_and_original_error() {
+    let f = Fixture::new();
+    fs::write(f.repo.join(".gitignore"), "protected-cache\n").unwrap();
+    f.git(&["add", ".gitignore"]);
+    f.git(&["commit", "-m", "ignore cache"]);
+    f.ok(&["new", "local", "unmerged", "--no-fetch", "--no-open"]);
+    let task = f.root.join("unmerged");
+    fs::write(task.join("protected-cache"), "preserve").unwrap();
+    fs::write(task.join("feature"), "unmerged work").unwrap();
+    f.git(&["-C", task.to_str().unwrap(), "add", "feature"]);
+    f.git(&["-C", task.to_str().unwrap(), "commit", "-m", "feature"]);
+    let result = f.run(&["rm", "local", "unmerged", "--yes", "--delete-ignored"]);
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("protected-cache"), "{error}");
+    assert!(error.contains("尚未合并"), "{error}");
+    assert!(task.join("protected-cache").is_file());
+}
+
+#[test]
+fn final_journal_failure_preserves_business_error_and_resources() {
+    let f = Fixture::new();
+    let directory = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("operations");
+    let wrapper = f.bin.join("tmux");
+    let script = fs::read_to_string(&wrapper).unwrap().replace("echo injected-failure", "mv \"$TWIG_TEST_ARCHIVE\" \"$TWIG_TEST_ARCHIVE.saved\"; printf blocked > \"$TWIG_TEST_ARCHIVE\"; echo injected-failure");
+    fs::write(wrapper, script).unwrap();
+    let result = f
+        .command(&f.repo)
+        .env("TWIG_TEST_ARCHIVE", directory.join("archive"))
+        .env("TWIG_FAIL_TMUX", "1")
+        .args(["new", "local", "interrupted", "--no-fetch", "--no-open"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("结果保存失败"), "{error}");
+    assert!(error.contains("injected-failure"), "{error}");
+    assert!(error.contains("Worktree 已保留"), "{error}");
+    assert!(f.root.join("interrupted").is_dir());
+    assert!(fs::read_dir(directory).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "json")
+    }));
+}
+
+#[test]
+fn opening_existing_windows_does_not_grow_the_operation_journal() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "existing", "--no-fetch", "--no-open"]);
+    let count = || {
+        serde_json::from_str::<serde_json::Value>(&f.ok(&["operation", "ls"]))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len()
+    };
+    let before = count();
+    for _ in 0..3 {
+        f.fail(&["open", "local", "existing"], "需要交互式终端");
+    }
+    assert_eq!(count(), before);
+    f.ok(&["stop", "local", "existing", "--yes"]);
+    let before_rebuild = count();
+    f.fail(&["open", "local", "existing"], "需要交互式终端");
+    assert_eq!(count(), before_rebuild + 1, "重建窗口仍需记录启动过程");
 }
