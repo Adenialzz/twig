@@ -23,15 +23,16 @@ type Records = BTreeMap<String, Operation>;
 fn directory(registry: &Path) -> Result<PathBuf> {
     let paths = daemon::Paths::new(registry)?;
     Ok(paths
-        .dir
+        .registry
         .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
+        .context("配置缺少父目录")?
         .join("operations")
         .join(crate::config::repository_id(&paths.registry)))
 }
 pub fn execution_lock(registry: &Path) -> Result<File> {
+    execution_lock_mode(registry, true)
+}
+fn execution_lock_mode(registry: &Path, wait: bool) -> Result<File> {
     let dir = directory(registry)?;
     fs::create_dir_all(dir.parent().unwrap())?;
     daemon::private_directory(&dir)?;
@@ -42,11 +43,15 @@ pub fn execution_lock(registry: &Path) -> Result<File> {
         .write(true)
         .mode(0o600)
         .open(dir.join("execution.lock"))?;
-    ensure!(
-        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0,
-        "无法锁定任务执行：{}",
-        std::io::Error::last_os_error()
-    );
+    let mode = libc::LOCK_EX | if wait { 0 } else { libc::LOCK_NB };
+    if unsafe { libc::flock(lock.as_raw_fd(), mode) } != 0 {
+        let error = std::io::Error::last_os_error();
+        ensure!(
+            error.kind() != std::io::ErrorKind::WouldBlock,
+            "有操作正在执行，请稍后再打开任务"
+        );
+        return Err(error).context("无法锁定任务执行");
+    }
     Ok(lock)
 }
 fn pending(records: &Records, action: &Action) -> Result<()> {
@@ -61,15 +66,38 @@ fn pending(records: &Records, action: &Action) -> Result<()> {
 }
 pub fn check_pending(registry: &Path, action: &Action) -> Result<()> {
     let root = directory(registry)?;
-    if Store::read(&root)?.is_empty() {
+    if !root.join("operations").try_exists()? && !root.join("operations.json").try_exists()? {
         return Ok(());
     }
     // 调用方持有执行锁，遗留本地 running 不可能仍在执行。
-    let (store, mut records) = Store::open(&root)?;
+    let (store, mut records) = Store::open_active(&root)?;
     recover_saved(&store, &mut records)?;
     pending(&records, action)
 }
-fn managed(registry: &Path, action: &Action) -> Result<bool> {
+fn check_backend_pending(registry: &Path, action: &Action) -> Result<()> {
+    let paths = daemon::Paths::new(registry)?;
+    // 在线后台的 queued 只是在等同一执行锁；离线遗留记录仍需核对。
+    let offline = if paths.dir.try_exists()? {
+        daemon::offline_lock(&paths, true)?
+    } else {
+        None
+    };
+    let mut backend = if offline.is_some() {
+        Store::open_active(&paths.dir)?.1
+    } else {
+        Store::read_active(&paths.dir)?
+    };
+    if offline.is_some() {
+        recover(&mut backend);
+    } else {
+        // worker 持锁到最终状态落盘；拿到锁仍见 running 说明结果未可靠保存。
+        backend.retain(|_, record| record.status != "queued");
+    }
+    pending(&backend, action)?;
+    drop(offline);
+    Ok(())
+}
+pub(crate) fn managed(registry: &Path, action: &Action) -> Result<bool> {
     match action {
         Action::Agent(_) | Action::New { agent: true, .. } => Ok(true),
         Action::Open { project, name }
@@ -137,21 +165,21 @@ fn execute_with_progress(registry: &Path, mut action: Action, cli: bool) -> Resu
         Action::Rm { options, .. } => options.yes = true,
         _ => {}
     }
+    if cli && std::env::var_os("TWIG_OPERATION_PROGRESS").is_some() {
+        eprintln!("操作进度：等待执行锁");
+    }
     // 用户确认期间不持锁；所有资源写入都在相同执行锁内重新校验。
-    let _lock = execution_lock(registry)?;
+    let _lock = execution_lock_mode(registry, cli || !matches!(plan.action, Action::Open { .. }))?;
     ensure!(
         !managed(registry, &plan.action)?,
         "任务已变为受管任务，请重新执行并连接后台"
     );
-    let (store, mut records) = Store::open(&directory(registry)?)?;
+    let (store, mut records) = Store::open_active(&directory(registry)?)?;
     for id in recover(&mut records) {
         store.save(&records[&id])?;
     }
     pending(&records, &plan.action)?;
-    pending(
-        &Store::read(&daemon::Paths::new(registry)?.dir)?,
-        &plan.action,
-    )?;
+    check_backend_pending(registry, &plan.action)?;
     ensure!(
         plan.expires >= operations::now(),
         "确认计划已过期，请重新确认"
@@ -160,6 +188,12 @@ fn execute_with_progress(registry: &Path, mut action: Action, cli: bool) -> Resu
         operations::fingerprint(registry, &plan.action)? == plan.fingerprint,
         "资源已变化，请重新确认操作"
     );
+    if matches!(plan.action, Action::Open { .. }) && plan.fingerprint["window"].is_string() {
+        let (output, result) = daemon::output::capture(|| {
+            crate::execute_business(registry.to_owned(), plan.action, &plan.fingerprint)
+        });
+        return daemon::output::checked(output, result);
+    }
     let id = format!("local-{}", crate::agent::message_id());
     records.insert(
         id.clone(),
@@ -218,7 +252,6 @@ fn execute_with_progress(registry: &Path, mut action: Action, cli: bool) -> Resu
     store
         .save(record)
         .with_context(|| format!("操作 {id} 结果保存失败，请核对资源，不要重跑"))?;
-    daemon::REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     result.with_context(|| {
         format!(
             "{}{}操作 {id} 失败；twig operation show {id} 查看详情",
@@ -342,6 +375,55 @@ pub fn record_use(registry: &Path, project: &str, task: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn queued_backend_work_does_not_block_lock_owner_but_orphans_do() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("config.toml");
+        let _execution = execution_lock(&registry).unwrap();
+        let paths = daemon::Paths::new(&registry).unwrap();
+        fs::create_dir_all(&paths.dir).unwrap();
+        fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let instance = daemon::offline_lock(&paths, true).unwrap().unwrap();
+        let (store, _) = Store::open(&paths.dir).unwrap();
+        let action = Action::Open {
+            project: "demo".into(),
+            name: "main".into(),
+        };
+        let mut record = Operation {
+            id: "queued".into(),
+            request: "request".into(),
+            status: "queued".into(),
+            plan: operations::Plan {
+                id: "plan".into(),
+                expires: operations::now() + 60,
+                action: action.clone(),
+                fingerprint: Value::Null,
+                branches: vec![],
+                common: None,
+                prompt: None,
+            },
+            stages: vec![],
+            output: Output::default(),
+            error: None,
+        };
+        store.save(&record).unwrap();
+        check_backend_pending(&registry, &action).unwrap();
+        record.status = "running".into();
+        store.save(&record).unwrap();
+        assert!(
+            check_backend_pending(&registry, &action).is_err(),
+            "锁已释放但结果未落盘须核对"
+        );
+        record.status = "queued".into();
+        store.save(&record).unwrap();
+        drop(instance);
+        assert!(
+            check_backend_pending(&registry, &action).is_err(),
+            "后台退出后的排队记录仍需核对"
+        );
+    }
+
     #[test]
     fn backend_check_persists_recovery_of_interrupted_local_operations() {
         let temp = tempfile::tempdir().unwrap();

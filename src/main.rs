@@ -353,7 +353,11 @@ fn execute_business(
             let (path, window) = if name == "main" {
                 (
                     config.main.clone(),
-                    tmux::ensure_main_window(&config, &project)?,
+                    if let Some(window) = expected["window"].as_str() {
+                        tmux::reuse_window(&config, &project, &name, window)?
+                    } else {
+                        tmux::ensure_main_window(&config, &project)?
+                    },
                 )
             } else {
                 let feature = feature(&state, &name)?;
@@ -361,7 +365,11 @@ fn execute_business(
                     check_worktree(&config, feature)?,
                     "Worktree 不存在；请检查 twig ls <项目名>，new 不恢复已登记任务"
                 );
-                let window = tmux::ensure_window(&config, &project, &name, &feature.path)?;
+                let window = if let Some(window) = expected["window"].as_str() {
+                    tmux::reuse_window(&config, &project, &name, window)?
+                } else {
+                    tmux::ensure_window(&config, &project, &name, &feature.path)?
+                };
                 if let Some(thread) = &feature.agent_thread {
                     agent::Store::new(&registry_path)?.reactivate(thread)?;
                 }

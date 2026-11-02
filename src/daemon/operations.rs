@@ -116,6 +116,8 @@ impl Service {
         let worker = thread::spawn(move || {
             while let Ok(id) = receiver.recv() {
                 let run = || -> Result<()> {
+                    // 从 running 到最终结果落盘始终持锁，不能留下未落盘窗口。
+                    let _execution = crate::core::execution_lock(&registry)?;
                     let plan = {
                         let mut records = records.lock().unwrap();
                         let action = &records[&id].plan.action;
@@ -149,7 +151,10 @@ impl Service {
                         }))
                     });
                     let (output, result) = super::output::capture(|| {
-                        let _execution = crate::core::execution_lock(&registry)?;
+                        ensure!(
+                            crate::core::managed(&registry, &plan.action)?,
+                            "后台仅执行受管操作；任务绑定已变化"
+                        );
                         crate::core::check_pending(&registry, &plan.action)?;
                         progress("核对确认计划与实时资源")?;
                         ensure!(plan.expires >= now(), "确认计划已过期，请重新确认");
@@ -193,17 +198,8 @@ impl Service {
             "operation.prepare" => {
                 let action: Action = serde_json::from_value(value)?;
                 ensure!(
-                    matches!(
-                        action,
-                        Action::Add { .. }
-                            | Action::New { .. }
-                            | Action::Ls { .. }
-                            | Action::Open { .. }
-                            | Action::Stop { .. }
-                            | Action::Rm { .. }
-                            | Action::Agent(_)
-                    ),
-                    "此入口不是后台业务操作"
+                    crate::core::managed(&self.registry, &action)?,
+                    "后台仅接受 Agent 或受管任务操作"
                 );
                 let plan = prepare(&self.registry, action)?;
                 let mut plans = self.plans.lock().unwrap();
@@ -583,6 +579,34 @@ mod tests {
     use super::*;
     use std::fs;
     #[test]
+    fn backend_rejects_unmanaged_operations_at_prepare() {
+        let temp = tempfile::tempdir().unwrap();
+        let (service, worker) =
+            Service::start(&temp.path().join("config.toml"), temp.path()).unwrap();
+        for action in [
+            Action::Ls { project: None },
+            Action::Add {
+                name: "a".into(),
+                path: "/unused".into(),
+                base: None,
+                target: None,
+                root: None,
+                print_name: false,
+            },
+        ] {
+            assert!(
+                service
+                    .handle("operation.prepare", serde_json::to_value(action).unwrap())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("仅接受")
+            );
+        }
+        drop(service);
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn unrelated_operation_kinds_do_not_share_an_empty_resource() {
         let add = |name: &str, path: &str| Action::Add {
             name: name.into(),
@@ -649,7 +673,10 @@ mod tests {
             service
                 .handle(
                     "operation.prepare",
-                    serde_json::to_value(Action::Ls { project: None }).unwrap(),
+                    serde_json::to_value(Action::Agent(crate::agent::Cli {
+                        command: crate::agent::Action::Status,
+                    }))
+                    .unwrap(),
                 )
                 .unwrap(),
         )
@@ -701,7 +728,9 @@ mod tests {
             plan: Plan {
                 id: "plan".into(),
                 expires: now() + 60,
-                action: Action::Ls { project: None },
+                action: Action::Agent(crate::agent::Cli {
+                    command: crate::agent::Action::Status,
+                }),
                 fingerprint: Value::Null,
                 branches: vec![],
                 common: None,

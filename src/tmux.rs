@@ -110,6 +110,30 @@ pub fn window_in(output: &str, name: &str) -> Result<Option<String>> {
     Ok(found)
 }
 
+/// 连接已有窗口时绝不隐式重建或执行启动命令。
+pub fn reuse_window(
+    config: &Config,
+    project: &Project,
+    name: &str,
+    expected: &str,
+) -> Result<String> {
+    ensure!(
+        window(config, project, name)?.as_deref() == Some(expected),
+        "窗口已变化，请重新打开"
+    );
+    ensure!(
+        tmux(&[
+            "show-options",
+            "-wqv",
+            "-t",
+            expected,
+            "@twig-startup-pending"
+        ])? != "1",
+        "窗口初始化未完成，已保留 Pane；请检查后手动修复，或 twig stop 后重新打开"
+    );
+    Ok(expected.into())
+}
+
 pub fn ensure_window(
     config: &Config,
     project: &Project,

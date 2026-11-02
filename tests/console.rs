@@ -1179,6 +1179,36 @@ fn task_visit_order_persists_and_browsing_is_readonly() {
 }
 
 #[test]
+fn busy_execution_lock_does_not_freeze_console_navigation_or_exit() {
+    let f = Fixture::core();
+    f.init();
+    let root = fs::read_dir(f.registry.parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("execution.lock"))
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut p = f.terminal(false);
+    p.wait_screen("auth");
+    let started = Instant::now();
+    p.send(b"2/auth\r\r");
+    p.wait("有操作正在执行");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "不能等待其他操作释放锁"
+    );
+    drop(lock);
+}
+
+#[test]
 fn enter_main_and_task_releases_lock_and_restores_terminal() {
     let f = Fixture::core();
     f.init();

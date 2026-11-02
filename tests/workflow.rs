@@ -1376,7 +1376,7 @@ fn listing_missing_registry_is_readonly_and_requires_no_repository() {
 }
 
 #[test]
-fn disconnected_submit_and_retry_create_only_one_task() {
+fn disconnected_submit_and_retry_keep_one_managed_operation() {
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -1406,7 +1406,7 @@ fn disconnected_submit_and_retry_create_only_one_task() {
     };
     let plan = rpc(
         "operation.prepare",
-        json!({"New":{"project":"local","name":"detached","base":null,"no_open":true,"agent":false,"expected_branch":null}}),
+        json!({"Agent":{"command":"Status"}}),
         true,
     );
     let params = json!({"plan":plan["id"],"request":"lost-response","confirmed":true});
@@ -1417,7 +1417,7 @@ fn disconnected_submit_and_retry_create_only_one_task() {
         let record = rpc("operation.get", json!("lost-response"), true);
         if record["status"] == "succeeded" {
             assert_eq!(record["id"], id);
-            assert!(record["stages"].as_array().unwrap().len() >= 3);
+            assert!(!record["stages"].as_array().unwrap().is_empty());
             break;
         }
         assert!(
@@ -1427,12 +1427,13 @@ fn disconnected_submit_and_retry_create_only_one_task() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert!(f.root.join("detached").is_dir());
+    let records = rpc("operation.list", Value::Null, true);
+    assert_eq!(records.as_object().unwrap().len(), 1);
     assert_eq!(
         f.git(&["worktree", "list", "--porcelain"])
             .matches("worktree ")
             .count(),
-        2
+        1
     );
 }
 
@@ -1528,41 +1529,54 @@ fn new_fetch_failure_leaves_no_task_record_and_can_retry_offline() {
 
 #[test]
 fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
-    use serde_json::{Value, json};
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixStream;
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::AsRawFd;
+    use std::process::Stdio;
+    use std::time::Duration;
     for change in ["files", "main", "directory", "branch", "window", "delete"] {
         let f = Fixture::new();
         f.ok(&["new", "local", "task", "--no-fetch", "--no-open"]);
         let path = f.root.join("task");
-        support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
-        let status: Value = serde_json::from_str(&f.ok(&["daemon", "status"])).unwrap();
-        let rpc = |method: &str, params: Value| -> Value {
-            let mut stream = UnixStream::connect(status["socket"].as_str().unwrap()).unwrap();
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-                .unwrap();
-            writeln!(
-                stream,
-                "{}",
-                json!({"version":status["version"],"id":"test","method":method,"params":params})
-            )
+        let directory = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.join("execution.lock"))
             .unwrap();
-            let mut line = String::new();
-            BufReader::new(stream).read_line(&mut line).unwrap();
-            let response: Value = serde_json::from_str(&line).unwrap();
-            assert!(response["error"].is_null(), "{response}");
-            response["result"].clone()
-        };
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
         let name = if change == "main" { "main" } else { "task" };
-        let action = if change == "delete" {
-            json!({"Rm":{"project":"local","name":"task","options":{"yes":true,
-                "keep_branch":true,"target":null,"delete_ignored":false,
-                "console_delete_branch":false,"expected_ignored":null},"expected_task":null}})
+        let mut command = f.command(&f.repo);
+        if change == "delete" {
+            command.args(["rm", "local", "task", "--yes", "--keep-branch"]);
         } else {
-            json!({"Open":{"project":"local","name":name}})
-        };
-        let plan = rpc("operation.prepare", action);
+            command.args(["open", "local", name]);
+        }
+        let mut child = command
+            .env("TWIG_OPERATION_PROGRESS", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            for line in BufReader::new(stderr).lines() {
+                let line = line.unwrap();
+                if line.contains("等待执行锁") {
+                    ready.send(()).unwrap();
+                }
+                text.push_str(&line);
+                text.push('\n');
+            }
+            text
+        });
+        waiting.recv_timeout(Duration::from_secs(10)).unwrap();
         match change {
             "files" | "main" | "delete" => {
                 let cwd = if change == "main" { &f.repo } else { &path };
@@ -1600,32 +1614,20 @@ fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
             }
             _ => unreachable!(),
         }
-        let id = rpc(
-            "operation.submit",
-            json!({"plan":plan["id"],"request":"open-check","confirmed":true}),
-        );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let record = loop {
-            let record = rpc("operation.get", id.clone());
-            if record["status"] != "queued" && record["status"] != "running" {
-                break record;
-            }
-            assert!(std::time::Instant::now() < deadline, "{record}");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        };
+        drop(lock);
+        let output = child.wait_with_output().unwrap();
+        let error = reader.join().unwrap();
+        assert!(!output.status.success());
         if matches!(change, "files" | "main") {
-            assert_eq!(record["status"], "succeeded", "{change}: {record}");
-            assert!(!record["output"]["terminal"].is_null(), "{record}");
+            assert!(error.contains("需要交互式终端"), "{change}: {error}");
         } else {
-            assert_eq!(record["status"], "failed", "{change}: {record}");
-            let error = record["error"].as_str().unwrap();
             assert!(
                 error.contains(if change == "branch" {
                     "Worktree 分支已改变"
                 } else {
                     "资源已变化"
                 }),
-                "{record}"
+                "{change}: {error}"
             );
             assert!(path.exists());
         }
@@ -1708,6 +1710,13 @@ fn interrupted_local_record_blocks_writes_and_is_resolvable_without_daemon() {
         .unwrap()
         .path();
     let path = directory.join("operations").join(format!("{id}.json"));
+    fs::rename(
+        directory
+            .join("operations/archive")
+            .join(format!("{id}.json")),
+        &path,
+    )
+    .unwrap();
     let mut journal: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     journal["status"] = "running".into();
     fs::write(&path, serde_json::to_vec(&journal).unwrap()).unwrap();
@@ -1841,4 +1850,26 @@ fn removal_failure_keeps_captured_file_list_and_original_error() {
     assert!(error.contains("protected-cache"), "{error}");
     assert!(error.contains("尚未合并"), "{error}");
     assert!(task.join("protected-cache").is_file());
+}
+
+#[test]
+fn opening_existing_windows_does_not_grow_the_operation_journal() {
+    let f = Fixture::new();
+    f.ok(&["new", "local", "existing", "--no-fetch", "--no-open"]);
+    let count = || {
+        serde_json::from_str::<serde_json::Value>(&f.ok(&["operation", "ls"]))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len()
+    };
+    let before = count();
+    for _ in 0..3 {
+        f.fail(&["open", "local", "existing"], "需要交互式终端");
+    }
+    assert_eq!(count(), before);
+    f.ok(&["stop", "local", "existing", "--yes"]);
+    let before_rebuild = count();
+    f.fail(&["open", "local", "existing"], "需要交互式终端");
+    assert_eq!(count(), before_rebuild + 1, "重建窗口仍需记录启动过程");
 }
