@@ -18,6 +18,8 @@ pub struct Form {
     pub project: Option<String>,
     pub fields: [String; 2],
     pub field: usize,
+    /// 路径为空时 Enter 使用的建议仓库（启动目录所在且未登记的仓库）。
+    pub suggestion: Option<String>,
     pub fetch_base: bool,
     pub error: Option<String>,
     pub scroll: u16,
@@ -89,6 +91,7 @@ impl Form {
             project: None,
             fields: Default::default(),
             field: 0,
+            suggestion: None,
             fetch_base: true,
             error: None,
             scroll: 0,
@@ -221,6 +224,11 @@ impl Form {
         ensure!(!self.querying(), "正在读取分支候选，请稍候");
         self.operation_started = false;
         if self.project.is_none() && self.field == 0 {
+            if self.fields[0].trim().is_empty()
+                && let Some(suggestion) = &self.suggestion
+            {
+                self.fields[0] = suggestion.clone();
+            }
             ensure!(!self.fields[0].trim().is_empty(), "请输入仓库路径");
             let mut path = registry::expand(Path::new(&self.fields[0]))?;
             // 已输入的完整目录优先；不能因其有子目录候选而误入下一级。

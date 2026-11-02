@@ -549,7 +549,13 @@ fn color(c: AnsiColor) -> Color {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, panes: &[Pane], status: &str, selection: Option<&Selection>) {
+fn draw(
+    frame: &mut ratatui::Frame,
+    panes: &[Pane],
+    status: &str,
+    selection: Option<&Selection>,
+    prefix: bool,
+) {
     let area = frame.area();
     let buffer = frame.buffer_mut();
     for pane in panes {
@@ -653,10 +659,32 @@ fn draw(frame: &mut ratatui::Frame, panes: &[Pane], status: &str, selection: Opt
     }
     let active = panes.iter().find(|p| p.active);
     let label = format!("{} | {status}", active.map_or("", |p| p.id.as_str()));
-    frame.render_widget(
-        Paragraph::new(label).style(Style::default().fg(Color::Black).bg(Color::Cyan)),
-        Rect::new(0, area.height.saturating_sub(1), area.width, 1),
-    );
+    let bar = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
+    // 前缀等待第二个键时列出可用键；平时在右侧常驻返回与帮助入口。
+    let hint = if prefix {
+        "d 返回 · s/v 分屏 · hjkl 切换 · z 放大 · o 下一个 · u 未读 · f 跳转 · Ctrl-W 删词 · Esc 取消"
+    } else {
+        "Ctrl-W d 返回 · Ctrl-W ? 键位"
+    };
+    let style = Style::default().fg(Color::Black).bg(Color::Cyan);
+    frame.render_widget(Paragraph::new("").style(style), bar);
+    let hint_width = ratatui::text::Line::from(hint).width() as u16;
+    let label_width = ratatui::text::Line::from(label.as_str()).width() as u16;
+    if prefix || label_width + hint_width + 3 <= bar.width {
+        let width = hint_width.min(bar.width);
+        frame.render_widget(
+            Paragraph::new(hint).style(style.add_modifier(Modifier::BOLD)),
+            Rect::new(bar.right() - width, bar.y, width, 1),
+        );
+        if bar.width > width + 1 {
+            frame.render_widget(
+                Paragraph::new(label).style(style),
+                Rect::new(0, bar.y, bar.width - width - 1, 1),
+            );
+        }
+    } else {
+        frame.render_widget(Paragraph::new(label).style(style), bar);
+    }
     if let Some(pane) = active
         && selection.is_none_or(|selection| selection.pane != pane.id)
         && let Some((x, y)) = pane.cursor
@@ -961,6 +989,7 @@ fn run_inner(
                     &panes,
                     &format!("{notice}{name} · {}", label.text),
                     selection.as_ref(),
+                    prefix,
                 );
                 if let Some(notification) = &label.notification {
                     crate::notification::draw(frame, notification);
@@ -1718,7 +1747,7 @@ mod tests {
         };
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(30, 8)).unwrap();
         terminal
-            .draw(|frame| draw(frame, &[pane], "twig", None))
+            .draw(|frame| draw(frame, &[pane], "twig", None, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(2, 1)].symbol(), "中");

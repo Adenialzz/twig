@@ -677,7 +677,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     ]);
     let mut p = Pty::spawn(command);
     p.wait("demo");
-    p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
+    p.send(b"\x1b[<0;4;3M\x1b[<32;7;3M\x1b[<0;7;3m");
     p.wait_screen("已请求复制 4 chars");
     let prefix = b"\x1b]52;c;";
     let start = p
@@ -690,7 +690,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     assert_eq!(STANDARD.decode(&p.bytes[start..end]).unwrap(), b"demo");
     p.wait_screen_absent("已请求复制");
     p.clear_output();
-    p.send(b"\x1b[<0;5;6M\x1b[<0;5;6m\x1b[<0;5;6M\x1b[<0;5;6m\x1b[<0;5;6M\x1b[<0;5;6m");
+    p.send(b"\x1b[<0;5;3M\x1b[<0;5;3m\x1b[<0;5;3M\x1b[<0;5;3m\x1b[<0;5;3M\x1b[<0;5;3m");
     let started = Instant::now();
     let copies = loop {
         p.read_output();
@@ -728,7 +728,7 @@ fn navigation_drag_copies_text_and_preserves_readonly_state() {
     p.resize(80, 24);
     p.clear_output();
     p.wait("demo");
-    p.send(b"\x1b[<0;4;6M\x1b[<32;7;6M\x1b[<0;7;6m");
+    p.send(b"\x1b[<0;4;3M\x1b[<32;7;3M\x1b[<0;7;3m");
     p.wait_screen("已请求复制 4 chars");
     p.send(b"\x1bq");
     p.wait("TERMINAL_RESTORED:0");
@@ -1679,7 +1679,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
     let guard = Stop(stop);
     let mut p = f.terminal(false);
     p.wait("LIVE_THR");
-    p.send(b"2/main\r\x17jh");
+    p.send(b"2/main\r\x17jH");
     p.wait("HISTORY_");
     // 按协议日志等待实际分页完成，而非仅凭屏幕中历史提示。
     let start = Instant::now();
@@ -1687,7 +1687,7 @@ fn codex_history_details_disconnect_and_reconnect_are_readonly() {
         assert!(start.elapsed() < Duration::from_secs(5));
         thread::sleep(Duration::from_millis(20));
     }
-    p.send(b"n");
+    p.send(b"]");
     let start = Instant::now();
     while methods
         .lock()

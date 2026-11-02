@@ -202,7 +202,11 @@ impl App {
     }
     fn new_form(&mut self) {
         match self.focus {
-            0 => self.form = Some(form::Form::project()),
+            0 => {
+                let mut form = form::Form::project();
+                form.suggestion = self.unregistered_repo();
+                self.form = Some(form);
+            }
             1 => {
                 if let Some(repo) = self.repo() {
                     if let Some((project, config)) = &repo.context {
@@ -218,6 +222,19 @@ impl App {
             }
             _ => self.message = Some("/new：请先切到项目区或任务区".into()),
         }
+    }
+    /// 启动目录所在的 Git 仓库尚未登记时，作为登记表单的默认路径；只检查文件系统。
+    fn unregistered_repo(&self) -> Option<String> {
+        let root = self
+            .initial_cwd
+            .ancestors()
+            .find(|dir| dir.join(".git").exists())?;
+        let registered = self.snapshot.repos.iter().any(|repo| {
+            repo.tasks
+                .iter()
+                .any(|task| root.starts_with(&task.path) || task.path.starts_with(root))
+        });
+        (!registered).then(|| root.display().to_string())
     }
     fn search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         let candidates = self.command_candidates();
@@ -597,6 +614,8 @@ fn open_terminal(
                         .is_none_or(|checked| checked.elapsed() > Duration::from_secs(30))
                     {
                         "状态过期"
+                    } else if summary.is_empty() {
+                        "无会话"
                     } else {
                         &summary
                     }
@@ -1229,7 +1248,9 @@ fn run_inner(
                 app.refresh += 1;
                 app.message = None;
             }
-            KeyCode::Char('h') => {
+            KeyCode::Char('h') if key.modifiers.is_empty() => app.focus = 0,
+            KeyCode::Char('l') if key.modifiers.is_empty() && app.focus == 0 => app.focus = 1,
+            KeyCode::Char('H') => {
                 app.history = !app.history;
                 app.page = 0;
                 app.detail = false;
@@ -1240,7 +1261,7 @@ fn run_inner(
                 app.page = 0;
             }
             KeyCode::Char('n') if app.focus < 2 => app.new_form(),
-            KeyCode::Char('n') if app.focus == 2 && app.history => {
+            KeyCode::Char(']') if app.focus == 2 && app.history => {
                 if app.snapshot.history_more && app.snapshot.history_pages > app.page {
                     app.page += 1;
                 }

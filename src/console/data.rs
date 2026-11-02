@@ -338,15 +338,11 @@ pub fn summary<'a>(threads: impl Iterator<Item = &'a Thread>) -> String {
     for thread in threads {
         *counts.entry(thread.label()).or_insert(0) += 1;
     }
-    if counts.is_empty() {
-        "—".into()
-    } else {
-        counts
-            .into_iter()
-            .map(|(label, n)| format!("{label} {n}"))
-            .collect::<Vec<_>>()
-            .join(" · ")
-    }
+    counts
+        .into_iter()
+        .map(|(label, n)| format!("{label} {n}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub fn repositories(registry_path: &Path) -> Result<(Vec<Repo>, Option<crate::zed::Config>)> {
@@ -521,10 +517,15 @@ fn git_summary(status: &str) -> String {
             }
         }
     }
-    if staged + modified + untracked == 0 {
+    let parts: Vec<_> = [("暂存", staged), ("修改", modified), ("未跟踪", untracked)]
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(label, n)| format!("{label} {n}"))
+        .collect();
+    if parts.is_empty() {
         "干净".into()
     } else {
-        format!("暂存 {staged} / 修改 {modified} / 新增 {untracked}")
+        parts.join(" · ")
     }
 }
 fn refresh_windows(repos: &mut [Repo]) {
@@ -1119,7 +1120,7 @@ mod tests {
     fn status_header_keeps_upstream_detached_and_rename_counts() {
         assert_eq!(
             branch_status("## topic...origin/topic [ahead 1]\0R  new\0old\0?? extra\0").unwrap(),
-            ("topic".into(), "暂存 1 / 修改 0 / 新增 1".into())
+            ("topic".into(), "暂存 1 · 未跟踪 1".into())
         );
         assert_eq!(
             branch_status("## HEAD (no branch)\0").unwrap(),
@@ -1196,7 +1197,7 @@ mod tests {
     fn porcelain_rename_does_not_count_original_path_as_a_file() {
         assert_eq!(
             git_summary("R  dest\0?? original\0 M modified\0?? new\0"),
-            "暂存 1 / 修改 1 / 新增 1"
+            "暂存 1 · 修改 1 · 未跟踪 1"
         );
         assert_eq!(git_summary(""), "干净");
     }
