@@ -487,32 +487,6 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
             ];
             if repo.error.is_some() {
                 spans.push(Span::styled("异常", Style::default().fg(Color::Red)));
-            } else {
-                let stale = codex_stale(app);
-                let mut counts = std::collections::BTreeMap::new();
-                for thread in app.snapshot.threads.iter().filter(|t| {
-                    app.snapshot
-                        .associations
-                        .get(&t.id)
-                        .is_some_and(|(name, _)| name == &repo.name)
-                }) {
-                    let entry = counts
-                        .entry((thread.priority(), format!("Codex {}", thread.label())))
-                        .or_insert((0, status_style(thread, stale)));
-                    entry.0 += 1;
-                }
-                for session in claude_sessions(&app.snapshot, &repo.name, None) {
-                    let entry = counts
-                        .entry((session.priority(), format!("Claude {}", session.label())))
-                        .or_insert((0, claude_style(session, &app.snapshot)));
-                    entry.0 += 1;
-                }
-                for (index, ((_, label), (count, style))) in counts.into_iter().enumerate() {
-                    if index > 0 {
-                        spans.push(Span::raw(" · "));
-                    }
-                    spans.push(Span::styled(safe(&format!("{label} {count}")), style));
-                }
             }
             Line::from(spans)
         })
