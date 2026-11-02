@@ -96,10 +96,13 @@ struct Published {
     dirty: bool,
 }
 #[derive(Clone, Default)]
-pub struct Updates(Arc<Mutex<Published>>);
+pub struct Updates {
+    state: Arc<Mutex<Published>>,
+    publishers: Arc<Mutex<()>>,
+}
 impl Updates {
     pub fn take(&self) -> Option<Snapshot> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
         if !state.dirty {
             return None;
         }
@@ -107,17 +110,24 @@ impl Updates {
         Some(state.snapshot.clone())
     }
     fn publish(&self, snapshot: &Snapshot) {
-        let mut state = self.0.lock().unwrap();
-        state.snapshot = snapshot.clone();
-        if let Some(core) = state.core.clone() {
-            Self::merge(&mut state.snapshot, &core);
+        let _publisher = self.publishers.lock().unwrap();
+        let core = self.state.lock().unwrap().core.clone();
+        let mut snapshot = snapshot.clone();
+        if let Some(core) = core {
+            Self::merge(&mut snapshot, &core);
         }
+        let mut state = self.state.lock().unwrap();
+        state.snapshot = snapshot;
         state.dirty = true;
     }
-    fn publish_core(&self, snapshot: &Snapshot) {
-        let mut state = self.0.lock().unwrap();
-        Self::merge(&mut state.snapshot, snapshot);
-        state.core = Some(snapshot.clone());
+    fn publish_core(&self, core: &Snapshot) {
+        let _publisher = self.publishers.lock().unwrap();
+        let mut snapshot = self.state.lock().unwrap().snapshot.clone();
+        // 归属解析含文件系统 I/O；UI 取快照的锁只保护内存交换。
+        Self::merge(&mut snapshot, core);
+        let mut state = self.state.lock().unwrap();
+        state.snapshot = snapshot;
+        state.core = Some(core.clone());
         state.dirty = true;
     }
     fn merge(snapshot: &mut Snapshot, core: &Snapshot) {
@@ -869,8 +879,7 @@ fn collect(
             if query::cancelled() {
                 return;
             }
-            refresh_windows(&mut snapshot.repos);
-            updates.publish(&snapshot);
+            // 后台仅保留通知归属所需的登记信息；窗口由各 Console 核心采集。
             // 本地投递记录不依赖 daemon 连接或重试退避；采集本身不投递消息。
             let state = crate::agent::Store::new(&registry).and_then(|store| {
                 let state = store.load()?;
@@ -1235,6 +1244,23 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ui_can_take_last_snapshot_while_a_publisher_is_busy() {
+        let updates = Updates::default();
+        updates.publish(&Snapshot {
+            history_pages: 7,
+            ..Default::default()
+        });
+        let _busy = updates.publishers.lock().unwrap();
+        let reader = updates.clone();
+        let (output, input) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            output.send(reader.take().unwrap().history_pages).unwrap();
+        });
+        assert_eq!(input.recv_timeout(Duration::from_secs(1)).unwrap(), 7);
+        thread.join().unwrap();
+    }
+
     #[test]
     fn details_failure_is_associated_with_the_requested_turn() {
         let request = super::Request {

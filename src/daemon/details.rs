@@ -1,4 +1,4 @@
-//! 慢历史查询独立串行执行；RPC 只提交或读取结果，不占住请求线程。
+//! 慢历史查询由两个独立线程执行；RPC 只提交或读取结果，不占住请求线程。
 use crate::console::data::{Request, Snapshot};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -21,7 +21,7 @@ struct Job {
 pub(crate) struct Details {
     entries: Arc<Mutex<BTreeMap<String, Entry>>>,
     queue: Option<mpsc::SyncSender<Job>>,
-    worker: Option<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
 }
 impl Details {
     pub fn start(stop: Arc<AtomicBool>) -> Self {
@@ -31,32 +31,48 @@ impl Details {
         })
     }
     fn with_query(
-        mut query: impl FnMut(Snapshot, Request) -> Result<Snapshot> + Send + 'static,
+        query: impl Fn(Snapshot, Request) -> Result<Snapshot> + Send + Sync + 'static,
     ) -> Self {
         let entries = Arc::new(Mutex::new(BTreeMap::<String, Entry>::new()));
-        let results = entries.clone();
         let (queue, input) = mpsc::sync_channel::<Job>(64);
-        let worker = thread::spawn(move || {
-            for job in input {
-                let result = query(job.snapshot, job.request).map_err(|error| format!("{error:#}"));
-                let mut entries = results.lock().unwrap();
-                let entry = entries.get_mut(&job.client).unwrap();
-                entry.result = Some(result);
-                entry.touched = Instant::now();
-            }
-        });
+        let input = Arc::new(Mutex::new(input));
+        let query = Arc::new(query);
+        let workers = (0..2)
+            .map(|_| {
+                let input = input.clone();
+                let query = query.clone();
+                let results = entries.clone();
+                thread::spawn(move || {
+                    loop {
+                        let job = input.lock().unwrap().recv();
+                        let Ok(job) = job else { break };
+                        let result =
+                            query(job.snapshot, job.request).map_err(|error| format!("{error:#}"));
+                        let mut entries = results.lock().unwrap();
+                        let entry = entries.get_mut(&job.client).unwrap();
+                        entry.result = Some(result);
+                        entry.touched = Instant::now();
+                    }
+                })
+            })
+            .collect();
         Self {
             entries,
             queue: Some(queue),
-            worker: Some(worker),
+            workers,
         }
     }
+
     pub fn poll(
         &self,
         client: String,
         request: Request,
         snapshot: impl FnOnce() -> Snapshot,
     ) -> Result<Option<Snapshot>> {
+        ensure!(
+            !self.workers.iter().any(JoinHandle::is_finished),
+            "历史查询线程已停止，请查看后台日志"
+        );
         let key = serde_json::to_value(&request)?;
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|_, entry| {
@@ -116,8 +132,10 @@ impl Details {
 impl Drop for Details {
     fn drop(&mut self) {
         self.queue.take();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        for worker in self.workers.drain(..) {
+            if worker.join().is_err() {
+                super::log::error("历史查询线程异常退出");
+            }
         }
     }
 }
@@ -126,12 +144,51 @@ impl Drop for Details {
 mod tests {
     use super::*;
     #[test]
+    fn another_client_finishes_while_the_first_query_is_blocked() {
+        let (entered, started) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let gate = Mutex::new(gate);
+        let details = Details::with_query(move |snapshot, request| {
+            if request.page == 1 {
+                entered.send(()).unwrap();
+                gate.lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+            Ok(snapshot)
+        });
+        let slow = Request {
+            page: 1,
+            ..Default::default()
+        };
+        details
+            .poll("slow".into(), slow, Snapshot::default)
+            .unwrap();
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while details
+            .poll("fast".into(), Request::default(), Snapshot::default)
+            .unwrap()
+            .is_none()
+        {
+            assert!(Instant::now() < deadline, "其他客户端不应等待慢查询");
+            thread::sleep(Duration::from_millis(5));
+        }
+        release.send(()).unwrap();
+    }
+
+    #[test]
     fn slow_queries_are_deduplicated_and_do_not_block_polls() {
         let (entered, started) = mpsc::channel();
         let (release, gate) = mpsc::channel();
+        let gate = Mutex::new(gate);
         let details = Details::with_query(move |snapshot, _| {
             entered.send(()).unwrap();
-            gate.recv().unwrap();
+            gate.lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
             Ok(snapshot)
         });
         assert!(
@@ -159,12 +216,15 @@ mod tests {
         assert!(now.elapsed() < Duration::from_secs(1));
         release.send(()).unwrap();
         started.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(
-            details
-                .poll("a".into(), Request::default(), Snapshot::default)
-                .unwrap()
-                .is_some()
-        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while details
+            .poll("a".into(), Request::default(), Snapshot::default)
+            .unwrap()
+            .is_none()
+        {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
         release.send(()).unwrap();
         drop(details);
         assert!(started.try_recv().is_err(), "重复轮询不能重复执行查询");
