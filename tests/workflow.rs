@@ -1853,6 +1853,41 @@ fn removal_failure_keeps_captured_file_list_and_original_error() {
 }
 
 #[test]
+fn final_journal_failure_preserves_business_error_and_resources() {
+    let f = Fixture::new();
+    let directory = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("operations");
+    let wrapper = f.bin.join("tmux");
+    let script = fs::read_to_string(&wrapper).unwrap().replace("echo injected-failure", "mv \"$TWIG_TEST_ARCHIVE\" \"$TWIG_TEST_ARCHIVE.saved\"; printf blocked > \"$TWIG_TEST_ARCHIVE\"; echo injected-failure");
+    fs::write(wrapper, script).unwrap();
+    let result = f
+        .command(&f.repo)
+        .env("TWIG_TEST_ARCHIVE", directory.join("archive"))
+        .env("TWIG_FAIL_TMUX", "1")
+        .args(["new", "local", "interrupted", "--no-fetch", "--no-open"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(error.contains("结果保存失败"), "{error}");
+    assert!(error.contains("injected-failure"), "{error}");
+    assert!(error.contains("Worktree 已保留"), "{error}");
+    assert!(f.root.join("interrupted").is_dir());
+    assert!(fs::read_dir(directory).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .path()
+            .extension()
+            .is_some_and(|ext| ext == "json")
+    }));
+}
+
+#[test]
 fn opening_existing_windows_does_not_grow_the_operation_journal() {
     let f = Fixture::new();
     f.ok(&["new", "local", "existing", "--no-fetch", "--no-open"]);

@@ -85,7 +85,24 @@ fn save_accepted(store: &Store, records: &mut BTreeMap<String, Operation>, id: &
     if let Err(error) = store.save(records.get(id).context("操作记录不存在")?) {
         let operation = records.get_mut(id).context("操作记录不存在")?;
         operation.status = "needs_inspection".into();
-        operation.error = Some(format!("操作记录保存失败，请恢复存储后核对资源：{error:#}"));
+        operation.error = Some(format!(
+            "{}\n操作记录保存失败，请恢复存储后核对资源：{error:#}",
+            operation.error.as_deref().unwrap_or("")
+        ));
+        return Err(error);
+    }
+    Ok(())
+}
+pub(crate) fn resolve(store: &Store, record: &mut Operation) -> Result<()> {
+    ensure!(
+        record.status == "needs_inspection",
+        "只有待核对操作可解除标记"
+    );
+    let previous = record.clone();
+    record.status = "resolved".into();
+    record.error = Some("用户已核对资源并解除阻塞；不表示原操作成功".into());
+    if let Err(error) = store.save(record) {
+        *record = previous;
         return Err(error);
     }
     Ok(())
@@ -93,15 +110,7 @@ fn save_accepted(store: &Store, records: &mut BTreeMap<String, Operation>, id: &
 impl Service {
     pub fn start(registry: &Path, directory: &Path) -> Result<(Self, thread::JoinHandle<()>)> {
         let (store, mut records) = Store::open(directory)?;
-        for record in records
-            .values_mut()
-            .filter(|r| matches!(r.status.as_str(), "running" | "queued"))
-        {
-            record.status = "needs_inspection".into();
-            record.error =
-                Some("后台在操作完成前退出；请核对资源和确认有效性，不自动重新执行".into());
-            store.save(record)?;
-        }
+        crate::core::recover_saved(&store, &mut records)?;
         let (queue, receiver) = mpsc::sync_channel::<String>(64);
         let service = Self {
             registry: registry.to_owned(),
@@ -117,7 +126,17 @@ impl Service {
             while let Ok(id) = receiver.recv() {
                 let run = || -> Result<()> {
                     // 从 running 到最终结果落盘始终持锁，不能留下未落盘窗口。
-                    let _execution = crate::core::execution_lock(&registry)?;
+                    let _execution = match crate::core::execution_lock(&registry) {
+                        Ok(lock) => lock,
+                        Err(error) => {
+                            let mut records = records.lock().unwrap();
+                            let record = records.get_mut(&id).context("操作记录不存在")?;
+                            record.status = "failed".into();
+                            record.error = Some(format!("取得执行锁失败，操作未执行：{error:#}"));
+                            save_accepted(&store, &mut records, &id)?;
+                            return Ok(());
+                        }
+                    };
                     let plan = {
                         let mut records = records.lock().unwrap();
                         let action = &records[&id].plan.action;
@@ -293,17 +312,7 @@ impl Service {
                 ensure!(value["confirmed"] == true, "需先核对实际资源并明确确认");
                 let mut records = self.records.lock().unwrap();
                 let record = records.get_mut(id).context("操作不存在")?;
-                ensure!(
-                    record.status == "needs_inspection",
-                    "只有待核对操作可解除标记"
-                );
-                let previous = record.clone();
-                record.status = "resolved".into();
-                record.error = Some("用户已核对资源并解除阻塞；此标记不表示原操作成功".into());
-                if let Err(error) = self.store.save(record) {
-                    records.insert(id.into(), previous);
-                    return Err(error);
-                }
+                resolve(&self.store, record)?;
                 Ok(Value::Null)
             }
             "operation.list" => Ok(serde_json::to_value(&*self.records.lock().unwrap())?),
@@ -510,19 +519,14 @@ pub(crate) fn remote_cli(registry: &Path, command: Command) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
-pub(crate) fn execute_remote(registry: &Path, mut action: Action, cli: bool) -> Result<Output> {
+pub(crate) fn execute_remote(registry: &Path, action: Action, cli: bool) -> Result<Output> {
     if matches!(
         &action,
-        Action::Ls { .. }
-            | Action::Agent(crate::agent::Cli {
-                command: crate::agent::Action::Status | crate::agent::Action::Read { .. }
-            })
+        Action::Agent(crate::agent::Cli {
+            command: crate::agent::Action::Status | crate::agent::Action::Read { .. }
+        })
     ) {
         return super::call(registry, "query.execute", serde_json::to_value(action)?);
-    }
-    if let Action::Add { path, root, .. } = &mut action {
-        *path = registry::expand(path)?;
-        *root = root.as_deref().map(registry::expand).transpose()?;
     }
     let plan: Plan = super::call(registry, "operation.prepare", serde_json::to_value(action)?)?;
     let branch = if plan.branches.is_empty() {
@@ -578,6 +582,40 @@ pub(crate) fn execute_remote(registry: &Path, mut action: Action, cli: bool) -> 
 mod tests {
     use super::*;
     use std::fs;
+    #[test]
+    fn execution_lock_failure_finishes_accepted_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("config.toml");
+        let (service, worker) = Service::start(&registry, temp.path()).unwrap();
+        let plan: Plan = serde_json::from_value(
+            service
+                .handle(
+                    "operation.prepare",
+                    serde_json::to_value(Action::Agent(crate::agent::Cli {
+                        command: crate::agent::Action::Status,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let root = crate::core::directory(&registry).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(root.join("execution.lock")).unwrap();
+        let id = service
+            .handle(
+                "operation.submit",
+                json!({"plan":plan.id,"request":"lock-failure","confirmed":true}),
+            )
+            .unwrap();
+        let record = finished(&service, id.as_str().unwrap());
+        assert_eq!(record.status, "failed");
+        assert!(record.error.unwrap().contains("操作未执行"));
+        let persisted = Store::read(temp.path()).unwrap();
+        assert_eq!(persisted[id.as_str().unwrap()].status, "failed");
+        drop(service);
+        worker.join().unwrap();
+    }
     #[test]
     fn backend_rejects_unmanaged_operations_at_prepare() {
         let temp = tempfile::tempdir().unwrap();

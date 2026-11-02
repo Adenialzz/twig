@@ -20,7 +20,7 @@ use std::{
 };
 
 type Records = BTreeMap<String, Operation>;
-fn directory(registry: &Path) -> Result<PathBuf> {
+pub(crate) fn directory(registry: &Path) -> Result<PathBuf> {
     let paths = daemon::Paths::new(registry)?;
     Ok(paths
         .registry
@@ -249,9 +249,14 @@ fn execute_with_progress(registry: &Path, mut action: Action, cli: bool) -> Resu
     }
     .into();
     record.error = result.as_ref().err().map(|error| format!("{error:#}"));
-    store
-        .save(record)
-        .with_context(|| format!("操作 {id} 结果保存失败，请核对资源，不要重跑"))?;
+    store.save(record).with_context(|| {
+        format!(
+            "{}{}{}\n操作 {id} 结果保存失败，请核对资源，不要重跑",
+            output.stdout,
+            output.stderr,
+            record.error.as_deref().unwrap_or("")
+        )
+    })?;
     result.with_context(|| {
         format!(
             "{}{}操作 {id} 失败；twig operation show {id} 查看详情",
@@ -260,7 +265,7 @@ fn execute_with_progress(registry: &Path, mut action: Action, cli: bool) -> Resu
     })?;
     Ok(output)
 }
-fn recover_saved(store: &Store, records: &mut Records) -> Result<()> {
+pub(crate) fn recover_saved(store: &Store, records: &mut Records) -> Result<()> {
     for id in recover(records) {
         store.save(&records[&id])?;
     }
@@ -322,35 +327,22 @@ pub fn operation_cli(registry: &Path, command: Command) -> Result<()> {
             let (store, mut records) = Store::open(&root)?;
             recover_saved(&store, &mut records)?;
             let record = records.get_mut(&id).context("操作不存在")?;
-            ensure!(
-                record.status == "needs_inspection",
-                "只有待核对操作可解除标记"
-            );
-            record.status = "resolved".into();
-            record.error = Some("用户已核对资源并解除阻塞；不表示原操作成功".into());
-            store.save(record)?;
+            operations::resolve(&store, record)?;
             Value::Null
         }
         Command::Resolve { id, yes } => {
+            crate::confirm("已核对真实资源和遗留进程，并解除操作阻塞？", yes)?;
             let paths = daemon::Paths::new(registry)?;
+            // 与本地执行保持 execution -> maintenance 的取锁顺序。
+            let execution = execution_lock(registry)?;
             let Some(_offline) = daemon::offline_lock(&paths, true)? else {
-                return operations::remote_cli(registry, Command::Resolve { id, yes });
+                drop(execution);
+                return operations::remote_cli(registry, Command::Resolve { id, yes: true });
             };
-            crate::confirm(
-                "后台已退出；已核对真实资源和遗留进程，并解除操作阻塞？",
-                yes,
-            )?;
-            let _execution = execution_lock(registry)?;
             let (store, mut records) = Store::open(&paths.dir)?;
             recover_saved(&store, &mut records)?;
             let record = records.get_mut(&id).context("操作不存在")?;
-            ensure!(
-                record.status == "needs_inspection",
-                "只有待核对操作可解除标记"
-            );
-            record.status = "resolved".into();
-            record.error = Some("用户已核对资源并解除阻塞；不表示原操作成功".into());
-            store.save(record)?;
+            operations::resolve(&store, record)?;
             Value::Null
         }
     };
@@ -384,7 +376,7 @@ mod tests {
         let paths = daemon::Paths::new(&registry).unwrap();
         fs::create_dir_all(&paths.dir).unwrap();
         fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let instance = daemon::offline_lock(&paths, true).unwrap().unwrap();
+        let instance = daemon::Instance::acquire(&paths).unwrap();
         let (store, _) = Store::open(&paths.dir).unwrap();
         let action = Action::Open {
             project: "demo".into(),
@@ -418,6 +410,26 @@ mod tests {
         record.status = "queued".into();
         store.save(&record).unwrap();
         drop(instance);
+        let reader = daemon::offline_lock(&paths, true).unwrap().unwrap();
+        let (out, input) = std::sync::mpsc::channel();
+        let registry_copy = registry.clone();
+        let action_copy = action.clone();
+        let worker = std::thread::spawn(move || {
+            out.send(check_backend_pending(&registry_copy, &action_copy))
+                .unwrap();
+        });
+        assert!(matches!(
+            input.recv_timeout(std::time::Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(reader);
+        assert!(
+            input
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+        worker.join().unwrap();
         assert!(
             check_backend_pending(&registry, &action).is_err(),
             "后台退出后的排队记录仍需核对"

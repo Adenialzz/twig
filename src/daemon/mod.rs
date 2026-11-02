@@ -121,17 +121,36 @@ pub(crate) fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-struct Instance {
+pub(crate) struct Instance {
     _lock: File,
     socket: PathBuf,
 }
-// 持有此锁才允许离线修改后台记录；新后台也必须取得同一把锁。
-pub(crate) fn offline_lock(paths: &Paths, create: bool) -> Result<Option<File>> {
+// 启动和离线维护先串行协调，再检查真正的后台单例锁。
+// None 只表示单例锁由后台持有，不会把另一离线读者当成在线后台。
+pub(crate) struct OfflineLock {
+    _instance: File,
+    _maintenance: File,
+}
+fn maintenance_lock(paths: &Paths) -> Result<File> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(paths.dir.join("maintenance.lock"))?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(lock)
+}
+pub(crate) fn offline_lock(paths: &Paths, create: bool) -> Result<Option<OfflineLock>> {
     if !create && !paths.dir.join("instance.lock").try_exists()? {
         return Ok(None);
     }
     ensure!(paths.dir.is_dir(), "未找到后台操作目录");
     private_directory(&paths.dir)?;
+    let maintenance = maintenance_lock(paths)?;
     let lock = OpenOptions::new()
         .create(create)
         .truncate(false)
@@ -140,7 +159,10 @@ pub(crate) fn offline_lock(paths: &Paths, create: bool) -> Result<Option<File>> 
         .mode(0o600)
         .open(paths.dir.join("instance.lock"))?;
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-        return Ok(Some(lock));
+        return Ok(Some(OfflineLock {
+            _instance: lock,
+            _maintenance: maintenance,
+        }));
     }
     let error = std::io::Error::last_os_error();
     if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -150,9 +172,10 @@ pub(crate) fn offline_lock(paths: &Paths, create: bool) -> Result<Option<File>> 
     }
 }
 impl Instance {
-    fn acquire(paths: &Paths) -> Result<Self> {
+    pub(crate) fn acquire(paths: &Paths) -> Result<Self> {
         fs::create_dir_all(&paths.dir)?;
         fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700))?;
+        let _maintenance = maintenance_lock(paths)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -177,6 +200,10 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.socket);
+        // 显式结束租约，不能让其他线程 fork 后尚未 exec 的子进程延长单例寿命。
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -698,6 +725,30 @@ fn agent_queue(registry: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_waits_for_offline_maintenance_without_false_running_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("config.toml");
+        let paths = Paths::new(&registry).unwrap();
+        fs::create_dir_all(&paths.dir).unwrap();
+        fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let offline = offline_lock(&paths, true).unwrap().unwrap();
+        let (out, input) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let instance = Instance::acquire(&Paths::new(&registry).unwrap());
+            out.send(instance).unwrap();
+        });
+        assert!(matches!(
+            input.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(offline);
+        let instance = input.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+        assert!(offline_lock(&paths, true).unwrap().is_none());
+        assert!(Instance::acquire(&paths).is_err());
+        drop(instance);
+        worker.join().unwrap();
+    }
     #[test]
     fn updated_client_can_inspect_and_stop_released_daemons() {
         for version in [1, 2] {
