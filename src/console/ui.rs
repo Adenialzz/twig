@@ -587,21 +587,31 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or_default()
         })
         .collect();
-    // 当前项目没有关联会话时隐藏 Agent 列，普通任务不显示占位符。
-    let codex = sessions.iter().any(|s| !s.is_empty())
-        || !claude_sessions(
-            &app.snapshot,
-            app.project.as_deref().unwrap_or_default(),
-            None,
-        )
-        .is_empty();
-    let compact = area.width < if codex { 80 } else { 50 };
-    let (headers, widths): (Vec<_>, Vec<_>) = match (compact, codex) {
-        (true, true) => (vec!["任务", "Git / 窗口", "Agent"], vec![40, 32, 28]),
-        (true, false) => (vec!["任务", "Git / 窗口"], vec![55, 45]),
-        (false, true) => (vec!["任务", "Git", "窗口", "Agent"], vec![34, 28, 12, 26]),
-        (false, false) => (vec!["任务", "Git", "窗口"], vec![45, 40, 15]),
+    let project = app.project.as_deref().unwrap_or_default();
+    let codex = app.snapshot.threads.iter().any(|thread| {
+        app.snapshot
+            .associations
+            .get(&thread.id)
+            .is_some_and(|(owner, _)| owner == project)
+    });
+    let claude = !claude_sessions(&app.snapshot, project, None).is_empty();
+    let agents = codex || claude;
+    let compact = area.width < if agents { 80 } else { 50 };
+    let (mut headers, widths): (Vec<_>, Vec<_>) = match (compact, codex, claude) {
+        (true, false, false) => (vec!["任务", "Git / 窗口"], vec![55, 45]),
+        (true, _, _) => (vec!["任务", "Git / 窗口", "Agent"], vec![35, 30, 35]),
+        (false, true, true) => (vec!["任务", "Git", "窗口"], vec![28, 20, 12, 20, 20]),
+        (false, false, false) => (vec!["任务", "Git", "窗口"], vec![45, 40, 15]),
+        (false, _, _) => (vec!["任务", "Git", "窗口"], vec![34, 28, 12, 26]),
     };
+    if !compact {
+        if codex {
+            headers.push("Codex");
+        }
+        if claude {
+            headers.push("Claude");
+        }
+    }
     let widths: Vec<_> = widths.into_iter().map(Constraint::Percentage).collect();
     // 与 Table 相同的列分配，用于按列宽加省略号；扣除边框和选中箭头。
     let columns: Vec<usize> = Layout::horizontal(widths.clone())
@@ -639,24 +649,24 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                     Color::DarkGray
                 }),
             );
-            let mut counts = std::collections::BTreeMap::new();
+            let mut codex_counts = std::collections::BTreeMap::new();
             for thread in sessions {
-                let entry = counts
-                    .entry((thread.priority(), format!("Codex {}", thread.label())))
+                let entry = codex_counts
+                    .entry((thread.priority(), thread.label()))
                     .or_insert((0, status_style(thread, stale)));
                 entry.0 += 1;
             }
+            let mut claude_counts = std::collections::BTreeMap::new();
             for session in claude_sessions(
                 &app.snapshot,
                 app.project.as_deref().unwrap_or_default(),
                 Some(&task.path),
             ) {
-                let entry = counts
-                    .entry((session.priority(), format!("Claude {}", session.label())))
+                let entry = claude_counts
+                    .entry((session.priority(), session.label()))
                     .or_insert((0, claude_style(session, &app.snapshot)));
                 entry.0 += 1;
             }
-            let codex_cell = Cell::from(agent_summary(counts, *columns.last().unwrap()));
             let mut cells = if compact {
                 let mut lines = vec![fit(Line::from(name), columns[0])];
                 lines.extend(branch.map(|b| fit(Line::from(b), columns[0])));
@@ -678,8 +688,36 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                     Cell::from(fit(window, columns[2])),
                 ]
             };
-            if codex {
-                cells.push(codex_cell);
+            if compact && agents {
+                let width = *columns.last().unwrap();
+                let mut lines = Vec::new();
+                for (enabled, provider, counts) in [
+                    (codex, "Codex", codex_counts),
+                    (claude, "Claude", claude_counts),
+                ] {
+                    if enabled {
+                        let prefix = format!("{provider} ");
+                        let mut line = Line::from(prefix.clone());
+                        line.spans.extend(
+                            agent_summary(counts, width.saturating_sub(prefix.len())).spans,
+                        );
+                        lines.push(fit(line, width));
+                    }
+                }
+                cells.push(Cell::from(Text::from(lines)));
+            } else if !compact {
+                if codex {
+                    cells.push(Cell::from(agent_summary(
+                        codex_counts,
+                        columns[cells.len()],
+                    )));
+                }
+                if claude {
+                    cells.push(Cell::from(agent_summary(
+                        claude_counts,
+                        columns[cells.len()],
+                    )));
+                }
             }
             Row::new(cells).height(if compact { 2 } else { 1 })
         })
@@ -2093,6 +2131,47 @@ mod tests {
         }
         app.snapshot.threads[1].status = json!({"type":"idle"});
         assert_ne!(before, render(&app, 55, 12, monitor));
+    }
+
+    #[test]
+    fn task_provider_columns_split_hide_and_stack_on_narrow_screens() {
+        let mut app = fixture();
+        app.project = Some("alpha".into());
+        app.task = Some("/alpha".into());
+        app.snapshot.claude_checked = Some(Instant::now());
+        let session: crate::claude::Session = serde_json::from_value(json!({
+            "cwd":"/alpha", "kind":"interactive", "startedAt":1,
+            "sessionId":"claude", "status":"busy"
+        }))
+        .unwrap();
+        app.snapshot
+            .claude_associations
+            .insert(session.key().unwrap(), ("alpha".into(), "/alpha".into()));
+        app.snapshot.claude.push(session);
+        let wide = text(&render(&app, 100, 10, tasks));
+        let header = wide.lines().find(|line| line.contains("Codex")).unwrap();
+        assert!(header.contains("Claude"), "{wide}");
+        let row = wide.lines().find(|line| line.contains("空闲 1")).unwrap();
+        assert!(row.contains("运行中 1"), "{wide}");
+        assert!(!row.contains("Codex") && !row.contains("Claude"));
+        let narrow = text(&render(&app, 70, 10, tasks));
+        assert!(
+            narrow.lines().any(|line| line.contains("Codex 空闲 1")),
+            "{narrow}"
+        );
+        assert!(
+            narrow.lines().any(|line| line.contains("Claude 运行中 1")),
+            "{narrow}"
+        );
+        app.snapshot.threads.clear();
+        let only_claude = text(&render(&app, 100, 10, tasks));
+        assert!(!only_claude.contains("Codex"));
+        assert!(only_claude.contains("Claude") && only_claude.contains("运行中 1"));
+        app.snapshot.claude.clear();
+        let neither = text(&render(&app, 100, 10, tasks));
+        assert!(
+            !neither.contains("Codex") && !neither.contains("Claude") && !neither.contains("Agent")
+        );
     }
 
     #[test]
