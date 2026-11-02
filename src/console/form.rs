@@ -249,7 +249,11 @@ impl Form {
         let stop = cancel.clone();
         let (out, result) = mpsc::channel();
         std::thread::spawn(move || {
-            super::query::install(stop);
+            if matches!(kind, QueryKind::Ignored) {
+                super::query::install_with_timeout(stop, None);
+            } else {
+                super::query::install(stop);
+            }
             let method = match kind {
                 QueryKind::Project => "form.project",
                 QueryKind::Task => "form.task",
@@ -299,6 +303,11 @@ impl Form {
         if self.branch_selection.is_some() {
             self.complete_branch();
         }
+        ensure!(
+            self.deletion.is_some()
+                || (!self.fields[0].trim().is_empty() && !self.fields[1].trim().is_empty()),
+            "请填写全部字段"
+        );
         if let Some(deletion) = &self.deletion {
             if !deletion.ignored_ready {
                 self.load_ignored(registry);
@@ -317,11 +326,6 @@ impl Form {
         self.submit(registry, None)
     }
     fn submit(&mut self, registry: &Path, sources: Option<TaskSources>) -> Result<()> {
-        ensure!(
-            self.deletion.is_some()
-                || (!self.fields[0].trim().is_empty() && !self.fields[1].trim().is_empty()),
-            "请填写全部字段"
-        );
         let mut command = Command::new(std::env::current_exe()?);
         command.arg("--config").arg(registry);
         if let Some(deletion) = &mut self.deletion {
@@ -347,8 +351,6 @@ impl Form {
                     .arg(serde_json::to_string(&deletion.ignored)?);
             }
         } else if let Some(project) = &self.project {
-            crate::config::task_name(&self.fields[0])?;
-            ensure!(self.fields[0] != "main", "main 保留给项目主窗口");
             let (common, available) = sources.context("缺少分支查询结果")?;
             if let Some(existing) = self.existing.take() {
                 ensure!(existing.confirmed, "操作已取消");
@@ -656,6 +658,29 @@ fn directories(input: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_fields_are_rejected_before_starting_queries() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = temp.path().join("absent.toml");
+        for (name, base, expected) in [
+            ("", "main", "请填写全部字段"),
+            ("task", "", "请填写全部字段"),
+            ("main", "main", "main 保留"),
+            ("bad name", "main", "任务名称"),
+        ] {
+            let mut form = Form::task("demo".into(), base.into());
+            form.fields[0] = name.into();
+            assert!(
+                form.confirm(&registry)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+            assert!(!form.reading());
+            assert!(!form.busy());
+        }
+        assert!(!registry.exists());
+    }
     #[test]
     fn branch_filter_and_completion_preserve_base_and_handle_no_matches() {
         let mut form = Form::task("demo".into(), "develop".into());

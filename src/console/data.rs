@@ -313,7 +313,6 @@ impl Worker {
                 latest.history_scanned = detail.history_scanned;
                 latest.history_error = detail.history_error.clone();
                 latest.turn = detail.turn.clone();
-                latest.associations.extend(detail.associations.clone());
                 if let Err(error) = remote_inbox.sync() {
                     latest.delivery_error = Some(format!("未读同步失败：{error:#}"));
                 }

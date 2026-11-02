@@ -3008,18 +3008,19 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
 }
 
 #[test]
-fn slow_delete_query_can_be_cancelled_and_times_out_without_writing() {
+fn slow_delete_query_can_be_cancelled_then_complete_and_delete() {
     let f = Fixture::core();
     f.init();
     let real_git = Command::new("sh")
         .args(["-c", "command -v git"])
         .output()
         .unwrap();
-    fs::write(f.bin.join("git"), "#!/bin/sh\ncase \" $* \" in *' --ignored '*) sleep 30;; esac\nexec \"$TWIG_REAL_GIT\" \"$@\"\n").unwrap();
+    fs::write(f.bin.join("git"), "#!/bin/sh\ncase \" $* \" in *' --ignored '* ) if [ ! -f \"$TWIG_QUERY_DONE\" ]; then sleep 3; touch \"$TWIG_QUERY_DONE\"; fi;; esac\nexec \"$TWIG_REAL_GIT\" \"$@\"\n").unwrap();
     fs::set_permissions(f.bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
     f.env(&mut command);
     command
+        .env("TWIG_QUERY_DONE", f.temp.path().join("query-completed"))
         .env(
             "TWIG_REAL_GIT",
             String::from_utf8(real_git.stdout).unwrap().trim(),
@@ -3034,12 +3035,21 @@ fn slow_delete_query_can_be_cancelled_and_times_out_without_writing() {
     p.wait_screen_absent("删除任务");
     p.clear_output();
     p.send(b"dd");
-    p.wait_screen("超过 2 秒");
-    p.send(b"\x03q");
+    let started = Instant::now();
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
+    assert!(started.elapsed() >= Duration::from_secs(2));
+    let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let task = PathBuf::from(state["auth"]["path"].as_str().unwrap());
+    assert!(task.is_dir());
+    p.send(b"\t\r");
+    p.wait_screen("已选中 demo / main");
+    assert!(!task.exists());
+    p.send(b"q");
     assert!(p.wait_exit().success());
     let state =
         fs::read_to_string(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
-    assert!(state.contains("auth"));
+    assert!(!state.contains("auth"));
 }
 
 #[test]
