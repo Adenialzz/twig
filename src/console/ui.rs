@@ -49,6 +49,16 @@ fn block(title: String, focused: bool) -> Block<'static> {
             Color::DarkGray
         }))
 }
+// 焦点区用底色标记选中行，非焦点区只保留箭头，键盘落点一眼可辨。
+fn highlight(focused: bool) -> Style {
+    if focused {
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    }
+}
 fn list(
     frame: &mut Frame,
     area: Rect,
@@ -59,29 +69,77 @@ fn list(
 ) {
     let widget = List::new(items)
         .block(block(title, focused))
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(highlight(focused))
         .highlight_symbol("› ");
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(widget, area, &mut state);
 }
-fn panels(area: Rect, searching: bool) -> [Rect; 4] {
+/// 按显示宽度截断，超出时以省略号结尾，避免截断后的名称看起来像另一个值。
+fn fit(line: Line<'static>, width: usize) -> Line<'static> {
+    if line.width() <= width {
+        return line;
+    }
+    let mut used = 0;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        let mut text = String::new();
+        for c in span.content.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+            if used + w + 1 > width {
+                break;
+            }
+            used += w;
+            text.push(c);
+        }
+        let full = text.len() == span.content.len();
+        spans.push(Span::styled(text, span.style));
+        if !full {
+            break;
+        }
+    }
+    if width > 0 {
+        spans.push(Span::raw("…"));
+    }
+    Line::from(spans)
+}
+/// 用户目录下的路径缩写为 ~，减少详情折行。
+fn tilde(path: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(|p| p.to_owned())) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+/// 宽度不足 80 列时按焦点单页显示；80～99 列上方并排项目与任务，下方为详情和监控。
+fn stacked(area: Rect) -> bool {
+    area.width < 80
+}
+fn panels(area: Rect, app: &App) -> [Rect; 4] {
     let rows = Layout::vertical([
         Constraint::Length(crate::tabs::HEADER_HEIGHT),
         Constraint::Min(6),
-        Constraint::Length(if searching { 2 } else { 1 }),
+        Constraint::Length(if app.searching { 2 } else { 1 }),
     ])
     .split(area);
-    if area.width < 100 {
-        let parts = Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(rows[1]);
+    let body = rows[1];
+    if stacked(area) {
+        let parts =
+            Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).split(body);
         return [parts[0], parts[0], parts[0], parts[1]];
     }
+    if area.width < 100 {
+        let parts = Layout::vertical([
+            Constraint::Percentage(35),
+            Constraint::Min(0),
+            Constraint::Percentage(35),
+        ])
+        .split(body);
+        let top = Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .split(parts[0]);
+        return [top[0], top[1], parts[1], parts[2]];
+    }
     let columns =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(rows[1]);
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(body);
     let left = Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(columns[0]);
     let right = Layout::vertical([Constraint::Percentage(45), Constraint::Percentage(55)])
@@ -99,10 +157,10 @@ pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
     if app.help || app.searching {
         return Vec::new();
     }
-    let areas = panels(area, app.searching);
+    let areas = panels(area, app);
     let mut regions = Vec::new();
     for (index, panel) in areas.into_iter().enumerate() {
-        if area.width < 100 && index < 3 && index != app.focus {
+        if stacked(area) && index < 3 && index != app.focus {
             continue;
         }
         regions.push(panel);
@@ -114,6 +172,30 @@ pub fn selection_regions(area: Rect, app: &App) -> Vec<Rect> {
         .collect();
     regions.push(Rect::new(area.x, area.bottom() - 1, area.width, 1));
     regions
+}
+
+fn codex_stale(app: &App) -> bool {
+    app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked)
+}
+
+/// 底栏左侧的按键提示，随焦点和待完成的前缀变化。
+fn key_hints(app: &App) -> String {
+    if app.pane_prefix {
+        return "Ctrl-W → h 项目 · l 任务 · j 详情 · k 任务 · u 未读 · f 跳转通知 · Esc 取消"
+            .into();
+    }
+    if app.delete_prefix {
+        return "再按 d 打开删除确认 · 其他键取消".into();
+    }
+    if app.top_prefix {
+        return "再按 g 到列表顶部 · 其他键取消".into();
+    }
+    match app.focus {
+        0 => "Enter 任务列表 · n 登记仓库 · / 搜索 · ? 帮助 · q 退出".into(),
+        1 => "Enter 进入 · n 新建 · dd 删除 · / 搜索 · ? 帮助 · q 退出".into(),
+        _ if app.history => "↑↓ 会话 · Enter 轮次 · ] 下一页 · a 子目录 · H 已加载 · ? 帮助".into(),
+        _ => "↑↓ 会话 · Enter 轮次 · i 元数据 · H 历史 · ? 帮助".into(),
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -142,32 +224,28 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .iter()
             .filter(|t| app.snapshot.associations.contains_key(&t.id)),
     );
-    let stale = if app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked) {
-        " [Codex 未知 / 旧值过期]"
-    } else {
-        ""
-    };
-    frame.render_widget(
-        Paragraph::new(format!(
-            " twig  |  {} 个项目 · {count} 个任务  |  {summary}{stale}",
-            app.snapshot.repos.len()
-        )),
-        Rect::new(
-            rows[0].x,
-            rows[0].y + crate::tabs::HEADER_HEIGHT - 1,
-            rows[0].width,
-            1,
-        ),
-    );
+    let dim = Style::default().fg(Color::DarkGray);
+    let mut info = vec![Span::styled(
+        format!("{} 个项目 · {count} 个任务", app.snapshot.repos.len()),
+        dim,
+    )];
+    if codex_stale(app) {
+        info.push(Span::styled(
+            " · Codex 未知 / 旧值过期",
+            Style::default().fg(Color::Yellow),
+        ));
+    } else if !summary.is_empty() {
+        info.push(Span::styled(format!(" · Codex {}", safe(&summary)), dim));
+    }
     crate::tabs::draw(
         frame,
         rows[0],
         crate::tabs::Tab::Console,
-        "Tab 切换标签",
+        Line::from(info),
         app.chat_status.0,
     );
-    let areas = panels(area, app.searching);
-    if area.width >= 100 {
+    let areas = panels(area, app);
+    if !stacked(area) {
         projects(frame, areas[0], app);
         tasks(frame, areas[1], app);
         sessions(frame, areas[2], app);
@@ -186,20 +264,53 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .or(app.snapshot.registry_error.as_deref())
         .or(app.snapshot.delivery_error.as_deref())
         .or(app.snapshot.codex_error.as_deref());
-    let connection = message.map(safe).unwrap_or_else(|| {
-        match app.snapshot.codex_checked {
-            None => "正在读取 Codex 状态…",
-            Some(at) if is_stale(Some(at)) => "Codex 状态过期 · 超过 30 秒未更新",
-            Some(_) => "Codex 已连接 · 仅当前服务可见会话",
-        }
-        .into()
-    });
-    let mut status = vec![Line::from(connection)];
+    let connection = match app.snapshot.codex_checked {
+        _ if app.snapshot.codex_error.is_some() => ("Codex 不可用", Color::Red),
+        None => ("正在读取 Codex…", Color::DarkGray),
+        Some(at) if is_stale(Some(at)) => ("Codex 状态过期", Color::Yellow),
+        Some(_) => ("Codex 已连接", Color::DarkGray),
+    };
+    let bar = Rect {
+        height: 1,
+        ..rows[2]
+    };
+    let right = Line::from(connection.0).width() as u16;
+    let left = if app.pane_prefix || app.delete_prefix || app.top_prefix {
+        Line::styled(key_hints(app), Style::default().fg(Color::Cyan))
+    } else if let Some(message) = message {
+        Line::styled(safe(message), Style::default().fg(Color::Yellow))
+    } else {
+        Line::styled(key_hints(app), dim)
+    };
+    // 连接状态只陪同按键提示显示；有消息时整行只放消息，便于复制。
+    let hints = message.is_none() || app.pane_prefix || app.delete_prefix || app.top_prefix;
+    let left_width = if hints && left.width() as u16 + right + 3 <= bar.width {
+        frame.render_widget(
+            Paragraph::new(connection.0)
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(connection.1)),
+            bar,
+        );
+        bar.width - right - 2
+    } else {
+        bar.width
+    };
+    frame.render_widget(
+        Paragraph::new(left),
+        Rect {
+            width: left_width,
+            ..bar
+        },
+    );
     if app.searching {
-        status.push(Line::from(format!("搜索：/{}", safe(&app.search_input))));
-    }
-    frame.render_widget(Paragraph::new(status).wrap(Wrap { trim: false }), rows[2]);
-    if app.searching {
+        frame.render_widget(
+            Paragraph::new(format!("搜索：/{}", safe(&app.search_input)))
+                .wrap(Wrap { trim: false }),
+            Rect {
+                y: bar.y + 1,
+                ..bar
+            },
+        );
         let candidates = app.command_candidates();
         if !candidates.is_empty() {
             let height = candidates.len() as u16 + 2;
@@ -240,11 +351,108 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
     }
     if app.help {
-        frame.render_widget(Clear, rows[1]);
-        frame.render_widget(Paragraph::new("项目 → 任务 → 任务详情（左下为只读全局监控）\n点击顶部标签 / Tab：切换 Console 与 Agent\n\n1 / 2：聚焦项目 / 任务，保留选择与筛选\nCtrl-W 后按 h/l/j/k：左侧项目 / 右侧任务 / 右下详情 / 上方任务\n↑↓ 或 j/k：选择；gg / G：列表顶部 / 底部；/：搜索当前区域，显示命令候选\nEnter：项目切到任务列表，任务进入终端工作台，详情展开最近轮次；i 展开/收起元数据；PgUp/PgDn 滚动\nn：项目区登记仓库，任务区新建任务，会话区历史下一页\ndd：任务区打开删除确认（默认取消）\nh：切换已加载与历史会话\na：历史查询包含子目录（分页扫描，不自动全量加载）\n/new /delete /refresh /help /quit：精确关键字或选择候选后 Enter 执行\n↑↓ 选择命令，Tab 补全；// 强制搜索，Esc 取消并恢复选择\nr：重新查询；Esc：取消搜索/详情或返回上一层\nq / Ctrl+C：退出导航，保留所有任务和 Agent\n终端工作台：Ctrl-W d 返回导航；Ctrl-W 后 s/v 分屏、h/j/k/l 切 Pane、z 放大；Alt-h/j/k/l 调比例\nCtrl-W f：跳转当前通知对应的任务或主控（导航与工作台通用）\nCtrl-W u：未读任务列表，j/k 选择、Enter 进入、Esc 关闭\n工作台内 Ctrl-C 发送给程序，Shift-PgUp/PgDn 浏览历史\n\n窗口已打开不代表 Codex 正在运行；空闲不代表任务完成。\n历史 notLoaded 只表示当前服务未加载，不推断其他服务状态。\n任务详情「用 Zed 打开」：Cmd/Ctrl + 点击（需配置 [zed].ssh_host 及终端链接支持）\n会话创建/更新时间为北京时间 UTC+8；Git 干净不包含 ignored 文件。\n\n任意键返回").block(block(" 帮助 ".into(),true)).wrap(Wrap{trim:false}),rows[1]);
+        help(frame, rows[1]);
     }
     if let Some(form) = &app.form {
         draw_form(frame, area, form);
+    }
+}
+
+const HELP: [(&str, &[(&str, &str)]); 5] = [
+    (
+        "导航",
+        &[
+            ("Tab / 点击标签", "切换 Console 与 Agent"),
+            ("1 / 2", "聚焦项目 / 任务，保留选择与筛选"),
+            ("h / l", "聚焦左侧项目 / 右侧任务"),
+            ("Ctrl-W h/l/j/k", "项目 / 任务 / 详情 / 任务"),
+            ("↑↓ 或 j/k", "选择；gg / G 到顶部 / 底部"),
+            ("/", "搜索当前区域；/new /delete /refresh /help /quit"),
+            ("Esc", "取消搜索或详情，返回上一层"),
+            ("r", "重新查询"),
+            ("q / Ctrl-C", "退出导航，保留所有任务和 Agent"),
+        ],
+    ),
+    (
+        "项目与任务",
+        &[
+            ("Enter", "项目区进入任务列表；任务区进入终端工作台"),
+            ("n", "项目区登记已有仓库；任务区新建任务"),
+            ("dd", "删除所选任务（弹窗确认，默认取消）"),
+        ],
+    ),
+    (
+        "任务详情",
+        &[
+            ("↑↓ / Enter", "选择会话 / 读取最近轮次"),
+            ("i", "展开或收起会话元数据"),
+            ("PgUp / PgDn", "滚动详情"),
+            ("H", "切换已加载与历史会话"),
+            ("] / a", "历史下一页 / 包含子目录"),
+            ("Cmd/Ctrl+点击", "用 Zed 打开（需配置 [zed].ssh_host）"),
+        ],
+    ),
+    (
+        "终端工作台",
+        &[
+            ("Ctrl-W d", "返回导航，任务进程保留"),
+            ("Ctrl-W s / v", "左右 / 上下分屏"),
+            ("Ctrl-W h/j/k/l", "切换 Pane；Ctrl-W z 放大"),
+            ("Alt-h/j/k/l", "调整分隔线"),
+            ("Shift-PgUp/PgDn", "浏览 Pane 历史"),
+            ("Ctrl-W Ctrl-W", "向程序发送 Ctrl-W（Shell 删词）"),
+            ("Ctrl-C", "发送给程序，不退出工作台"),
+        ],
+    ),
+    (
+        "通知",
+        &[
+            ("Ctrl-W f", "跳转当前通知对应的任务或主控"),
+            ("Ctrl-W u", "未读任务列表；Enter 进入，Esc 关闭"),
+        ],
+    ),
+];
+
+fn help(frame: &mut Frame, area: Rect) {
+    let panel = block(" 帮助 · 任意键返回 ".into(), true);
+    let inner = panel.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(panel, area);
+    let group = |(title, keys): &(&str, &[(&str, &str)])| {
+        let mut lines = vec![Line::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )];
+        for (key, action) in keys.iter() {
+            let pad = 18usize.saturating_sub(Line::from(*key).width()).max(1);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {key}{}", " ".repeat(pad)),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(action.to_string()),
+            ]));
+        }
+        lines.push(Line::default());
+        lines
+    };
+    let footer = [
+        "窗口已打开不代表 Codex 正在运行，空闲不代表完成。",
+        "时间为北京时间；完整说明：twig guide console",
+    ]
+    .map(|text| Line::styled(text, Style::default().fg(Color::DarkGray)));
+    if inner.width >= 120 {
+        let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(inner);
+        let left: Vec<_> = HELP[..2].iter().flat_map(group).collect();
+        let mut right: Vec<_> = HELP[2..].iter().flat_map(group).collect();
+        right.extend(footer);
+        frame.render_widget(Paragraph::new(left), columns[0]);
+        frame.render_widget(Paragraph::new(right).wrap(Wrap { trim: false }), columns[1]);
+    } else {
+        let mut lines: Vec<_> = HELP.iter().flat_map(group).collect();
+        lines.extend(footer);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
 fn projects(frame: &mut Frame, area: Rect, app: &App) {
@@ -272,13 +480,15 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
             let mut spans = vec![
                 Span::raw(safe(&repo.name)),
                 unread(app.notifications.count(&repo.name, None)),
-                Span::raw(format!("  [{}]  ", repo.tasks.len().saturating_sub(1))),
+                Span::styled(
+                    format!("  [{}]  ", repo.tasks.len().saturating_sub(1)),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ];
             if repo.error.is_some() {
                 spans.push(Span::styled("异常", Style::default().fg(Color::Red)));
             } else {
-                let stale =
-                    app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked);
+                let stale = codex_stale(app);
                 let mut counts = std::collections::BTreeMap::new();
                 for thread in app.snapshot.threads.iter().filter(|t| {
                     app.snapshot
@@ -290,9 +500,6 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
                         .entry(thread.label())
                         .or_insert((0, status_style(thread, stale)));
                     entry.0 += 1;
-                }
-                if counts.is_empty() {
-                    spans.push(Span::raw("—"));
                 }
                 for (index, (label, (count, style))) in counts.into_iter().enumerate() {
                     if index > 0 {
@@ -327,6 +534,33 @@ fn unread(count: usize) -> Span<'static> {
         )
     }
 }
+fn git_line(task: &data::Task) -> Line<'static> {
+    let freshness = if task.error.is_some() {
+        ""
+    } else if is_stale(task.checked) {
+        "（状态过期）"
+    } else if task.checked.is_none() {
+        "（未刷新）"
+    } else {
+        ""
+    };
+    let (mark, color) = if task.error.is_some() {
+        ("! ", Color::Red)
+    } else if task.git == "干净" {
+        ("✓ ", Color::Green)
+    } else if task.checked.is_none() {
+        ("", Color::DarkGray)
+    } else {
+        ("● ", Color::Yellow)
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{mark}{}", safe(&task.git)),
+            Style::default().fg(color),
+        ),
+        Span::styled(freshness, Style::default().fg(Color::DarkGray)),
+    ])
+}
 fn tasks(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(error) = app.repo().and_then(|r| r.error.as_ref()) {
         frame.render_widget(
@@ -338,39 +572,61 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let tasks = app.tasks();
-    let compact = area.width < 80;
-    let items = tasks
+    let stale = codex_stale(app);
+    let sessions: Vec<_> = tasks
         .iter()
         .map(|task| {
-            let sessions = app
-                .repo()
+            app.repo()
                 .map(|r| data::for_task(&app.snapshot.threads, &app.snapshot, &r.name, &task.path))
-                .unwrap_or_default();
-            let freshness = if task.error.is_some() {
-                ""
-            } else if is_stale(task.checked) {
-                "（状态过期）"
-            } else if task.checked.is_none() {
-                "（未刷新）"
-            } else {
-                ""
-            };
-            let name = safe(if task.name == "main" {
+                .unwrap_or_default()
+        })
+        .collect();
+    // 当前项目没有关联会话时隐藏 Codex 列，普通任务不显示占位符。
+    let codex = sessions.iter().any(|s| !s.is_empty());
+    let compact = area.width < if codex { 80 } else { 50 };
+    let (headers, widths): (Vec<_>, Vec<_>) = match (compact, codex) {
+        (true, true) => (vec!["任务", "Git / 窗口", "Codex"], vec![40, 32, 28]),
+        (true, false) => (vec!["任务", "Git / 窗口"], vec![55, 45]),
+        (false, true) => (vec!["任务", "Git", "窗口", "Codex"], vec![34, 28, 12, 26]),
+        (false, false) => (vec!["任务", "Git", "窗口"], vec![45, 40, 15]),
+    };
+    let widths: Vec<_> = widths.into_iter().map(Constraint::Percentage).collect();
+    // 与 Table 相同的列分配，用于按列宽加省略号；扣除边框和选中箭头。
+    let columns: Vec<usize> = Layout::horizontal(widths.clone())
+        .spacing(1)
+        .split(Rect::new(0, 0, area.width.saturating_sub(4), 1))
+        .iter()
+        .map(|r| usize::from(r.width))
+        .collect();
+    let items = tasks
+        .iter()
+        .zip(&sessions)
+        .map(|(task, sessions)| {
+            let main = task.name == "main";
+            let mut name = vec![Span::raw(safe(if main {
                 "主工作目录"
             } else {
                 &task.name
+            }))];
+            name.push(unread(app.notifications.count(
+                app.project.as_deref().unwrap_or_default(),
+                Some(&task.path),
+            )));
+            // 任务名即分支名；仅在不同（如主工作目录、复用远端分支）时提示分支。
+            let branch = (main || task.branch != task.name).then(|| {
+                Span::styled(
+                    format!("⎇ {}", safe(&task.branch)),
+                    Style::default().fg(Color::DarkGray),
+                )
             });
-            let name = Line::from(vec![
-                Span::raw(name),
-                unread(
-                    app.notifications
-                        .count(app.project.as_deref().unwrap_or_default(), Some(&task.path)),
-                ),
-            ]);
-            let branch = safe(&task.branch);
-            let git = safe(&format!("{}{freshness}", task.git));
-            let window = safe(&task.window);
-            let stale = app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked);
+            let window = Line::styled(
+                safe(&task.window),
+                Style::default().fg(if task.window == "已打开" {
+                    Color::Reset
+                } else {
+                    Color::DarkGray
+                }),
+            );
             let mut counts = std::collections::BTreeMap::new();
             for thread in sessions {
                 let entry = counts
@@ -385,49 +641,34 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 }
                 spans.push(Span::styled(safe(&format!("{label} {count}")), style));
             }
-            if spans.is_empty() {
-                spans.push(Span::raw("—"));
-            }
-            let codex = Line::from(spans);
-            if compact {
-                Row::new(vec![
-                    Cell::from(Text::from(vec![name, Line::from(branch)])),
-                    Cell::from(Text::from(vec![Line::from(git), Line::from(window)])),
-                    Cell::from(codex),
-                ])
-                .height(2)
+            let codex_cell = Cell::from(fit(Line::from(spans), *columns.last().unwrap()));
+            let mut cells = if compact {
+                let mut lines = vec![fit(Line::from(name), columns[0])];
+                lines.extend(branch.map(|b| fit(Line::from(b), columns[0])));
+                vec![
+                    Cell::from(Text::from(lines)),
+                    Cell::from(Text::from(vec![
+                        fit(git_line(task), columns[1]),
+                        fit(window, columns[1]),
+                    ])),
+                ]
             } else {
-                Row::new(vec![
-                    Cell::from(name),
-                    Cell::from(branch),
-                    Cell::from(git),
-                    Cell::from(window),
-                    Cell::from(codex),
-                ])
+                if let Some(branch) = branch {
+                    name.push(Span::raw(" "));
+                    name.push(branch);
+                }
+                vec![
+                    Cell::from(fit(Line::from(name), columns[0])),
+                    Cell::from(fit(git_line(task), columns[1])),
+                    Cell::from(fit(window, columns[2])),
+                ]
+            };
+            if codex {
+                cells.push(codex_cell);
             }
+            Row::new(cells).height(if compact { 2 } else { 1 })
         })
         .collect::<Vec<_>>();
-    let (headers, widths) = if compact {
-        (
-            vec!["任务 / 分支", "Git / 窗口", "Codex"],
-            vec![
-                Constraint::Percentage(30),
-                Constraint::Percentage(40),
-                Constraint::Percentage(30),
-            ],
-        )
-    } else {
-        (
-            vec!["任务", "分支", "Git", "窗口", "Codex"],
-            vec![
-                Constraint::Percentage(17),
-                Constraint::Percentage(20),
-                Constraint::Percentage(28),
-                Constraint::Percentage(13),
-                Constraint::Percentage(22),
-            ],
-        )
-    };
     let table = Table::new(items, widths)
         .header(Row::new(headers).style(Style::default().fg(Color::DarkGray)))
         .column_spacing(1)
@@ -439,11 +680,7 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             ),
             app.focus == 1,
         ))
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
+        .row_highlight_style(highlight(app.focus == 1))
         .highlight_symbol("› ");
     let mut state = TableState::default().with_selected(
         tasks
@@ -466,7 +703,8 @@ fn status_style(thread: &crate::codex::Thread, stale: bool) -> Style {
 }
 
 // 只读取全局快照；不使用项目选择、搜索、历史分页或焦点状态。
-fn monitor(frame: &mut Frame, area: Rect, app: &App) {
+// 返回带会话标记的行和会话总数，布局据此收缩空监控。
+fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
     let snapshot = &app.snapshot;
     let stale = snapshot.codex_error.is_some() || is_stale(snapshot.codex_checked);
     let mut grouped = std::collections::BTreeMap::<_, Vec<_>>::new();
@@ -512,31 +750,6 @@ fn monitor(frame: &mut Frame, area: Rect, app: &App) {
         .flat_map(|(_, tasks)| tasks)
         .map(|(_, threads)| threads.len())
         .sum();
-    let panel = block(
-        format!(
-            " 全局 Codex · {}{} ",
-            total,
-            if stale { " · 状态过期" } else { "" }
-        ),
-        false,
-    );
-    let inner = panel.inner(area);
-    frame.render_widget(panel, area);
-    if projects.is_empty() {
-        frame.render_widget(
-            Paragraph::new(if snapshot.codex_error.is_some() {
-                "Codex 不可用，详见底部状态"
-            } else if snapshot.codex_checked.is_none() {
-                "正在读取全局会话…"
-            } else {
-                "暂无已加载的关联会话"
-            })
-            .style(Style::default().fg(Color::DarkGray))
-            .wrap(Wrap { trim: false }),
-            inner,
-        );
-        return;
-    }
     // 标记会话行，裁剪时不留下没有会话的项目或任务标题。
     let mut rows = Vec::new();
     for (repo, tasks) in &projects {
@@ -607,6 +820,41 @@ fn monitor(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+    (rows, total)
+}
+
+fn monitor(frame: &mut Frame, area: Rect, app: &App) {
+    let snapshot = &app.snapshot;
+    let (mut rows, total) = monitor_rows(app);
+    let panel = block(
+        format!(
+            " 全局 Codex · {}{} ",
+            total,
+            if codex_stale(app) {
+                " · 状态过期"
+            } else {
+                ""
+            }
+        ),
+        false,
+    );
+    let inner = panel.inner(area);
+    frame.render_widget(panel, area);
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(if snapshot.codex_error.is_some() {
+                "Codex 不可用，详见底部状态"
+            } else if snapshot.codex_checked.is_none() {
+                "正在读取全局会话…"
+            } else {
+                "暂无已加载的关联会话"
+            })
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
     if rows.len() > usize::from(inner.height) {
         rows.truncate(usize::from(inner.height.saturating_sub(1)));
         while rows.last().is_some_and(|(_, session)| !session) {
@@ -637,7 +885,7 @@ fn field(label: &str, value: &str) -> Line<'static> {
 pub fn zed_link(area: Rect, app: &App) -> Option<super::hyperlink::Link> {
     if area.width < 38
         || area.height < 12
-        || (area.width < 100 && app.focus != 2)
+        || (stacked(area) && app.focus != 2)
         || app.help
         || app.form.is_some()
         || app.searching
@@ -645,7 +893,7 @@ pub fn zed_link(area: Rect, app: &App) -> Option<super::hyperlink::Link> {
     {
         return None;
     }
-    let inner = panels(area, app.searching)[2].inner(ratatui::layout::Margin::new(1, 1));
+    let inner = panels(area, app)[2].inner(ratatui::layout::Margin::new(1, 1));
     let width = Line::from(super::hyperlink::LABEL).width() as u16;
     if inner.width < width || inner.height == 0 {
         return None;
@@ -656,37 +904,40 @@ pub fn zed_link(area: Rect, app: &App) -> Option<super::hyperlink::Link> {
     })
 }
 
-fn zed_header(app: &App) -> Vec<Line<'static>> {
-    if app.task().is_none() {
+// 详情顶部：已配置时为 Zed 链接（位置与 zed_link 一致），其后是工作目录和工作区异常。
+fn detail_header(app: &App) -> Vec<Line<'static>> {
+    let Some(task) = app.task() else {
         return Vec::new();
-    }
+    };
+    let mut lines = Vec::new();
     if app.snapshot.registry_error.is_some() {
-        return vec![Line::styled(
+        lines.push(Line::styled(
             "Zed 不可用：请先修正用户配置错误",
             Style::default().fg(Color::Red),
-        )];
-    }
-    match &app.snapshot.zed {
-        Some(config) => match config.link(&app.task().unwrap().path) {
-            Ok(_) => vec![Line::styled(
+        ));
+    } else if let Some(config) = &app.snapshot.zed {
+        lines.push(match config.link(&task.path) {
+            Ok(_) => Line::styled(
                 super::hyperlink::LABEL,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::UNDERLINED),
-            )],
-            Err(error) => vec![Line::styled(
+            ),
+            Err(error) => Line::styled(
                 format!("Zed：{}", safe(&error.to_string())),
                 Style::default().fg(Color::Red),
-            )],
-        },
-        None => vec![
-            Line::styled(
-                "未配置 Zed：请设置 [zed].ssh_host",
-                Style::default().fg(Color::Yellow),
             ),
-            Line::from(safe(&app.registry_path.display().to_string())),
-        ],
+        });
     }
+    lines.push(field("工作目录", &tilde(&task.path)));
+    if let Some(error) = &task.error {
+        lines.push(Line::styled(
+            format!("! 工作区异常：{}", safe(error)),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    lines.push(Line::default());
+    lines
 }
 
 fn sessions(frame: &mut Frame, area: Rect, app: &App) {
@@ -700,10 +951,13 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
     );
     let inner = panel.inner(area);
     frame.render_widget(panel, area);
-    let header = zed_header(app);
+    let header = detail_header(app);
     let sections = Layout::vertical([Constraint::Length(header.len() as u16), Constraint::Min(0)])
         .split(inner);
-    frame.render_widget(Paragraph::new(header), sections[0]);
+    frame.render_widget(
+        Paragraph::new(header).wrap(Wrap { trim: false }),
+        sections[0],
+    );
     let inner = sections[1];
     let selected = sessions
         .iter()
@@ -744,20 +998,12 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_stateful_widget(
             List::new(items)
                 .highlight_symbol("› ")
-                .highlight_style(Style::default().bg(Color::DarkGray)),
+                .highlight_style(highlight(app.focus == 2)),
             portions[1],
             &mut state,
         );
     }
     let mut lines = Vec::new();
-    if let Some(task) = app.task()
-        && let Some(error) = &task.error
-    {
-        lines.push(Line::styled(
-            format!("! 工作区异常：{}", safe(error)),
-            Style::default().fg(Color::Red),
-        ));
-    }
     if let Some(thread) = selected.map(|index| sessions[index]) {
         let stale = app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked);
         lines.push(Line::from(vec![
@@ -824,14 +1070,6 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(Color::DarkGray),
         ));
     }
-    if let Some(task) = app.task() {
-        lines.push(Line::default());
-        lines.push(Line::styled(
-            "工作目录",
-            Style::default().fg(Color::DarkGray),
-        ));
-        lines.push(Line::from(safe(&task.path.display().to_string())));
-    }
     if app.history {
         lines.push(Line::default());
         lines.push(Line::styled(
@@ -840,7 +1078,7 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
                 app.snapshot.history_scanned,
                 app.snapshot.history_pages,
                 if app.snapshot.history_more {
-                    "n 下一页"
+                    "] 下一页"
                 } else {
                     "已到末页"
                 }
@@ -853,6 +1091,16 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Red),
             ));
         }
+    }
+    if app.task().is_some() && app.snapshot.zed.is_none() && app.snapshot.registry_error.is_none() {
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            format!(
+                "Zed：在 {} 设置 [zed].ssh_host 后可点击打开",
+                safe(&tilde(&app.registry_path))
+            ),
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     frame.render_widget(
         Paragraph::new(Text::from(lines))
@@ -1160,11 +1408,23 @@ fn draw_form_field(
         Rect { height: 1, ..area },
     );
     if area.height > 1 {
-        let value = Line::from(format!(
+        let mut value = Line::from(format!(
             "{}{}",
             safe(&form.fields[index]),
             if focused && !form.busy() { "▏" } else { "" }
         ));
+        if index == 0
+            && form.fields[0].is_empty()
+            && let Some(suggestion) = &form.suggestion
+        {
+            value.spans.push(Span::styled(
+                format!(
+                    "{}  ← Enter 使用当前仓库",
+                    safe(&tilde(std::path::Path::new(suggestion)))
+                ),
+                Style::default().fg(Color::Gray),
+            ));
+        }
         let offset = value
             .width()
             .saturating_sub(area.width as usize)
@@ -1425,8 +1685,8 @@ mod tests {
                 buffer[(x + popup_width - 1, y + popup_height - 1)].symbol(),
                 "┘"
             );
-            // 小屏弹窗可遮住标签文字，顶部圆角边框仍保留导航背景。
-            assert!(output.lines().next().unwrap().contains("╭"));
+            // 小屏弹窗可遮住标签文字，标签栏下方的面板边框仍保留导航背景。
+            assert!(output.lines().nth(1).unwrap().starts_with("┌"), "{output}");
             if y >= 3 {
                 assert!(output.contains("Console") && output.contains("Agent"));
             }
@@ -1679,7 +1939,7 @@ mod tests {
         for width in [80, 140] {
             let mut app = fixture();
             let buffer = render(&app, width, 30, |frame, _, app| super::draw(frame, app));
-            let area = panels(buffer.area, false)[3].inner(ratatui::layout::Margin::new(1, 1));
+            let area = panels(buffer.area, &app)[3].inner(ratatui::layout::Margin::new(1, 1));
             assert!(selection_regions(buffer.area, &app).contains(&area));
             let mut selected =
                 super::super::selection::Selection::new(&buffer, area, area.x, area.y);
@@ -1711,17 +1971,16 @@ mod tests {
     #[test]
     fn layout_keeps_monitor_visible_and_details_hide_metadata() {
         let mut app = fixture();
-        for (width, height) in [(38, 12), (65, 22), (100, 30), (140, 40)] {
+        for (width, height) in [(38, 12), (65, 22), (80, 24), (100, 30), (140, 40)] {
             for focus in 0..3 {
                 app.focus = focus;
                 let area = Rect::new(0, 0, width, height);
                 let regions = selection_regions(area, &app);
-                let monitor_area =
-                    panels(area, app.searching)[3].inner(ratatui::layout::Margin::new(1, 1));
+                let monitor_area = panels(area, &app)[3].inner(ratatui::layout::Margin::new(1, 1));
                 let monitor_visible = monitor_area.width > 0 && monitor_area.height > 0;
                 assert_eq!(
                     regions.len(),
-                    (if width >= 100 { 4 } else { 2 }) + usize::from(monitor_visible)
+                    (if width >= 80 { 4 } else { 2 }) + usize::from(monitor_visible)
                 );
                 assert_eq!(regions.last(), Some(&Rect::new(0, height - 1, width, 1)));
                 assert_eq!(regions.contains(&monitor_area), monitor_visible);

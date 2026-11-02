@@ -159,6 +159,20 @@ fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
             lines.push(Line::from(""));
         }
     }
+    if lines.is_empty() && view.connected {
+        let dim = Style::default().fg(Color::DarkGray);
+        lines.push(Line::styled(
+            "还没有对话。可以这样开始：",
+            dim.add_modifier(Modifier::BOLD),
+        ));
+        for example in [
+            "· 在 myapp 创建受管任务，排查登录失败并补充回归测试",
+            "· 汇总所有受管任务的进展和阻塞",
+            "· 检查 fix/login 的回报是否达到验收标准",
+        ] {
+            lines.push(Line::styled(example, dim));
+        }
+    }
     if draft.details && !view.thread.is_empty() {
         lines.push(Line::styled(
             format!("会话 {}", view.thread),
@@ -249,21 +263,27 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
         Constraint::Length(1),
     ])
     .split(body);
-    crate::tabs::draw(frame, screen, crate::tabs::Tab::Agent, "", false);
+    crate::tabs::draw(
+        frame,
+        screen,
+        crate::tabs::Tab::Agent,
+        Line::default(),
+        false,
+    );
+    // 状态与 YOLO 同行；窄屏缩短 YOLO 文案，权限提示始终可见。
+    let full = "YOLO · 无需审批 · 完整访问权限";
+    let yolo = if width >= 64 { full } else { "YOLO" };
+    let yolo_width = Line::from(yolo).width() as u16;
+    let header = Rect::new(body.x, screen.y + crate::tabs::HEADER_HEIGHT, width, 1);
     frame.render_widget(
-        Paragraph::new("YOLO · 无需审批 · 完整访问权限")
-            .alignment(Alignment::Center)
+        Paragraph::new(yolo)
+            .alignment(Alignment::Right)
             .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        Rect::new(
-            screen.x,
-            screen.y + crate::tabs::HEADER_HEIGHT,
-            screen.width,
-            1,
-        ),
+        header,
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" 主控  ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("主控  ", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(
                 &view.status,
                 Style::default().fg(if view.error.is_some() {
@@ -283,7 +303,10 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
                 Style::default().fg(Color::DarkGray),
             ),
         ])),
-        Rect::new(body.x, screen.y + crate::tabs::HEADER_HEIGHT - 1, width, 1),
+        Rect {
+            width: width.saturating_sub(yolo_width + 2),
+            ..header
+        },
     );
     let transcript = Paragraph::new(history(
         view,
@@ -356,7 +379,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
     }
     frame.render_widget(
         Paragraph::new(format!(
-            "Enter 发送 · Alt-Enter 换行 · Alt-C 复制 · F4 {}详情",
+            "Enter 发送 · Alt-Enter 换行 · Alt-C 复制 · F4 {}详情 · Tab Console",
             if draft.details { "收起" } else { "展开" }
         ))
         .style(Style::default().fg(Color::DarkGray)),
@@ -523,7 +546,8 @@ mod tests {
                 80
             )
             .lines
-            .is_empty()
+            .iter()
+            .any(|line| line.to_string().contains("还没有对话"))
         );
     }
 
