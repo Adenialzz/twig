@@ -322,6 +322,7 @@ pub fn operation_cli(registry: &Path, command: Command) -> Result<()> {
             )?
         }
         Command::Resolve { id, yes } if local.contains_key(&id) => {
+            local[&id].check_resolvable()?;
             crate::confirm("已核对真实资源和遗留进程，并解除操作阻塞？", yes)?;
             let _lock = execution_lock(registry)?;
             let (store, mut records) = Store::open(&root)?;
@@ -331,8 +332,21 @@ pub fn operation_cli(registry: &Path, command: Command) -> Result<()> {
             Value::Null
         }
         Command::Resolve { id, yes } => {
+            ensure!(backend.contains_key(&id), "操作不存在");
+            // 在线直接 RPC，不等待无关操作的执行锁。离线判断只用于预检，确认后复查。
+            {
+                let Some(_offline) = daemon::offline_lock(&paths, true)? else {
+                    return operations::remote_cli(registry, Command::Resolve { id, yes });
+                };
+                let mut records = Store::read_active(&paths.dir)?;
+                recover(&mut records);
+                records
+                    .get(&id)
+                    .or_else(|| backend.get(&id))
+                    .context("操作不存在")?
+                    .check_resolvable()?;
+            }
             crate::confirm("已核对真实资源和遗留进程，并解除操作阻塞？", yes)?;
-            let paths = daemon::Paths::new(registry)?;
             // 与本地执行保持 execution -> maintenance 的取锁顺序。
             let execution = execution_lock(registry)?;
             let Some(_offline) = daemon::offline_lock(&paths, true)? else {

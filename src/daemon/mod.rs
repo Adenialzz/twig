@@ -126,7 +126,7 @@ pub(crate) struct Instance {
     socket: PathBuf,
 }
 // 启动和离线维护先串行协调，再检查真正的后台单例锁。
-// None 只表示单例锁由后台持有，不会把另一离线读者当成在线后台。
+// 写入模式下 None 表示后台持锁；只读探测无法立即确认离线时也返回 None。
 pub(crate) struct OfflineLock {
     _instance: File,
     _maintenance: File,
@@ -144,9 +144,35 @@ fn maintenance_lock(paths: &Paths) -> Result<File> {
     }
     Ok(lock)
 }
+// 只读探测不创建文件，也不等待正在启动或维护的进程。
+fn shared_probe(path: &Path) -> Result<Option<File>> {
+    let lock = match File::open(path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+        return Ok(Some(lock));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(None)
+    } else {
+        Err(error.into())
+    }
+}
 pub(crate) fn offline_lock(paths: &Paths, create: bool) -> Result<Option<OfflineLock>> {
-    if !create && !paths.dir.join("instance.lock").try_exists()? {
-        return Ok(None);
+    if !create {
+        let Some(maintenance) = shared_probe(&paths.dir.join("maintenance.lock"))? else {
+            return Ok(None);
+        };
+        let Some(instance) = shared_probe(&paths.dir.join("instance.lock"))? else {
+            return Ok(None);
+        };
+        return Ok(Some(OfflineLock {
+            _instance: instance,
+            _maintenance: maintenance,
+        }));
     }
     ensure!(paths.dir.is_dir(), "未找到后台操作目录");
     private_directory(&paths.dir)?;
@@ -725,6 +751,49 @@ fn agent_queue(registry: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readonly_probe_never_creates_files_or_waits_for_other_readers() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(&temp.path().join("config.toml")).unwrap();
+        assert!(offline_lock(&paths, false).unwrap().is_none());
+        assert!(!paths.dir.exists());
+        fs::create_dir_all(&paths.dir).unwrap();
+        fs::set_permissions(&paths.dir, fs::Permissions::from_mode(0o700)).unwrap();
+        File::create(paths.dir.join("instance.lock")).unwrap();
+        assert!(offline_lock(&paths, false).unwrap().is_none());
+        assert!(!paths.dir.join("maintenance.lock").exists());
+        File::create(paths.dir.join("maintenance.lock")).unwrap();
+        let reader = offline_lock(&paths, false).unwrap().unwrap();
+        let registry = paths.registry.clone();
+        let (out, input) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            out.send(
+                offline_lock(&Paths::new(&registry).unwrap(), false)
+                    .unwrap()
+                    .is_some(),
+            )
+            .unwrap();
+        });
+        let result = input.recv_timeout(Duration::from_secs(1));
+        drop(reader);
+        worker.join().unwrap();
+        assert!(result.unwrap());
+        let writer = maintenance_lock(&paths).unwrap();
+        let registry = paths.registry.clone();
+        let (out, input) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            out.send(
+                offline_lock(&Paths::new(&registry).unwrap(), false)
+                    .unwrap()
+                    .is_none(),
+            )
+            .unwrap();
+        });
+        let result = input.recv_timeout(Duration::from_secs(1));
+        drop(writer);
+        worker.join().unwrap();
+        assert!(result.unwrap());
+    }
     #[test]
     fn startup_waits_for_offline_maintenance_without_false_running_error() {
         let temp = tempfile::tempdir().unwrap();

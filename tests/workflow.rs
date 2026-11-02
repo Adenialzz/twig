@@ -1783,6 +1783,8 @@ fn crashed_backend_record_can_be_inspected_and_resolved_offline() {
     let f = Fixture::new();
     f.ok(&["new", "local", "recorded", "--no-fetch", "--no-open"]);
     let records: serde_json::Value = serde_json::from_str(&f.ok(&["operation", "ls"])).unwrap();
+    let completed = records.as_object().unwrap().keys().next().unwrap();
+    f.fail(&["operation", "resolve", completed], "只有待核对操作");
     let mut record = records
         .as_object()
         .unwrap()
@@ -1804,6 +1806,27 @@ fn crashed_backend_record_can_be_inspected_and_resolved_offline() {
     record["plan"]["action"]["New"]["agent"] = true.into();
     let path = root.join("operations/orphan-agent.json");
     fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::rename(
+        root.join("maintenance.lock"),
+        root.join("maintenance.saved"),
+    )
+    .unwrap();
+    f.ok(&["operation", "ls"]);
+    let unknown: serde_json::Value =
+        serde_json::from_str(&f.ok(&["operation", "show", "orphan-agent"])).unwrap();
+    assert_eq!(
+        unknown["status"], "running",
+        "无法确认离线时不能推断进程退出"
+    );
+    assert!(
+        !root.join("maintenance.lock").exists(),
+        "只读命令不得创建维护锁"
+    );
+    fs::rename(
+        root.join("maintenance.saved"),
+        root.join("maintenance.lock"),
+    )
+    .unwrap();
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1827,6 +1850,57 @@ fn crashed_backend_record_can_be_inspected_and_resolved_offline() {
         &["new", "local", "blocked", "--no-fetch", "--no-open"],
         "待核对",
     );
+    // 在线解除不应等待正在运行的其他受管操作持有的执行锁。
+    let mut online = record.clone();
+    online["id"] = "online-agent".into();
+    online["request"] = "online-request".into();
+    fs::write(
+        root.join("operations/online-agent.json"),
+        serde_json::to_vec(&online).unwrap(),
+    )
+    .unwrap();
+    support::daemon::ensure(&f.command(&f.repo), &f.registry_path());
+    let execution_root = fs::read_dir(f.registry_path().parent().unwrap().join("operations"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let execution = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(execution_root.join("execution.lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(execution.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+    let output = tempfile::tempfile().unwrap();
+    let mut child = f
+        .command(&f.repo)
+        .args(["operation", "resolve", "online-agent", "--yes"])
+        .stdout(output.try_clone().unwrap())
+        .stderr(output.try_clone().unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    drop(execution);
+    if status.is_none() {
+        child.wait().unwrap();
+    }
+    assert!(status.expect("在线 resolve 不得等待执行锁").success());
+    support::daemon::stop_under(f._temp.path());
+    f.fail(&["operation", "resolve", "unknown-id"], "操作不存在");
+    f.fail(&["operation", "resolve", "online-agent"], "只有待核对操作");
     f.ok(&["operation", "resolve", "orphan-agent", "--yes"]);
     f.ok(&["new", "local", "allowed", "--no-fetch", "--no-open"]);
     assert!(f.root.join("recorded").is_dir());

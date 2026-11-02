@@ -66,6 +66,37 @@ pub struct Operation {
     pub output: Output,
     pub error: Option<String>,
 }
+impl Operation {
+    fn add_error(&mut self, error: String) {
+        self.error = Some(match self.error.take() {
+            None => error,
+            Some(previous) if previous.contains(&error) => previous,
+            Some(previous) if error.contains(&previous) => error,
+            Some(previous) => format!("{previous}\n{error}"),
+        });
+    }
+    fn complete(&mut self, output: Output, result: Result<()>) {
+        self.output = output;
+        if self.status != "needs_inspection" {
+            self.status = if result.is_ok() {
+                "succeeded"
+            } else {
+                "failed"
+            }
+            .into();
+        }
+        if let Err(error) = result {
+            self.add_error(format!("{error:#}"));
+        }
+    }
+    pub(crate) fn check_resolvable(&self) -> Result<()> {
+        ensure!(
+            self.status == "needs_inspection",
+            "只有待核对操作可解除标记"
+        );
+        Ok(())
+    }
+}
 #[derive(Clone)]
 pub struct Service {
     registry: PathBuf,
@@ -85,19 +116,13 @@ fn save_accepted(store: &Store, records: &mut BTreeMap<String, Operation>, id: &
     if let Err(error) = store.save(records.get(id).context("操作记录不存在")?) {
         let operation = records.get_mut(id).context("操作记录不存在")?;
         operation.status = "needs_inspection".into();
-        operation.error = Some(format!(
-            "{}\n操作记录保存失败，请恢复存储后核对资源：{error:#}",
-            operation.error.as_deref().unwrap_or("")
-        ));
+        operation.add_error(format!("操作记录保存失败，请恢复存储后核对资源：{error:#}"));
         return Err(error);
     }
     Ok(())
 }
 pub(crate) fn resolve(store: &Store, record: &mut Operation) -> Result<()> {
-    ensure!(
-        record.status == "needs_inspection",
-        "只有待核对操作可解除标记"
-    );
+    record.check_resolvable()?;
     let previous = record.clone();
     record.status = "resolved".into();
     record.error = Some("用户已核对资源并解除阻塞；不表示原操作成功".into());
@@ -187,16 +212,7 @@ impl Service {
                     super::REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let mut records = records.lock().unwrap();
                     let operation = records.get_mut(&id).unwrap();
-                    operation.output = output;
-                    if operation.status != "needs_inspection" {
-                        operation.status = if result.is_ok() {
-                            "succeeded"
-                        } else {
-                            "failed"
-                        }
-                        .into();
-                        operation.error = result.err().map(|e| format!("{e:#}"));
-                    }
+                    operation.complete(output, result);
                     save_accepted(&store, &mut records, &id)
                 };
                 if let Err(error) = run() {
@@ -505,6 +521,8 @@ pub(crate) fn remote_cli(registry: &Path, command: Command) -> Result<()> {
         Command::Ls => super::call(registry, "operation.list", Value::Null)?,
         Command::Show { id } => super::call(registry, "operation.get", json!(id))?,
         Command::Resolve { id, yes } => {
+            let record: Operation = super::call(registry, "operation.get", json!(id))?;
+            record.check_resolvable()?;
             crate::confirm(
                 "已核对真实资源、确认没有遗留执行进程，并解除此操作的阻塞标记？",
                 yes,
@@ -881,6 +899,28 @@ mod tests {
                     .unwrap()
                     .contains("保存失败")
             );
+        }
+        {
+            let mut records = service.records.lock().unwrap();
+            let record = records.get_mut("accepted").unwrap();
+            let storage_error = record.error.clone().unwrap();
+            assert!(!storage_error.starts_with('\n'));
+            // 活动文件替换失败和终态旧位置移除失败是两个不同诊断，各保留一次。
+            assert_eq!(storage_error.matches("操作记录保存失败").count(), 2);
+            record.complete(
+                Output {
+                    stderr: "被保护文件：important.txt\n".into(),
+                    ..Default::default()
+                },
+                Err(anyhow::anyhow!("tmux 原始错误").context("业务步骤失败")),
+            );
+            assert_eq!(record.status, "needs_inspection");
+            assert!(save_accepted(&service.store, &mut records, "accepted").is_err());
+            let record = &records["accepted"];
+            let error = record.error.as_ref().unwrap();
+            assert!(error.contains("业务步骤失败: tmux 原始错误"));
+            assert_eq!(error.matches("操作记录保存失败").count(), 2);
+            assert!(record.output.stderr.contains("important.txt"));
         }
         let mut other = plan;
         other.id = "other-plan".into();

@@ -35,7 +35,7 @@ twig operation show OPERATION_OR_REQUEST_ID
 twig operation resolve OPERATION_ID --yes
 ```
 
-`ls/show` 无需后台即可读取两类记录。本地 `resolve` 也无需后台。后台在线时由后台处理其记录；后台退出后，客户端先由用户确认，再取得执行锁及离线维护锁并复查单例状态，允许离线解除后台记录，不必为了恢复普通任务启动后台。活跃后台或本地执行进程持锁时不会被误判为中断；确认进程退出后，遗留 running/queued 在查询中显示 needs_inspection。
+`ls/show` 无需后台即可读取两类记录。本地 `resolve` 也无需后台。后台在线时直接通过 RPC 处理其记录，不等待本地执行锁；后台退出后，客户端先校验操作存在且可解除，再由用户确认，再取得执行锁及离线维护锁并复查单例状态，允许离线解除后台记录，不必为了恢复普通任务启动后台。活跃后台或本地执行进程持锁时不会被误判为中断；只读查询不创建锁文件，使用非阻塞共享锁确认离线后，遗留 running/queued 显示 needs_inspection；无法立即确认时保留原状态。
 
 状态为 `queued/running/succeeded/failed/needs_inspection/resolved`。`stages` 记录已经进入的阶段，最后一项不表示该阶段已完成。失败保留输出与错误；部分成功保留任务资源。提交响应丢失时按原请求 ID 查询，不能盲目重发。计划五分钟有效，执行前持锁复查资源；变化后重新确认。
 
