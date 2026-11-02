@@ -23,8 +23,7 @@ impl ClaudeState {
         match self {
             Self::Busy => "运行中",
             Self::Waiting => "等待处理",
-            Self::Idle => "空闲",
-            Self::Done => "最近一轮结束",
+            Self::Idle | Self::Done => "空闲",
             Self::Failed => "失败",
             Self::Stopped => "已停止",
         }
