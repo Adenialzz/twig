@@ -593,8 +593,9 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             .associations
             .get(&thread.id)
             .is_some_and(|(owner, _)| owner == project)
-    });
-    let claude = !claude_sessions(&app.snapshot, project, None).is_empty();
+    }) || app.notifications.source_count(project, None, false) > 0;
+    let claude = !claude_sessions(&app.snapshot, project, None).is_empty()
+        || app.notifications.source_count(project, None, true) > 0;
     let agents = codex || claude;
     let compact = area.width < if agents { 80 } else { 50 };
     let (mut headers, widths): (Vec<_>, Vec<_>) = match (compact, codex, claude) {
@@ -630,10 +631,12 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 &task.name
             }))];
-            name.push(unread(app.notifications.count(
-                app.project.as_deref().unwrap_or_default(),
-                Some(&task.path),
-            )));
+            let codex_unread = app
+                .notifications
+                .source_count(project, Some(&task.path), false);
+            let claude_unread = app
+                .notifications
+                .source_count(project, Some(&task.path), true);
             // 任务名即分支名；仅在不同（如主工作目录、复用远端分支）时提示分支。
             let branch = (main || task.branch != task.name).then(|| {
                 Span::styled(
@@ -691,15 +694,16 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             if compact && agents {
                 let width = *columns.last().unwrap();
                 let mut lines = Vec::new();
-                for (enabled, provider, counts) in [
-                    (codex, "Codex", codex_counts),
-                    (claude, "Claude", claude_counts),
+                for (enabled, provider, counts, unread_count) in [
+                    (codex, "Codex", codex_counts, codex_unread),
+                    (claude, "Claude", claude_counts, claude_unread),
                 ] {
                     if enabled {
                         let prefix = format!("{provider} ");
                         let mut line = Line::from(prefix.clone());
                         line.spans.extend(
-                            agent_summary(counts, width.saturating_sub(prefix.len())).spans,
+                            agent_status(counts, width.saturating_sub(prefix.len()), unread_count)
+                                .spans,
                         );
                         lines.push(fit(line, width));
                     }
@@ -707,15 +711,17 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 cells.push(Cell::from(Text::from(lines)));
             } else if !compact {
                 if codex {
-                    cells.push(Cell::from(agent_summary(
+                    cells.push(Cell::from(agent_status(
                         codex_counts,
                         columns[cells.len()],
+                        codex_unread,
                     )));
                 }
                 if claude {
-                    cells.push(Cell::from(agent_summary(
+                    cells.push(Cell::from(agent_status(
                         claude_counts,
                         columns[cells.len()],
+                        claude_unread,
                     )));
                 }
             }
@@ -742,6 +748,18 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_stateful_widget(table, area, &mut state);
 }
+fn agent_status(
+    counts: std::collections::BTreeMap<(u8, String), (usize, Style)>,
+    width: usize,
+    unread_count: usize,
+) -> Line<'static> {
+    let marker = unread(unread_count);
+    let marker_width = Line::from(marker.clone()).width();
+    let mut line = agent_summary(counts, width.saturating_sub(marker_width));
+    line.spans.push(marker);
+    fit(line, width)
+}
+
 fn agent_summary(
     counts: std::collections::BTreeMap<(u8, String), (usize, Style)>,
     width: usize,
@@ -2171,6 +2189,63 @@ mod tests {
         let neither = text(&render(&app, 100, 10, tasks));
         assert!(
             !neither.contains("Codex") && !neither.contains("Claude") && !neither.contains("Agent")
+        );
+    }
+
+    #[test]
+    fn unread_stays_in_provider_columns_after_sessions_exit() {
+        let mut app = fixture();
+        app.project = Some("alpha".into());
+        app.task = Some("/alpha".into());
+        app.snapshot.threads.clear();
+        for claude in [None, None, Some(twig_cli::notification::ClaudeState::Idle)] {
+            app.notifications.receive(
+                super::super::notifications::Completion {
+                    claude,
+                    message: false,
+                    project: "alpha".into(),
+                    task: "main".into(),
+                    path: "/alpha".into(),
+                },
+                None,
+            );
+        }
+        let wide = render(&app, 120, 10, tasks);
+        let codex_x = (0..120).find(|&x| wide[(x, 1)].symbol() == "C").unwrap();
+        let claude_x = (codex_x + 1..120)
+            .find(|&x| wide[(x, 1)].symbol() == "C")
+            .unwrap();
+        let segment = |mut x, end| {
+            let mut value = String::new();
+            while x < end {
+                let symbol = wide[(x, 2)].symbol();
+                value.push_str(symbol);
+                x += Span::raw(symbol).width().max(1) as u16;
+            }
+            value
+        };
+        assert!(!segment(0, codex_x).contains("未读"));
+        assert!(segment(codex_x, claude_x).contains("[未读 2]"));
+        assert!(segment(claude_x, 120).contains("[未读 1]"));
+        let narrow = text(&render(&app, 70, 10, tasks));
+        assert!(
+            narrow
+                .lines()
+                .any(|line| line.contains("Codex") && line.contains("[未读 2]")),
+            "{narrow}"
+        );
+        assert!(
+            narrow
+                .lines()
+                .any(|line| line.contains("Claude") && line.contains("[未读 1]")),
+            "{narrow}"
+        );
+        assert_eq!(app.notifications.count("alpha", None), 3);
+        app.notifications
+            .read("alpha", std::path::Path::new("/alpha"));
+        let cleared = text(&render(&app, 120, 10, tasks));
+        assert!(
+            !cleared.contains("未读") && !cleared.contains("Codex") && !cleared.contains("Claude")
         );
     }
 

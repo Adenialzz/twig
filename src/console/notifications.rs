@@ -52,6 +52,7 @@ pub struct Completion {
 
 struct Unread {
     task: UnreadTask,
+    claude_count: usize,
     latest: u64,
 }
 
@@ -103,9 +104,11 @@ impl Notifications {
                     notice: notice.clone(),
                     count: 0,
                 },
+                claude_count: 0,
                 latest: self.sequence,
             });
         unread.task.count += 1;
+        unread.claude_count += usize::from(event.claude.is_some());
         unread.latest = self.sequence;
         self.queue.push_back(notice);
     }
@@ -148,6 +151,20 @@ impl Notifications {
         unread.into_iter().map(|item| item.task.clone()).collect()
     }
 
+    pub fn source_count(&self, project: &str, path: Option<&Path>, claude: bool) -> usize {
+        self.unread
+            .iter()
+            .filter(|((p, task), _)| p == project && path.is_none_or(|path| path == task))
+            .map(|(_, unread)| {
+                if claude {
+                    unread.claude_count
+                } else {
+                    unread.task.count - unread.claude_count
+                }
+            })
+            .sum()
+    }
+
     pub fn count(&self, project: &str, path: Option<&Path>) -> usize {
         self.unread
             .iter()
@@ -160,6 +177,47 @@ impl Notifications {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_counts_restore_sync_and_clear_without_changing_task_totals() {
+        let mut state = InboxState::default();
+        for (index, claude) in [None, Some(twig_cli::notification::ClaudeState::Idle), None]
+            .into_iter()
+            .enumerate()
+        {
+            state.unread.push(Event {
+                id: index.to_string(),
+                thread: index.to_string(),
+                task: Some(Completion {
+                    claude,
+                    message: index == 2,
+                    project: "demo".into(),
+                    task: "work".into(),
+                    path: "/work".into(),
+                }),
+            });
+        }
+        let state: InboxState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let mut notices = Notifications::default();
+        notices.restore(&state);
+        for _ in 0..2 {
+            assert_eq!(notices.count("demo", None), 3);
+            assert_eq!(
+                notices.source_count("demo", Some(Path::new("/work")), false),
+                2
+            );
+            assert_eq!(
+                notices.source_count("demo", Some(Path::new("/work")), true),
+                1
+            );
+            assert_eq!(notices.tasks().len(), 1);
+            notices.sync(&state);
+        }
+        notices.read("demo", Path::new("/work"));
+        assert_eq!(notices.source_count("demo", None, false), 0);
+        assert_eq!(notices.source_count("demo", None, true), 0);
+    }
 
     #[test]
     fn queues_messages_and_only_clears_the_viewed_task() {
