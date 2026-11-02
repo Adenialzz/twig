@@ -2216,7 +2216,7 @@ fn console_rejects_duplicates_and_rechecks_registration_after_confirmation() {
         p.task_form_ready();
         if during_confirmation {
             p.send(b"pending\r");
-            p.wait("使用已有分支");
+            p.wait_screen("Esc 返回表单");
             let mut state: serde_json::Value =
                 serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
             state["pending"] = serde_json::json!({"branch": "pending", "base": "main", "path": f.repo.with_file_name("repo.worktrees").join("pending")});
@@ -2306,7 +2306,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     p.wait("feature/beta");
     assert!(!p.text.contains("feature/remote"));
     p.send(b"\x1b[B\x1b[B\t\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     // 默认取消，候选选择本身不创建资源。
     p.send(b"\r");
     p.clear_output();
@@ -2314,7 +2314,7 @@ fn task_form_selects_existing_branch_without_creating_another_branch() {
     assert_eq!(fs::read(&state_path).unwrap(), state_before);
     assert_eq!(refs(), before);
     p.send(b"\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\t\r");
     p.created_task(&f, "feature/beta");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -2342,13 +2342,13 @@ fn identical_candidate_labels_preserve_the_selected_git_reference() {
         // 本地与远端候选显示同名，第二项才是远端跟踪分支。
         p.send(b"\x1b[B\x1b[B");
         p.send(accept);
-        p.wait("使用已有分支");
+        p.wait_screen("Esc 返回表单");
         // 默认取消后再次提交，仍须保持同一远端候选。
         p.send(b"\r");
         p.task_form_ready();
         p.clear_output();
         p.send(b"\r");
-        p.wait("使用已有分支");
+        p.wait_screen("Esc 返回表单");
         p.send(b"\t\r");
         p.created_task(&f, "feat/collision");
         let state: serde_json::Value = serde_json::from_slice(
@@ -2399,7 +2399,7 @@ fn remote_candidates_fill_task_names_and_preserve_local_precedence() {
         p.wait("upstream/feat/remote");
         assert!(!p.text.contains("origin/HEAD"));
         p.send(b"\t\r");
-        p.wait("使用已有分支");
+        p.wait_screen("Esc 返回表单");
         if !local {
             // Tab 填入后仍保留所选的 upstream，不回到 origin。
             p.wait("upstream/feat/remote");
@@ -2605,7 +2605,7 @@ fn remote_candidate_handles_remote_names_with_slashes() {
     p.send(b"team/mirror/");
     p.wait("team/mirror/fix/login");
     p.send(b"\t\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\t\r");
     p.created_task(&f, "fix/login");
     let output = Command::new("git")
@@ -2686,11 +2686,12 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     p.send(b"2/new\r");
     p.task_form_ready();
     p.send(b"existing\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\r");
+    p.wait_screen_absent("使用已有分支");
     p.clear_output();
     p.send(b"\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     let state_path = support::project_dir(&f.repo, &f.registry).join("state.json");
     let before = fs::read(&state_path).unwrap();
     assert!(!String::from_utf8_lossy(&before).contains("existing"));
@@ -2704,7 +2705,7 @@ fn existing_branch_console_defaults_to_cancel_and_checks_occupancy() {
     f.git(&["worktree", "remove", occupied.to_str().unwrap()]);
     p.clear_output();
     p.send(b"\r");
-    p.wait("使用已有分支");
+    p.wait_screen("Esc 返回表单");
     p.send(b"\t\r");
     p.created_task(&f, "existing");
     let state: serde_json::Value = serde_json::from_slice(&fs::read(state_path).unwrap()).unwrap();
@@ -2839,13 +2840,16 @@ fn remote_branch_console_selects_source_and_rejects_partial_creation_retry() {
     p.task_form_ready();
     // 手动输入后切到起点字段提交，不接受候选，仍允许选择来源。
     p.send(b"feat/remote\x1b[Z\r");
-    p.wait("origin/feat/remote");
+    p.wait_screen("Esc 返回表单");
+    p.wait_screen("origin/feat/remote");
     p.send(b"\t");
     // 切换来源重置为取消，Enter 返回表单。
     p.send(b"j\r");
+    p.wait_screen_absent("使用已有分支");
     p.clear_output();
     p.send(b"\r");
-    p.wait("origin/feat/remote");
+    p.wait_screen("Esc 返回表单");
+    p.wait_screen("origin/feat/remote");
     p.send(b"j");
     p.wait("upstream/feat/remote");
     p.send(b"\t\r");
@@ -3004,6 +3008,41 @@ fn project_path_enter_validates_then_prefills_alias_without_writing() {
 }
 
 #[test]
+fn slow_delete_query_can_be_cancelled_and_times_out_without_writing() {
+    let f = Fixture::core();
+    f.init();
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    fs::write(f.bin.join("git"), "#!/bin/sh\ncase \" $* \" in *' --ignored '*) sleep 30;; esac\nexec \"$TWIG_REAL_GIT\" \"$@\"\n").unwrap();
+    fs::set_permissions(f.bin.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .env(
+            "TWIG_REAL_GIT",
+            String::from_utf8(real_git.stdout).unwrap().trim(),
+        )
+        .arg("--config")
+        .arg(&f.registry);
+    let mut p = Pty::spawn(command);
+    p.wait_screen("auth");
+    p.send(b"2/auth\rdd");
+    p.wait_screen("正在查询");
+    p.send(b"\x1b");
+    p.wait_screen_absent("删除任务");
+    p.clear_output();
+    p.send(b"dd");
+    p.wait_screen("超过 2 秒");
+    p.send(b"\x03q");
+    assert!(p.wait_exit().success());
+    let state =
+        fs::read_to_string(support::project_dir(&f.repo, &f.registry).join("state.json")).unwrap();
+    assert!(state.contains("auth"));
+}
+
+#[test]
 fn delete_task_confirmation_protection_and_keep_branch() {
     let f = Fixture::core();
     f.init();
@@ -3015,13 +3054,15 @@ fn delete_task_confirmation_protection_and_keep_branch() {
     p.send(b"\r/main\r/delete\r");
     p.wait("不能删除主工作目录");
     p.send(b"/auth\r/delete\r");
-    p.wait("确认删除");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
     // 默认取消，Enter 不产生写操作。
     p.send(b"\r");
-    p.wait("主工作目录");
+    p.wait_screen_absent("删除任务");
     assert!(path.is_dir());
     fs::write(path.join("unsaved"), "keep me").unwrap();
-    p.send(b"/delete\r\t\r");
+    p.send(b"/delete\r");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
+    p.send(b"\t\r");
     p.wait("删除失败");
     assert!(path.is_dir());
     assert!(fs::read_to_string(&state_path).unwrap().contains("auth"));
@@ -3070,7 +3111,7 @@ fn delete_task_removes_branch_and_rejects_changed_identity() {
     p.send(b"\r/auth\rd");
     assert!(PathBuf::from(state["auth"]["path"].as_str().unwrap()).is_dir());
     p.send(b"d");
-    p.wait("确认删除");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
     // 默认勾选删除本地分支，确认后执行。
     state["auth"]["branch"] = "changed".into();
     fs::write(&state_path, serde_json::to_vec(&state).unwrap()).unwrap();
@@ -3115,6 +3156,7 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     let mut p = f.terminal(false);
     p.wait("auth");
     p.send(b"\r/auth\rdd");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
     p.wait("同时删除被忽略文件");
     p.send(b"\x1b[6~");
     p.wait(".venv/");
@@ -3124,10 +3166,12 @@ fn delete_ignored_defaults_on_and_keeps_default_cancel() {
     assert!(path.join(".venv/data").exists());
     // 切换选项会回到默认取消，Enter 不删除。
     p.send(b"\x1b[B \r");
-    p.wait("主工作目录");
+    p.wait_screen_absent("删除任务");
     assert!(path.join(".venv/data").exists());
     p.clear_output();
-    p.send(b"dd\t\r");
+    p.send(b"dd");
+    p.wait_screen("PgUp/PgDn 滚动清单及错误");
+    p.send(b"\t\r");
     p.wait_screen("已选中 demo / main");
     assert!(!path.exists());
     p.send(b"q");

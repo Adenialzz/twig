@@ -1,5 +1,7 @@
 # Console（控制台）
 
+表单中的项目校验、任务分支校验和删除文件清单异步加载，等待时按 Esc 可取消。Git 查询超过 2 秒会显示错误；确认提交后的创建和删除操作不受该查询超时限制。
+
 命令行阅读：`twig guide console`。
 
 普通任务 CLI、Console 导航、创建/删除表单和工作台无需 Twig 后台。Agent、受管任务、持续监控与未读通知依赖显式启动的后台；用 `twig daemon status` 检查扩展状态。未知操作通过 `twig operation show ID` 核对，详见 [后台指南](daemon.md)。

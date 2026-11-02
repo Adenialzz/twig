@@ -1188,10 +1188,17 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         }
         let mut details = Vec::new();
         if let Some(error) = &form.error {
-            details.push(format!(
-                "删除失败：{}\n可能已完成部分清理；请检查后重试。",
-                safe(error)
-            ));
+            details.push(if form.operation_started {
+                format!(
+                    "删除失败：{}\n可能已完成部分清理；请检查后重试。",
+                    safe(error)
+                )
+            } else {
+                format!(
+                    "查询失败：{}\n尚未执行删除，可重试查询或取消。",
+                    safe(error)
+                )
+            });
         }
         details.push(format!(
             "Worktree：{}",
@@ -1243,7 +1250,9 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
                 .style(Style::default().fg(Color::Cyan)),
             rows[3],
         );
-        let hint = if compact {
+        let hint = if form.reading() {
+            "正在查询… Esc 取消"
+        } else if compact {
             "↑↓ 选项 · 空格勾选 · Tab 按钮\nEnter 执行 · Esc 取消 · PgUp/Dn 滚动"
         } else {
             "↑↓ / j k 选择选项 · 空格切换\nTab / ←→ 切换按钮 · Enter 执行 · Esc 取消\nPgUp/PgDn 滚动清单及错误"
@@ -1280,11 +1289,15 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
             rows[0],
         );
         frame.render_widget(
-            Paragraph::new(format!(
-                "{}取消    {}使用分支\nTab / ←→ 切换 · Enter 确认\nEsc 返回表单",
-                if existing.confirmed { "  " } else { "› " },
-                if existing.confirmed { "› " } else { "  " },
-            )),
+            Paragraph::new(if form.reading() {
+                form.progress.clone()
+            } else {
+                format!(
+                    "{}取消    {}使用分支\nTab / ←→ 切换 · Enter 确认\nEsc 返回表单",
+                    if existing.confirmed { "  " } else { "› " },
+                    if existing.confirmed { "› " } else { "  " },
+                )
+            }),
             rows[1],
         );
         return;
@@ -1321,7 +1334,9 @@ fn draw_form(frame: &mut Frame, area: Rect, form: &super::form::Form) {
         draw_form_field(frame, sections[i + 1], form, i, label, style);
     }
     frame.render_widget(
-        Paragraph::new(if form.busy() {
+        Paragraph::new(if form.reading() {
+            "正在查询… Esc 取消"
+        } else if form.busy() {
             "正在执行，请等待…\n执行期间不强制取消，避免中断写操作。"
         } else if form.completing_path() {
             "↑↓ 选目录 · Tab 补全/切字段\nEnter 下一步 · Esc 取消"
@@ -1542,7 +1557,9 @@ fn draw_task_form(frame: &mut Frame, area: Rect, form: &super::form::Form, proje
         sections[5],
     );
     frame.render_widget(
-        Paragraph::new(if form.busy() {
+        Paragraph::new(if form.reading() {
+            "正在查询… Esc 取消"
+        } else if form.busy() {
             "执行期间请等待，避免中断写操作。"
         } else if form.completing_branch() {
             if form.branch_selection.is_some() {
@@ -1620,6 +1637,7 @@ mod tests {
             delete_branch: true,
             delete_ignored: true,
             ignored: vec![],
+            ignored_ready: true,
             confirm: false,
             option: 0,
         });

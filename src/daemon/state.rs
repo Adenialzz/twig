@@ -64,18 +64,8 @@ impl State {
         })
     }
     fn publish_interest(&self) -> Result<()> {
-        let mut projects: Vec<_> = self
-            .clients
-            .values()
-            .filter(|c| !c.request.background)
-            .filter_map(|c| c.request.project.clone())
-            .collect();
-        projects.sort();
-        projects.dedup();
         self.worker.requests.send(Request {
-            project: projects.first().cloned(),
-            background: projects.is_empty(),
-            projects,
+            background: true,
             refresh: self.refresh,
             ..Default::default()
         })?;

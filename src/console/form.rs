@@ -39,6 +39,7 @@ pub struct Form {
     completion_input: Option<String>,
     job: Option<Job>,
     branch_query: Option<BranchQuery>,
+    query: Option<FormQuery>,
     directory_cache: Option<(String, Instant, Vec<String>)>,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -69,6 +70,7 @@ pub struct Deletion {
     pub delete_branch: bool,
     pub delete_ignored: bool,
     pub ignored: Vec<String>,
+    pub ignored_ready: bool,
     pub confirm: bool,
     pub option: usize,
 }
@@ -81,6 +83,24 @@ struct BranchQuery {
     cancel: Arc<AtomicBool>,
 }
 impl Drop for BranchQuery {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+type TaskSources = (std::path::PathBuf, Vec<crate::config::BranchStart>);
+#[derive(Clone, Copy)]
+enum QueryKind {
+    Project,
+    Task,
+    Ignored,
+}
+struct FormQuery {
+    kind: QueryKind,
+    registry: std::path::PathBuf,
+    result: mpsc::Receiver<Result<serde_json::Value>>,
+    cancel: Arc<AtomicBool>,
+}
+impl Drop for FormQuery {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -111,6 +131,7 @@ impl Form {
             completion_input: None,
             job: None,
             branch_query: None,
+            query: None,
             directory_cache: None,
         }
     }
@@ -139,7 +160,7 @@ impl Form {
         self.branch_error = Some("正在读取分支候选…".into());
     }
     pub fn querying(&self) -> bool {
-        self.branch_query.is_some()
+        self.branch_query.is_some() || self.query.is_some()
     }
     pub fn completing_branch(&self) -> bool {
         self.project.is_some()
@@ -178,7 +199,7 @@ impl Form {
         }
     }
     pub fn busy(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.query.is_some()
     }
     pub fn completing_path(&self) -> bool {
         self.project.is_none() && self.field == 0 && !self.busy()
@@ -192,8 +213,7 @@ impl Form {
         path: std::path::PathBuf,
     ) -> Result<Self> {
         let expected = serde_json::to_string(&(common, &branch, &path))?;
-        let ignored = crate::core::query(registry, "form.ignored", serde_json::json!(path))?;
-        Ok(Self {
+        let mut form = Self {
             project: Some(project),
             fields: [name, String::new()],
             deletion: Some(Deletion {
@@ -202,12 +222,49 @@ impl Form {
                 expected,
                 delete_branch: true,
                 delete_ignored: true,
-                ignored,
+                ignored: Vec::new(),
+                ignored_ready: false,
                 confirm: false,
                 option: 0,
             }),
             ..Self::project()
-        })
+        };
+        form.load_ignored(registry);
+        Ok(form)
+    }
+    fn load_ignored(&mut self, registry: &Path) {
+        self.start_query(
+            registry,
+            QueryKind::Ignored,
+            serde_json::json!(self.deletion.as_ref().unwrap().path),
+        );
+    }
+    pub fn reading(&self) -> bool {
+        self.query.is_some()
+    }
+    fn start_query(&mut self, registry: &Path, kind: QueryKind, value: serde_json::Value) {
+        let registry = registry.to_owned();
+        let worker_registry = registry.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let (out, result) = mpsc::channel();
+        std::thread::spawn(move || {
+            super::query::install(stop);
+            let method = match kind {
+                QueryKind::Project => "form.project",
+                QueryKind::Task => "form.task",
+                QueryKind::Ignored => "form.ignored",
+            };
+            let _ = out.send(crate::core::query(&worker_registry, method, value));
+        });
+        self.query = Some(FormQuery {
+            kind,
+            registry,
+            result,
+            cancel,
+        });
+        self.progress = "正在查询… Esc 取消".into();
+        self.error = None;
     }
     pub fn complete_path(&mut self) -> bool {
         if !self.completing_path() {
@@ -236,28 +293,30 @@ impl Form {
                 path = registry::expand(Path::new(&self.fields[0]))?;
             }
             ensure!(path.is_dir(), "目录不存在：{}", path.display());
-            let main: std::path::PathBuf =
-                crate::core::query(registry, "form.project", serde_json::json!(path))?;
-            let alias = main
-                .file_name()
-                .and_then(|s| s.to_str())
-                .context("无法取得仓库目录名")?
-                .to_owned();
-            if self.fields[1].is_empty() || self.default_alias.as_ref() == Some(&self.fields[1]) {
-                self.fields[1] = alias.clone();
-            }
-            self.default_alias = Some(alias);
-            self.field = 1;
-            self.error = None;
-            self.scroll = 0;
+            self.start_query(registry, QueryKind::Project, serde_json::json!(path));
             return Ok(());
         }
         if self.branch_selection.is_some() {
             self.complete_branch();
         }
-        self.submit(registry)
+        if let Some(deletion) = &self.deletion {
+            if !deletion.ignored_ready {
+                self.load_ignored(registry);
+                return Ok(());
+            }
+        } else if let Some(project) = &self.project {
+            crate::config::task_name(&self.fields[0])?;
+            ensure!(self.fields[0] != "main", "main 保留给项目主窗口");
+            self.start_query(
+                registry,
+                QueryKind::Task,
+                serde_json::json!([project, self.fields[0]]),
+            );
+            return Ok(());
+        }
+        self.submit(registry, None)
     }
-    fn submit(&mut self, registry: &Path) -> Result<()> {
+    fn submit(&mut self, registry: &Path, sources: Option<TaskSources>) -> Result<()> {
         ensure!(
             self.deletion.is_some()
                 || (!self.fields[0].trim().is_empty() && !self.fields[1].trim().is_empty()),
@@ -290,12 +349,7 @@ impl Form {
         } else if let Some(project) = &self.project {
             crate::config::task_name(&self.fields[0])?;
             ensure!(self.fields[0] != "main", "main 保留给项目主窗口");
-            let (common, available): (std::path::PathBuf, Vec<crate::config::BranchStart>) =
-                crate::core::query(
-                    registry,
-                    "form.task",
-                    serde_json::json!([project, &self.fields[0]]),
-                )?;
+            let (common, available) = sources.context("缺少分支查询结果")?;
             if let Some(existing) = self.existing.take() {
                 ensure!(existing.confirmed, "操作已取消");
                 let expected = serde_json::to_string(&(
@@ -358,6 +412,7 @@ impl Form {
             .spawn()
             .context("无法启动创建操作")?;
         self.job = Some(Job { child, output });
+        self.progress = "已提交，等待执行…".into();
         self.operation_started = true;
         self.error = None;
         self.scroll = 0;
@@ -385,6 +440,55 @@ impl Form {
         ))
     }
     pub fn poll(&mut self) -> Result<Option<(String, String)>> {
+        if let Some(query) = &self.query {
+            let result = match query.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(anyhow::anyhow!("表单查询已停止")))
+                }
+            };
+            if let Some(result) = result {
+                let query = self.query.take().unwrap();
+                let value = match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if matches!(query.kind, QueryKind::Task) {
+                            self.existing = None;
+                        }
+                        return Err(error);
+                    }
+                };
+                match query.kind {
+                    QueryKind::Ignored => {
+                        let deletion = self.deletion.as_mut().unwrap();
+                        deletion.ignored = serde_json::from_value(value)?;
+                        deletion.ignored_ready = true;
+                        deletion.confirm = false;
+                    }
+                    QueryKind::Project => {
+                        let main: std::path::PathBuf = serde_json::from_value(value)?;
+                        let alias = main
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .context("无法取得仓库目录名")?
+                            .to_owned();
+                        if self.fields[1].is_empty()
+                            || self.default_alias.as_ref() == Some(&self.fields[1])
+                        {
+                            self.fields[1] = alias.clone();
+                        }
+                        self.default_alias = Some(alias);
+                        self.field = 1;
+                        self.error = None;
+                        self.scroll = 0;
+                    }
+                    QueryKind::Task => {
+                        self.submit(&query.registry, Some(serde_json::from_value(value)?))?
+                    }
+                }
+            }
+        }
         if let Some(query) = &self.branch_query {
             let result = match query.result.try_recv() {
                 Ok(result) => Some(result),

@@ -73,8 +73,6 @@ pub struct Request {
     pub turn: Option<String>,
     pub refresh: u64,
     pub background: bool,
-    #[serde(default)]
-    pub projects: Vec<String>,
 }
 
 impl Snapshot {
@@ -98,7 +96,7 @@ struct Published {
 #[derive(Clone, Default)]
 pub struct Updates {
     state: Arc<Mutex<Published>>,
-    publishers: Arc<Mutex<()>>,
+    publishers: Arc<Mutex<AssociationCache>>,
 }
 impl Updates {
     pub fn take(&self) -> Option<Snapshot> {
@@ -110,21 +108,23 @@ impl Updates {
         Some(state.snapshot.clone())
     }
     fn publish(&self, snapshot: &Snapshot) {
-        let _publisher = self.publishers.lock().unwrap();
+        let mut publisher = self.publishers.lock().unwrap();
         let core = self.state.lock().unwrap().core.clone();
         let mut snapshot = snapshot.clone();
         if let Some(core) = core {
             Self::merge(&mut snapshot, &core);
+            publisher.apply(&mut snapshot);
         }
         let mut state = self.state.lock().unwrap();
         state.snapshot = snapshot;
         state.dirty = true;
     }
     fn publish_core(&self, core: &Snapshot) {
-        let _publisher = self.publishers.lock().unwrap();
+        let mut publisher = self.publishers.lock().unwrap();
         let mut snapshot = self.state.lock().unwrap().snapshot.clone();
         // 归属解析含文件系统 I/O；UI 取快照的锁只保护内存交换。
         Self::merge(&mut snapshot, core);
+        publisher.apply(&mut snapshot);
         let mut state = self.state.lock().unwrap();
         state.snapshot = snapshot;
         state.core = Some(core.clone());
@@ -135,7 +135,46 @@ impl Updates {
         snapshot.zed = core.zed.clone();
         snapshot.registry_error = core.registry_error.clone();
         snapshot.registry_checked = core.registry_checked;
-        associate(snapshot);
+    }
+}
+// 路径解析只在归属输入变化或登记表刷新时重做；普通状态发布复用结果。
+#[derive(Default)]
+struct AssociationCache {
+    tasks: Vec<(String, PathBuf)>,
+    threads: Vec<(String, PathBuf)>,
+    checked: Option<Instant>,
+    associations: BTreeMap<String, (String, PathBuf)>,
+}
+impl AssociationCache {
+    fn apply(&mut self, snapshot: &mut Snapshot) {
+        let tasks: Vec<_> = snapshot
+            .repos
+            .iter()
+            .filter(|r| r.error.is_none())
+            .flat_map(|r| {
+                r.tasks
+                    .iter()
+                    .map(move |t| (r.name.clone(), t.path.clone()))
+            })
+            .collect();
+        let threads: Vec<_> = snapshot
+            .threads
+            .iter()
+            .chain(&snapshot.history)
+            .map(|t| (t.id.clone(), t.cwd.clone()))
+            .collect();
+        if self.tasks != tasks
+            || self.threads != threads
+            || self.checked != snapshot.registry_checked
+        {
+            associate(snapshot);
+            self.tasks = tasks;
+            self.threads = threads;
+            self.checked = snapshot.registry_checked;
+            self.associations = snapshot.associations.clone();
+        } else {
+            snapshot.associations = self.associations.clone();
+        }
     }
 }
 pub struct Requests {
@@ -847,16 +886,8 @@ fn collect(
     let mut activity_at = None;
     let mut retry_at = None;
     let mut retry_delay = 2;
-    let mut git_at = None;
-    let mut git_project = None;
-    let mut git_scan: Option<GitScan> = None;
-    let mut next_project = 0;
-    let mut cursor: Option<String> = None;
-    let mut seen_cursors = HashSet::new();
     let mut handled_refresh = 0;
     let mut revision = crate::daemon::REVISION.load(Ordering::Relaxed);
-    let mut unpublished = false;
-    let mut published_at = Instant::now();
     while !cancel.load(Ordering::Relaxed) {
         for next in requests.try_iter() {
             request = next;
@@ -1080,141 +1111,13 @@ fn collect(
             activity_at = Some(Instant::now());
             dirty = true;
         }
-        // 合并采集期间的新选择，只查询当前需要的项目。
-        for next in requests.try_iter() {
-            request = next;
-        }
-        if force || request.project != git_project || request.background {
-            git_scan = None;
-            git_at = None;
-            git_project = request.project.clone();
-        }
-        if !request.background {
-            if git_scan.is_none() && due(git_at, 5) {
-                git_scan = snapshot
-                    .repos
-                    .iter()
-                    .filter(|r| {
-                        request.projects.contains(&r.name)
-                            || Some(&r.name) == request.project.as_ref()
-                    })
-                    .nth(next_project)
-                    .and_then(|repo| GitScan::new(repo, request.path.as_deref()));
-                if git_scan.is_none() {
-                    next_project = 0;
-                    git_at = Some(Instant::now());
-                }
-            }
-            if let Some(scan) = &mut git_scan {
-                if let Some(repo) = snapshot.repos.iter_mut().find(|r| r.name == scan.project) {
-                    scan.next(repo);
-                    dirty = true;
-                } else {
-                    scan.paths.clear();
-                }
-                if scan.paths.is_empty() {
-                    git_scan = None;
-                    next_project += 1;
-                    git_at = None;
-                }
-            }
-        }
-        let key = request
-            .path
-            .clone()
-            .filter(|_| request.history)
-            .map(|path| (path, request.descendants));
-        if key != snapshot.history_key || force {
-            snapshot.history_key = key.clone();
-            snapshot.history.clear();
-            associations_changed = true;
-            snapshot.history_pages = 0;
-            snapshot.history_scanned = 0;
-            snapshot.history_more = true;
-            snapshot.history_error = None;
-            cursor = None;
-            seen_cursors.clear();
-            dirty = true;
-        }
-        if let Some((path, descendants)) = key
-            && snapshot.history_more
-            && snapshot.history_pages <= request.page
-            && snapshot.history_error.is_none()
-        {
-            let result = (|| -> Result<crate::codex::Page> {
-                let client = client.as_mut().context("Codex 未连接；r 重试")?;
-                client.history(
-                    if descendants {
-                        None
-                    } else {
-                        Some(path.as_path())
-                    },
-                    cursor.as_deref(),
-                )
-            })();
-            match result {
-                Ok(page) => {
-                    associations_changed = true;
-                    snapshot.history_scanned += page.data.len();
-                    snapshot.history_pages += 1;
-                    let mut owners = Owners::new(&snapshot.repos);
-                    let mut ids: HashSet<_> =
-                        snapshot.history.iter().map(|t| t.id.clone()).collect();
-                    for t in page.data {
-                        if !t.ephemeral
-                            && owners.get(&t.cwd)
-                                == request.project.clone().map(|p| (p, path.clone()))
-                            && ids.insert(t.id.clone())
-                        {
-                            snapshot.history.push(t);
-                        }
-                    }
-                    cursor = page.next_cursor;
-                    snapshot.history_more = cursor.is_some();
-                    if let Some(c) = &cursor
-                        && !seen_cursors.insert(c.clone())
-                    {
-                        snapshot.history_error = Some("Codex 返回重复分页游标".into());
-                        snapshot.history_more = false;
-                    }
-                }
-                Err(e) => {
-                    snapshot.history_error = Some(format!("{e:#}"));
-                    client = None;
-                }
-            }
-            dirty = true;
-        }
-        if let Some(id) = &request.turn
-            && (force || snapshot.turn.as_ref().is_none_or(|(old, _)| old != id))
-        {
-            let value = client
-                .as_mut()
-                .context("Codex 未连接")
-                .and_then(|c| c.latest_turn(id))
-                .map_err(|e| format!("{e:#}"));
-            if value.is_err() {
-                client = None;
-            }
-            snapshot.turn = Some((id.clone(), value));
-            dirty = true;
-        }
         if associations_changed {
             associate(&mut snapshot);
         }
-        unpublished |= dirty;
-        if unpublished
-            && (git_scan.is_none() || published_at.elapsed() >= Duration::from_millis(100))
-        {
+        if dirty {
             updates.publish(&snapshot);
-            unpublished = false;
-            published_at = Instant::now();
         }
-        thread::sleep(Duration::from_millis(if git_scan.is_some() {
-            1
-        } else {
-            50
-        }));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 pub(crate) fn associate(snapshot: &mut Snapshot) {
@@ -1244,6 +1147,38 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ownership_cache_reuses_inputs_and_refreshes_changed_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("task");
+        std::fs::create_dir(&path).unwrap();
+        let mut snapshot = Snapshot {
+            repos: vec![repo("demo", path.clone())],
+            threads: vec![
+                serde_json::from_value(serde_json::json!({"id":"t","cwd":path,"status":null}))
+                    .unwrap(),
+            ],
+            ..Default::default()
+        };
+        let mut cache = AssociationCache::default();
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.contains_key("t"));
+        std::fs::remove_dir(&path).unwrap();
+        // 未改变的普通状态发布不做文件系统查询。
+        snapshot.associations.clear();
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.contains_key("t"));
+        snapshot.registry_checked = Some(Instant::now());
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.is_empty());
+        std::fs::create_dir(&path).unwrap();
+        snapshot.threads[0].id = "new".into();
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.contains_key("new"));
+        snapshot.repos[0].error = Some("失效".into());
+        cache.apply(&mut snapshot);
+        assert!(snapshot.associations.is_empty());
+    }
     #[test]
     fn ui_can_take_last_snapshot_while_a_publisher_is_busy() {
         let updates = Updates::default();

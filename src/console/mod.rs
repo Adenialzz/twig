@@ -462,7 +462,6 @@ impl App {
             turn: self.thread.clone().filter(|_| self.detail),
             refresh: self.refresh,
             background: false,
-            projects: vec![],
         }
     }
 }
@@ -997,6 +996,14 @@ fn run_inner(
             }
             if key.code == KeyCode::PageUp {
                 form.scroll = form.scroll.saturating_sub(2);
+                continue;
+            }
+            if form.reading()
+                && (key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)))
+            {
+                app.form = None;
                 continue;
             }
             if form.busy() {
