@@ -588,7 +588,11 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
     let panel = block(
-        format!(" {} · 任务 / {} ", safe(project), safe(&app.filters[1])),
+        format!(
+            " {} · 任务 / {} ",
+            safe(app.project.as_deref().unwrap_or("—")),
+            safe(&app.filters[1])
+        ),
         app.focus == 1,
     );
     let highlight_symbol = "› ";
