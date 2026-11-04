@@ -587,7 +587,20 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             headers.push("Claude");
         }
     }
-    let widths: Vec<_> = widths.into_iter().map(Constraint::Percentage).collect();
+    let widths: Vec<_> = if !compact && codex && claude {
+        // 扣除边框、选择箭头及四个列间隔，按字符分配两个等宽状态列。
+        let available = area.width.saturating_sub(8);
+        let agent_width = available / 5;
+        vec![
+            Constraint::Fill(1),
+            Constraint::Length(available / 5),
+            Constraint::Length(available * 12 / 100),
+            Constraint::Length(agent_width),
+            Constraint::Length(agent_width),
+        ]
+    } else {
+        widths.into_iter().map(Constraint::Percentage).collect()
+    };
     // 与 Table 相同的列分配，用于按列宽加省略号；扣除边框和选中箭头。
     let columns: Vec<usize> = Layout::horizontal(widths.clone())
         .spacing(1)
@@ -673,7 +686,7 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                     (claude, "Claude", claude_counts, claude_unread),
                 ] {
                     if enabled {
-                        let prefix = format!("{provider} ");
+                        let prefix = format!("{provider:<6} ");
                         let mut line = Line::from(prefix.clone());
                         line.spans.extend(
                             agent_status(counts, width.saturating_sub(prefix.len()), unread_count)
@@ -714,7 +727,8 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             app.focus == 1,
         ))
         .row_highlight_style(highlight(app.focus == 1))
-        .highlight_symbol("› ");
+        .highlight_symbol("› ")
+        .highlight_spacing(ratatui::widgets::HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(
         tasks
             .iter()
@@ -2140,6 +2154,30 @@ mod tests {
             .claude_associations
             .insert(session.key().unwrap(), ("alpha".into(), "/alpha".into()));
         app.snapshot.claude.push(session);
+        for width in 80..145 {
+            let buffer = render(&app, width, 10, tasks);
+            let codex_x = (0..width)
+                .find(|&x| buffer[(x, 1)].symbol() == "C")
+                .unwrap();
+            let claude_x = (codex_x + 1..width)
+                .find(|&x| buffer[(x, 1)].symbol() == "C")
+                .unwrap();
+            assert_eq!(
+                claude_x - codex_x - 1,
+                width - 1 - claude_x,
+                "width={width}"
+            );
+            assert_eq!(buffer[(codex_x, 2)].symbol(), "空");
+            assert_eq!(buffer[(claude_x, 2)].symbol(), "运");
+        }
+        let narrow_buffer = render(&app, 70, 10, tasks);
+        let codex_status_x = (0..70)
+            .find(|&x| narrow_buffer[(x, 2)].symbol() == "空")
+            .unwrap();
+        let claude_status_x = (0..70)
+            .find(|&x| narrow_buffer[(x, 3)].symbol() == "运")
+            .unwrap();
+        assert_eq!(codex_status_x, claude_status_x);
         let wide = text(&render(&app, 100, 10, tasks));
         let header = wide.lines().find(|line| line.contains("Codex")).unwrap();
         assert!(header.contains("Claude"), "{wide}");
@@ -2148,7 +2186,7 @@ mod tests {
         assert!(!row.contains("Codex") && !row.contains("Claude"));
         let narrow = text(&render(&app, 70, 10, tasks));
         assert!(
-            narrow.lines().any(|line| line.contains("Codex 空闲 1")),
+            narrow.lines().any(|line| line.contains("Codex  空闲 1")),
             "{narrow}"
         );
         assert!(
