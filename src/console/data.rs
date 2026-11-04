@@ -54,6 +54,16 @@ pub struct Snapshot {
     pub delivery_error: Option<String>,
     #[serde(with = "crate::daemon::time")]
     pub codex_checked: Option<Instant>,
+    #[serde(default)]
+    pub claude: Vec<crate::claude::Session>,
+    #[serde(default)]
+    pub claude_error: Option<String>,
+    #[serde(default)]
+    pub claude_notification_error: Option<String>,
+    #[serde(default, with = "crate::daemon::time")]
+    pub claude_checked: Option<Instant>,
+    #[serde(default)]
+    pub claude_associations: BTreeMap<String, (String, PathBuf)>,
     pub history: Vec<Thread>,
     pub history_key: Option<(PathBuf, bool)>,
     pub history_more: bool,
@@ -76,6 +86,11 @@ pub struct Request {
 }
 
 impl Snapshot {
+    fn backend_error(&mut self, error: String) {
+        self.codex_error = Some(error.clone());
+        self.claude_error = Some(error);
+    }
+
     fn query_error(&mut self, request: &Request, error: String) {
         if let Some(id) = &request.turn {
             self.turn = Some((id.clone(), Err(error.clone())));
@@ -142,6 +157,8 @@ impl Updates {
 struct AssociationCache {
     tasks: Vec<(String, PathBuf)>,
     threads: Vec<(String, PathBuf)>,
+    claude: Vec<(String, PathBuf)>,
+    claude_associations: BTreeMap<String, (String, PathBuf)>,
     checked: Option<Instant>,
     associations: BTreeMap<String, (String, PathBuf)>,
 }
@@ -163,17 +180,26 @@ impl AssociationCache {
             .chain(&snapshot.history)
             .map(|t| (t.id.clone(), t.cwd.clone()))
             .collect();
+        let claude: Vec<_> = snapshot
+            .claude
+            .iter()
+            .filter_map(|s| Some((s.key()?, s.cwd.clone())))
+            .collect();
         if self.tasks != tasks
+            || self.claude != claude
             || self.threads != threads
             || self.checked != snapshot.registry_checked
         {
             associate(snapshot);
             self.tasks = tasks;
             self.threads = threads;
+            self.claude = claude;
+            self.claude_associations = snapshot.claude_associations.clone();
             self.checked = snapshot.registry_checked;
             self.associations = snapshot.associations.clone();
         } else {
             snapshot.associations = self.associations.clone();
+            snapshot.claude_associations = self.claude_associations.clone();
         }
     }
 }
@@ -255,16 +281,14 @@ impl Worker {
                             match serde_json::from_value(value["snapshot"].clone()) {
                                 Ok(snapshot) => latest = snapshot,
                                 Err(error) => {
-                                    latest.codex_error =
-                                        Some(format!("Agent 后台快照格式错误：{error}"))
+                                    latest.backend_error(format!("Agent 后台快照格式错误：{error}"))
                                 }
                             }
                         }
                     }
                     Err(error) => {
                         version = None;
-                        latest.codex_error =
-                            Some(format!("Agent 扩展不可用，旧状态过期：{error:#}"));
+                        latest.backend_error(format!("Agent 扩展不可用，旧状态过期：{error:#}"));
                     }
                 }
                 let key = serde_json::json!([
@@ -883,6 +907,9 @@ fn collect(
     let mut deliveries = saved.deliveries;
     let mut registry_at = None;
     let mut activity_at = None;
+    let mut claude_at = None;
+    let mut claude_interval = 5;
+    let mut claude_observer = crate::claude::Observer::default();
     let mut retry_at = None;
     let mut retry_delay = 2;
     let mut handled_refresh = 0;
@@ -903,6 +930,71 @@ fn collect(
             dirty = true;
             // 先发布项目列表，Codex 或 Git 慢时仍可开始导航。
             associate(&mut snapshot);
+            updates.publish(&snapshot);
+        }
+        if force || due(claude_at, claude_interval) {
+            if snapshot
+                .claude_checked
+                .is_some_and(|at| at.elapsed() > Duration::from_secs(30))
+            {
+                claude_observer.reset();
+            }
+            match crate::claude::query() {
+                Ok(sessions) => {
+                    claude_interval = 5;
+                    snapshot.claude = sessions;
+                    associate(&mut snapshot);
+                    let relevant: Vec<_> = snapshot
+                        .claude
+                        .iter()
+                        .filter(|session| {
+                            session
+                                .key()
+                                .is_some_and(|key| snapshot.claude_associations.contains_key(&key))
+                        })
+                        .cloned()
+                        .collect();
+                    let result = claude_observer.observe(&relevant, |session, status, id| {
+                        let (project, path) =
+                            &snapshot.claude_associations[&session.key().unwrap()];
+                        let task = snapshot
+                            .repos
+                            .iter()
+                            .find(|repo| &repo.name == project)
+                            .unwrap()
+                            .tasks
+                            .iter()
+                            .find(|task| &task.path == path)
+                            .unwrap();
+                        inbox.record(
+                            InboxEvent {
+                                id: id.into(),
+                                thread: format!("claude:{}", session.key().unwrap()),
+                                task: Some(Completion {
+                                    claude: Some(status),
+                                    message: false,
+                                    project: project.clone(),
+                                    task: task.name.clone(),
+                                    path: path.clone(),
+                                }),
+                            },
+                            false,
+                        )
+                    });
+                    snapshot.claude_error = None;
+                    snapshot.claude_notification_error = result
+                        .err()
+                        .map(|error| format!("Claude 提醒保存失败：{error:#}"));
+                    snapshot.claude_checked = Some(Instant::now());
+                }
+                Err(error) => {
+                    claude_interval = 30;
+                    snapshot.claude_error = Some(format!("{error:#}"));
+                    claude_observer.reset();
+                }
+            }
+            claude_at = Some(Instant::now());
+            dirty = true;
             updates.publish(&snapshot);
         }
         if force || due(activity_at, 2) {
@@ -948,6 +1040,7 @@ fn collect(
                                     id: format!("message:{id}"),
                                     thread: binding.thread.clone(),
                                     task: Some(Completion {
+                                        claude: None,
                                         message: true,
                                         project: project.clone(),
                                         task: task.clone(),
@@ -1054,6 +1147,7 @@ fn collect(
                                         id: format!("turn:{id}:{}", turn.id),
                                         thread: id.clone(),
                                         task: Some(Completion {
+                                            claude: None,
                                             message: false,
                                             project: project.to_owned(),
                                             path: task_path.to_owned(),
@@ -1127,6 +1221,11 @@ pub(crate) fn associate(snapshot: &mut Snapshot) {
         .chain(&snapshot.history)
         .filter_map(|t| owners.get(&t.cwd).map(|owner| (t.id.clone(), owner)))
         .collect();
+    snapshot.claude_associations = snapshot
+        .claude
+        .iter()
+        .filter_map(|session| Some((session.key()?, owners.get(&session.cwd)?)))
+        .collect();
 }
 fn due(at: Option<Instant>, seconds: u64) -> bool {
     at.is_none_or(|t| t.elapsed() >= Duration::from_secs(seconds))
@@ -1147,6 +1246,19 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 #[cfg(test)]
 mod tests {
     #[test]
+    fn backend_disconnect_invalidates_both_providers() {
+        let mut snapshot = Snapshot {
+            codex_checked: Some(Instant::now()),
+            claude_checked: Some(Instant::now()),
+            ..Default::default()
+        };
+        snapshot.backend_error("disconnected".into());
+        assert_eq!(snapshot.codex_error.as_deref(), Some("disconnected"));
+        assert_eq!(snapshot.claude_error.as_deref(), Some("disconnected"));
+        assert!(snapshot.claude_notification_error.is_none());
+    }
+
+    #[test]
     fn ownership_cache_reuses_inputs_and_refreshes_changed_paths() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("task");
@@ -1159,18 +1271,30 @@ mod tests {
             ],
             ..Default::default()
         };
+        snapshot.claude = vec![serde_json::from_value(serde_json::json!({"sessionId":"c", "cwd":path, "kind":"interactive", "startedAt":1})).unwrap()];
         let mut cache = AssociationCache::default();
         cache.apply(&mut snapshot);
+        assert!(snapshot.claude_associations.contains_key("session:c"));
         assert!(snapshot.associations.contains_key("t"));
         std::fs::remove_dir(&path).unwrap();
         // 未改变的普通状态发布不做文件系统查询。
         snapshot.associations.clear();
+        snapshot.claude_associations.clear();
         cache.apply(&mut snapshot);
+        assert!(snapshot.claude_associations.contains_key("session:c"));
         assert!(snapshot.associations.contains_key("t"));
         snapshot.registry_checked = Some(Instant::now());
         cache.apply(&mut snapshot);
         assert!(snapshot.associations.is_empty());
         std::fs::create_dir(&path).unwrap();
+        snapshot.claude[0].session_id = Some("new-claude".into());
+        cache.apply(&mut snapshot);
+        assert!(
+            snapshot
+                .claude_associations
+                .contains_key("session:new-claude")
+        );
+        assert!(!snapshot.claude_associations.contains_key("session:c"));
         snapshot.threads[0].id = "new".into();
         cache.apply(&mut snapshot);
         assert!(snapshot.associations.contains_key("new"));
@@ -1243,6 +1367,7 @@ mod tests {
                 ..Default::default()
             });
             out.send(Completion {
+                claude: None,
                 message: false,
                 project: "repo".into(),
                 path: "/repo".into(),

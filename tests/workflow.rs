@@ -48,6 +48,8 @@ impl Fixture {
         )
         .unwrap();
         fs::set_permissions(bin.join("codex"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(bin.join("claude"), "#!/bin/sh\nprintf '[]\\n'\n").unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
         let f = Self {
             _temp: temp,
             repo,

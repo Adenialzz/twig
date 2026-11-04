@@ -3,7 +3,7 @@ pub(crate) mod data;
 pub(crate) mod form;
 mod hyperlink;
 pub(crate) mod inbox;
-mod notifications;
+pub(crate) mod notifications;
 pub(crate) mod query;
 pub(crate) mod selection;
 mod ui;
@@ -828,6 +828,7 @@ fn run_inner(
             .flat_map(|r| &r.tasks)
             .filter_map(|t| t.checked)
             .chain(app.snapshot.codex_checked)
+            .chain(app.snapshot.claude_checked)
             .filter(|at| at.elapsed() >= Duration::from_secs(30))
             .count();
         dirty |= stale != stale_count;

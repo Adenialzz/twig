@@ -487,26 +487,6 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
             ];
             if repo.error.is_some() {
                 spans.push(Span::styled("异常", Style::default().fg(Color::Red)));
-            } else {
-                let stale = codex_stale(app);
-                let mut counts = std::collections::BTreeMap::new();
-                for thread in app.snapshot.threads.iter().filter(|t| {
-                    app.snapshot
-                        .associations
-                        .get(&t.id)
-                        .is_some_and(|(name, _)| name == &repo.name)
-                }) {
-                    let entry = counts
-                        .entry(thread.label())
-                        .or_insert((0, status_style(thread, stale)));
-                    entry.0 += 1;
-                }
-                for (index, (label, (count, style))) in counts.into_iter().enumerate() {
-                    if index > 0 {
-                        spans.push(Span::raw(" · "));
-                    }
-                    spans.push(Span::styled(safe(&format!("{label} {count}")), style));
-                }
             }
             Line::from(spans)
         })
@@ -581,20 +561,74 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or_default()
         })
         .collect();
-    // 当前项目没有关联会话时隐藏 Codex 列，普通任务不显示占位符。
-    let codex = sessions.iter().any(|s| !s.is_empty());
-    let compact = area.width < if codex { 80 } else { 50 };
-    let (headers, widths): (Vec<_>, Vec<_>) = match (compact, codex) {
-        (true, true) => (vec!["任务", "Git / 窗口", "Codex"], vec![40, 32, 28]),
-        (true, false) => (vec!["任务", "Git / 窗口"], vec![55, 45]),
-        (false, true) => (vec!["任务", "Git", "窗口", "Codex"], vec![34, 28, 12, 26]),
-        (false, false) => (vec!["任务", "Git", "窗口"], vec![45, 40, 15]),
+    let project = app.project.as_deref().unwrap_or_default();
+    let codex = app.snapshot.threads.iter().any(|thread| {
+        app.snapshot
+            .associations
+            .get(&thread.id)
+            .is_some_and(|(owner, _)| owner == project)
+    }) || app.notifications.source_count(project, None, false) > 0;
+    let claude = !claude_sessions(&app.snapshot, project, None).is_empty()
+        || app.notifications.source_count(project, None, true) > 0;
+    let agents = codex || claude;
+    let compact = area.width < if agents { 80 } else { 50 };
+    let mut headers = if compact {
+        vec!["任务", "Git / 窗口"]
+    } else {
+        vec!["任务", "Git", "窗口"]
     };
-    let widths: Vec<_> = widths.into_iter().map(Constraint::Percentage).collect();
-    // 与 Table 相同的列分配，用于按列宽加省略号；扣除边框和选中箭头。
+    if compact && agents {
+        headers.push("Agent");
+    } else if !compact {
+        if codex {
+            headers.push("Codex");
+        }
+        if claude {
+            headers.push("Claude");
+        }
+    }
+    let panel = block(
+        format!(
+            " {} · 任务 / {} ",
+            safe(app.project.as_deref().unwrap_or("—")),
+            safe(&app.filters[1])
+        ),
+        app.focus == 1,
+    );
+    let highlight_symbol = "› ";
+    let column_spacing = 1;
+    let content_width = panel
+        .inner(area)
+        .width
+        .saturating_sub(Line::from(highlight_symbol).width() as u16);
+    let available = content_width.saturating_sub(column_spacing * (headers.len() as u16 - 1));
+    // 两个来源列按相同字符数分配（各 20%），取整余量留给任务列。
+    let share = |percent| (u32::from(available) * percent / 100) as u16;
+    let widths = match (compact, codex, claude) {
+        (false, true, true) => vec![
+            Constraint::Fill(1),
+            Constraint::Length(share(20)),
+            Constraint::Length(share(12)),
+            Constraint::Length(share(20)),
+            Constraint::Length(share(20)),
+        ],
+        _ => {
+            let percentages = match (compact, agents) {
+                (true, false) => vec![55, 45],
+                (true, true) => vec![35, 30, 35],
+                (false, false) => vec![45, 40, 15],
+                (false, true) => vec![34, 28, 12, 26],
+            };
+            percentages
+                .into_iter()
+                .map(Constraint::Percentage)
+                .collect()
+        }
+    };
+    // 内容截断与 Table 共用边框、选择区和列间隔的计算依据。
     let columns: Vec<usize> = Layout::horizontal(widths.clone())
-        .spacing(1)
-        .split(Rect::new(0, 0, area.width.saturating_sub(4), 1))
+        .spacing(column_spacing)
+        .split(Rect::new(0, 0, content_width, 1))
         .iter()
         .map(|r| usize::from(r.width))
         .collect();
@@ -608,10 +642,12 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 &task.name
             }))];
-            name.push(unread(app.notifications.count(
-                app.project.as_deref().unwrap_or_default(),
-                Some(&task.path),
-            )));
+            let codex_unread = app
+                .notifications
+                .source_count(project, Some(&task.path), false);
+            let claude_unread = app
+                .notifications
+                .source_count(project, Some(&task.path), true);
             // 任务名即分支名；仅在不同（如主工作目录、复用远端分支）时提示分支。
             let branch = (main || task.branch != task.name).then(|| {
                 Span::styled(
@@ -627,21 +663,24 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                     Color::DarkGray
                 }),
             );
-            let mut counts = std::collections::BTreeMap::new();
+            let mut codex_counts = std::collections::BTreeMap::new();
             for thread in sessions {
-                let entry = counts
-                    .entry(thread.label())
+                let entry = codex_counts
+                    .entry((thread.priority(), thread.label()))
                     .or_insert((0, status_style(thread, stale)));
                 entry.0 += 1;
             }
-            let mut spans = Vec::new();
-            for (label, (count, style)) in counts {
-                if !spans.is_empty() {
-                    spans.push(Span::raw(" · "));
-                }
-                spans.push(Span::styled(safe(&format!("{label} {count}")), style));
+            let mut claude_counts = std::collections::BTreeMap::new();
+            for session in claude_sessions(
+                &app.snapshot,
+                app.project.as_deref().unwrap_or_default(),
+                Some(&task.path),
+            ) {
+                let entry = claude_counts
+                    .entry((session.priority(), session.label()))
+                    .or_insert((0, claude_style(session, &app.snapshot)));
+                entry.0 += 1;
             }
-            let codex_cell = Cell::from(fit(Line::from(spans), *columns.last().unwrap()));
             let mut cells = if compact {
                 let mut lines = vec![fit(Line::from(name), columns[0])];
                 lines.extend(branch.map(|b| fit(Line::from(b), columns[0])));
@@ -663,25 +702,50 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                     Cell::from(fit(window, columns[2])),
                 ]
             };
-            if codex {
-                cells.push(codex_cell);
+            if compact && agents {
+                let width = *columns.last().unwrap();
+                let mut lines = Vec::new();
+                for (enabled, provider, counts, unread_count) in [
+                    (codex, "Codex", codex_counts, codex_unread),
+                    (claude, "Claude", claude_counts, claude_unread),
+                ] {
+                    if enabled {
+                        let prefix = format!("{provider:<6} ");
+                        let mut line = Line::from(prefix.clone());
+                        line.spans.extend(
+                            agent_status(counts, width.saturating_sub(prefix.len()), unread_count)
+                                .spans,
+                        );
+                        lines.push(fit(line, width));
+                    }
+                }
+                cells.push(Cell::from(Text::from(lines)));
+            } else if !compact {
+                if codex {
+                    cells.push(Cell::from(agent_status(
+                        codex_counts,
+                        columns[cells.len()],
+                        codex_unread,
+                    )));
+                }
+                if claude {
+                    cells.push(Cell::from(agent_status(
+                        claude_counts,
+                        columns[cells.len()],
+                        claude_unread,
+                    )));
+                }
             }
             Row::new(cells).height(if compact { 2 } else { 1 })
         })
         .collect::<Vec<_>>();
     let table = Table::new(items, widths)
         .header(Row::new(headers).style(Style::default().fg(Color::DarkGray)))
-        .column_spacing(1)
-        .block(block(
-            format!(
-                " {} · 任务 / {} ",
-                safe(app.project.as_deref().unwrap_or("—")),
-                safe(&app.filters[1])
-            ),
-            app.focus == 1,
-        ))
+        .column_spacing(column_spacing)
+        .block(panel)
         .row_highlight_style(highlight(app.focus == 1))
-        .highlight_symbol("› ");
+        .highlight_symbol(highlight_symbol)
+        .highlight_spacing(ratatui::widgets::HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(
         tasks
             .iter()
@@ -689,11 +753,64 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_stateful_widget(table, area, &mut state);
 }
+fn agent_status(
+    counts: std::collections::BTreeMap<(u8, String), (usize, Style)>,
+    width: usize,
+    unread_count: usize,
+) -> Line<'static> {
+    let marker = unread(unread_count);
+    let marker_width = Line::from(marker.clone()).width();
+    let mut line = agent_summary(counts, width.saturating_sub(marker_width));
+    line.spans.push(marker);
+    fit(line, width)
+}
+
+fn agent_summary(
+    counts: std::collections::BTreeMap<(u8, String), (usize, Style)>,
+    width: usize,
+) -> Line<'static> {
+    let total: usize = counts.values().map(|(count, _)| count).sum();
+    let mut spans = Vec::new();
+    let mut shown = 0;
+    for ((_, label), (count, style)) in counts {
+        let mut next = spans.clone();
+        if !next.is_empty() {
+            next.push(Span::raw(" · "));
+        }
+        next.push(Span::styled(safe(&format!("{label} {count}")), style));
+        let remaining = total - shown - count;
+        let suffix = if remaining > 0 {
+            format!(" · +{remaining}")
+        } else {
+            String::new()
+        };
+        if Line::from(next.clone()).width() + Line::from(suffix.as_str()).width() > width {
+            if spans.is_empty() {
+                let mut line = fit(
+                    Line::from(next),
+                    width.saturating_sub(Line::from(suffix.as_str()).width()),
+                );
+                line.spans.push(Span::raw(suffix));
+                return fit(line, width);
+            }
+            spans.push(Span::raw(format!(" · +{}", total - shown)));
+            return fit(Line::from(spans), width);
+        }
+        spans = next;
+        shown += count;
+    }
+    Line::from(spans)
+}
+
 fn status_style(thread: &crate::codex::Thread, stale: bool) -> Style {
+    priority_style(thread.priority(), stale)
+}
+
+fn priority_style(priority: u8, stale: bool) -> Style {
     Style::default().fg(if stale {
         Color::DarkGray
     } else {
-        match thread.priority() {
+        match priority {
             0 => Color::Yellow,
             1 => Color::Red,
             2 => Color::Cyan,
@@ -702,19 +819,97 @@ fn status_style(thread: &crate::codex::Thread, stale: bool) -> Style {
     })
 }
 
+fn claude_sessions<'a>(
+    snapshot: &'a data::Snapshot,
+    project: &str,
+    path: Option<&std::path::Path>,
+) -> Vec<&'a crate::claude::Session> {
+    let mut sessions: Vec<_> = snapshot
+        .claude
+        .iter()
+        .filter(|session| {
+            session
+                .key()
+                .and_then(|key| snapshot.claude_associations.get(&key))
+                .is_some_and(|(owner, task)| {
+                    owner == project && path.is_none_or(|path| path == task)
+                })
+        })
+        .collect();
+    sessions.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id().cmp(&b.id())));
+    sessions
+}
+
+fn claude_style(session: &crate::claude::Session, snapshot: &data::Snapshot) -> Style {
+    priority_style(
+        session.priority(),
+        snapshot.claude_error.is_some() || is_stale(snapshot.claude_checked),
+    )
+}
+
+enum ObservedSession<'a> {
+    Codex(&'a crate::codex::Thread),
+    Claude(&'a crate::claude::Session),
+}
+impl ObservedSession<'_> {
+    fn id(&self) -> &str {
+        match self {
+            Self::Codex(thread) => &thread.id,
+            Self::Claude(session) => session.id().unwrap_or(""),
+        }
+    }
+    fn title(&self) -> &str {
+        match self {
+            Self::Codex(t) => t.title(),
+            Self::Claude(s) => s.title(),
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            Self::Codex(t) => format!("Codex {}", t.label()),
+            Self::Claude(s) => format!("Claude {}", s.label()),
+        }
+    }
+    fn priority(&self) -> u8 {
+        match self {
+            Self::Codex(t) => t.priority(),
+            Self::Claude(s) => s.priority(),
+        }
+    }
+    fn stale(&self, snapshot: &data::Snapshot) -> bool {
+        match self {
+            Self::Codex(_) => snapshot.codex_error.is_some() || is_stale(snapshot.codex_checked),
+            Self::Claude(_) => snapshot.claude_error.is_some() || is_stale(snapshot.claude_checked),
+        }
+    }
+}
+
 // 只读取全局快照；不使用项目选择、搜索、历史分页或焦点状态。
 // 返回带会话标记的行和会话总数，布局据此收缩空监控。
 fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
     let snapshot = &app.snapshot;
-    let stale = snapshot.codex_error.is_some() || is_stale(snapshot.codex_checked);
     let mut grouped = std::collections::BTreeMap::<_, Vec<_>>::new();
     for thread in &snapshot.threads {
         if let Some(owner) = snapshot.associations.get(&thread.id) {
-            grouped.entry(owner).or_default().push(thread);
+            grouped
+                .entry(owner)
+                .or_default()
+                .push(ObservedSession::Codex(thread));
+        }
+    }
+    for session in &snapshot.claude {
+        if let Some(owner) = session
+            .key()
+            .and_then(|key| snapshot.claude_associations.get(&key))
+        {
+            grouped
+                .entry(owner)
+                .or_default()
+                .push(ObservedSession::Claude(session));
         }
     }
     for threads in grouped.values_mut() {
-        threads.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id.cmp(&b.id)));
+        threads.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id().cmp(b.id())));
     }
     let mut projects: Vec<_> = snapshot
         .repos
@@ -780,7 +975,15 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                     .filter(|other| safe(other.title()) == title)
                     .count()
                     > 1;
-                let label = format!("● {}", safe(&thread.label()));
+                let label = format!(
+                    "● {}{}",
+                    safe(&thread.label()),
+                    if thread.stale(snapshot) {
+                        "（过期）"
+                    } else {
+                        ""
+                    }
+                );
                 let padding = 12_usize
                     .saturating_sub(Line::from(label.as_str()).width())
                     .max(2);
@@ -799,7 +1002,7 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                     ),
                     Span::styled(
                         format!("{label}{}", " ".repeat(padding)),
-                        status_style(thread, stale),
+                        priority_style(thread.priority(), thread.stale(snapshot)),
                     ),
                     Span::raw(if title.is_empty() {
                         "未命名会话".into()
@@ -811,7 +1014,7 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                     spans.push(Span::styled(
                         format!(
                             " · {}",
-                            safe(&thread.id).chars().take(8).collect::<String>()
+                            safe(thread.id()).chars().take(8).collect::<String>()
                         ),
                         Style::default().fg(Color::DarkGray),
                     ));
@@ -826,29 +1029,39 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
 fn monitor(frame: &mut Frame, area: Rect, app: &App) {
     let snapshot = &app.snapshot;
     let (mut rows, total) = monitor_rows(app);
-    let panel = block(
-        format!(
-            " 全局 Codex · {}{} ",
-            total,
-            if codex_stale(app) {
-                " · 状态过期"
-            } else {
-                ""
-            }
-        ),
-        false,
-    );
+    let mut health = String::new();
+    for (name, error, checked) in [
+        ("Codex", &snapshot.codex_error, snapshot.codex_checked),
+        ("Claude", &snapshot.claude_error, snapshot.claude_checked),
+    ] {
+        if error.is_some() {
+            health.push_str(&format!(" · {name} 不可用"));
+        } else if is_stale(checked) {
+            health.push_str(&format!(" · {name} 状态过期"));
+        }
+    }
+    let panel = block(format!(" 全局 Agent · {total}{health} "), false);
     let inner = panel.inner(area);
     frame.render_widget(panel, area);
     if rows.is_empty() {
         frame.render_widget(
-            Paragraph::new(if snapshot.codex_error.is_some() {
-                "Codex 不可用，详见底部状态"
-            } else if snapshot.codex_checked.is_none() {
-                "正在读取全局会话…"
-            } else {
-                "暂无已加载的关联会话"
-            })
+            Paragraph::new(format!(
+                "{}\n{}",
+                if snapshot.codex_error.is_some() {
+                    "Codex 不可用，详见底部状态"
+                } else if snapshot.codex_checked.is_none() {
+                    "正在读取全局会话…"
+                } else {
+                    "暂无已加载的关联会话"
+                },
+                if snapshot.claude_error.is_some() {
+                    "Claude 不可用，详见任务详情"
+                } else if snapshot.claude_checked.is_none() {
+                    "正在读取 Claude 状态…"
+                } else {
+                    "Claude 暂无关联会话"
+                }
+            ))
             .style(Style::default().fg(Color::DarkGray))
             .wrap(Wrap { trim: false }),
             inner,
@@ -942,6 +1155,16 @@ fn detail_header(app: &App) -> Vec<Line<'static>> {
 
 fn sessions(frame: &mut Frame, area: Rect, app: &App) {
     let sessions = app.threads();
+    let claude = app
+        .task()
+        .map(|task| {
+            claude_sessions(
+                &app.snapshot,
+                app.project.as_deref().unwrap_or_default(),
+                Some(&task.path),
+            )
+        })
+        .unwrap_or_default();
     let panel = block(
         format!(
             " 任务详情 · i {}信息 · PgUp/PgDn ",
@@ -971,14 +1194,15 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
     .split(inner);
     frame.render_widget(
         Paragraph::new(format!(
-            "Codex {}{} · {} 个会话",
+            "Codex {}{} · {} 个会话 / Claude {}",
             if app.history { "历史" } else { "已加载" },
             if app.history && app.descendants {
                 "+子目录"
             } else {
                 ""
             },
-            sessions.len()
+            sessions.len(),
+            claude.len()
         ))
         .style(Style::default().fg(Color::DarkGray)),
         portions[0],
@@ -1004,6 +1228,35 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
         );
     }
     let mut lines = Vec::new();
+    if let Some(error) = &app.snapshot.claude_error {
+        lines.push(Line::styled(
+            format!("Claude 不可用 / 旧状态过期：{}", safe(error)),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    if let Some(error) = &app.snapshot.claude_notification_error {
+        lines.push(Line::styled(
+            safe(error),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    for session in claude {
+        let stale = app.snapshot.claude_error.is_some() || is_stale(app.snapshot.claude_checked);
+        lines.push(Line::styled(
+            format!(
+                "Claude · {} · {}{}",
+                safe(session.title()),
+                safe(&session.label()),
+                if stale { "（状态过期）" } else { "" }
+            ),
+            claude_style(session, &app.snapshot),
+        ));
+        if app.metadata {
+            lines.push(field("ID", session.id().unwrap_or("未知")));
+            lines.push(field("类型", &session.kind));
+            lines.push(field("目录", &session.cwd.display().to_string()));
+        }
+    }
     if let Some(thread) = selected.map(|index| sessions[index]) {
         let stale = app.snapshot.codex_error.is_some() || is_stale(app.snapshot.codex_checked);
         lines.push(Line::from(vec![
@@ -1066,7 +1319,7 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
         }
     } else {
         lines.push(Line::styled(
-            "暂无匹配会话",
+            "暂无匹配的 Codex 会话",
             Style::default().fg(Color::DarkGray),
         ));
     }
@@ -1660,7 +1913,7 @@ mod tests {
                 selection.update(width - 1, height - 1);
                 let copied = selection.text();
                 assert!(!copied.is_empty());
-                for background in ["Console", "全局 Codex", "│", "┌", "┘"] {
+                for background in ["Console", "全局 Agent", "│", "┌", "┘"] {
                     assert!(!copied.contains(background), "{copied}");
                 }
             }
@@ -1889,6 +2142,234 @@ mod tests {
     }
 
     #[test]
+    fn task_provider_columns_split_hide_and_stack_on_narrow_screens() {
+        let mut app = fixture();
+        app.project = Some("alpha".into());
+        app.task = Some("/alpha".into());
+        app.snapshot.claude_checked = Some(Instant::now());
+        let session: crate::claude::Session = serde_json::from_value(json!({
+            "cwd":"/alpha", "kind":"interactive", "startedAt":1,
+            "sessionId":"claude", "status":"busy"
+        }))
+        .unwrap();
+        app.snapshot
+            .claude_associations
+            .insert(session.key().unwrap(), ("alpha".into(), "/alpha".into()));
+        app.snapshot.claude.push(session);
+        for width in 80..145 {
+            let buffer = render(&app, width, 10, tasks);
+            let codex_x = (0..width)
+                .find(|&x| buffer[(x, 1)].symbol() == "C")
+                .unwrap();
+            let claude_x = (codex_x + 1..width)
+                .find(|&x| buffer[(x, 1)].symbol() == "C")
+                .unwrap();
+            assert_eq!(
+                claude_x - codex_x - 1,
+                width - 1 - claude_x,
+                "width={width}"
+            );
+            assert_eq!(buffer[(codex_x, 2)].symbol(), "空");
+            assert_eq!(buffer[(claude_x, 2)].symbol(), "运");
+        }
+        let narrow_buffer = render(&app, 70, 10, tasks);
+        let codex_status_x = (0..70)
+            .find(|&x| narrow_buffer[(x, 2)].symbol() == "空")
+            .unwrap();
+        let claude_status_x = (0..70)
+            .find(|&x| narrow_buffer[(x, 3)].symbol() == "运")
+            .unwrap();
+        assert_eq!(codex_status_x, claude_status_x);
+        let wide = text(&render(&app, 100, 10, tasks));
+        let header = wide.lines().find(|line| line.contains("Codex")).unwrap();
+        assert!(header.contains("Claude"), "{wide}");
+        let row = wide.lines().find(|line| line.contains("空闲 1")).unwrap();
+        assert!(row.contains("运行中 1"), "{wide}");
+        assert!(!row.contains("Codex") && !row.contains("Claude"));
+        let narrow = text(&render(&app, 70, 10, tasks));
+        assert!(
+            narrow.lines().any(|line| line.contains("Codex  空闲 1")),
+            "{narrow}"
+        );
+        assert!(
+            narrow.lines().any(|line| line.contains("Claude 运行中 1")),
+            "{narrow}"
+        );
+        app.snapshot.threads.clear();
+        let only_claude = text(&render(&app, 100, 10, tasks));
+        assert!(!only_claude.contains("Codex"));
+        assert!(only_claude.contains("Claude") && only_claude.contains("运行中 1"));
+        app.snapshot.claude.clear();
+        let neither = text(&render(&app, 100, 10, tasks));
+        assert!(
+            !neither.contains("Codex") && !neither.contains("Claude") && !neither.contains("Agent")
+        );
+    }
+
+    #[test]
+    fn unread_stays_in_provider_columns_after_sessions_exit() {
+        let mut app = fixture();
+        app.project = Some("alpha".into());
+        app.task = Some("/alpha".into());
+        app.snapshot.threads.clear();
+        for claude in [None, None, Some(twig_cli::notification::ClaudeState::Idle)] {
+            app.notifications.receive(
+                super::super::notifications::Completion {
+                    claude,
+                    message: false,
+                    project: "alpha".into(),
+                    task: "main".into(),
+                    path: "/alpha".into(),
+                },
+                None,
+            );
+        }
+        let wide = render(&app, 120, 10, tasks);
+        let codex_x = (0..120).find(|&x| wide[(x, 1)].symbol() == "C").unwrap();
+        let claude_x = (codex_x + 1..120)
+            .find(|&x| wide[(x, 1)].symbol() == "C")
+            .unwrap();
+        let segment = |mut x, end| {
+            let mut value = String::new();
+            while x < end {
+                let symbol = wide[(x, 2)].symbol();
+                value.push_str(symbol);
+                x += Span::raw(symbol).width().max(1) as u16;
+            }
+            value
+        };
+        assert!(!segment(0, codex_x).contains("未读"));
+        assert!(segment(codex_x, claude_x).contains("[未读 2]"));
+        assert!(segment(claude_x, 120).contains("[未读 1]"));
+        let narrow = text(&render(&app, 70, 10, tasks));
+        assert!(
+            narrow
+                .lines()
+                .any(|line| line.contains("Codex") && line.contains("[未读 2]")),
+            "{narrow}"
+        );
+        assert!(
+            narrow
+                .lines()
+                .any(|line| line.contains("Claude") && line.contains("[未读 1]")),
+            "{narrow}"
+        );
+        assert_eq!(app.notifications.count("alpha", None), 3);
+        app.notifications
+            .read("alpha", std::path::Path::new("/alpha"));
+        let cleared = text(&render(&app, 120, 10, tasks));
+        assert!(
+            !cleared.contains("未读") && !cleared.contains("Codex") && !cleared.contains("Claude")
+        );
+    }
+
+    #[test]
+    fn mixed_summary_prioritizes_attention_and_counts_hidden_sessions() {
+        let counts = std::collections::BTreeMap::from([
+            ((3, "Claude 空闲".into()), (2, Style::default())),
+            ((0, "Codex 等待审批".into()), (1, Style::default())),
+        ]);
+        let line = agent_summary(counts, 24);
+        let output: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(output.contains("Codex 等待审批"), "{output}");
+        assert!(output.contains("+2"), "{output}");
+        assert!(!output.contains("Claude"), "{output}");
+        assert!(line.width() <= 24);
+    }
+
+    #[test]
+    fn absent_provider_does_not_mark_healthy_provider_stale() {
+        let mut app = fixture();
+        app.snapshot.claude_error = Some("not installed".into());
+        let output = text(&render(&app, 100, 20, monitor));
+        assert!(output.contains("Claude 不可用"));
+        assert!(!output.contains("状态过期"));
+        assert!(!output.contains("（过期）"));
+    }
+
+    #[test]
+    fn background_claude_order_does_not_depend_on_cli_order() {
+        let mut app = fixture();
+        for id in ["job-z", "job-a"] {
+            let session: crate::claude::Session = serde_json::from_value(json!({
+                "cwd":"/alpha", "kind":"background", "startedAt":1,
+                "id":id, "state":"working"
+            }))
+            .unwrap();
+            app.snapshot
+                .claude_associations
+                .insert(session.key().unwrap(), ("alpha".into(), "/alpha".into()));
+            app.snapshot.claude.push(session);
+        }
+        let ids: Vec<_> = claude_sessions(&app.snapshot, "alpha", None)
+            .iter()
+            .map(|s| s.id().unwrap())
+            .collect();
+        assert_eq!(ids, ["job-a", "job-z"]);
+        let before = render(&app, 100, 20, monitor);
+        let output = text(&before);
+        assert!(output.find("job-a").unwrap() < output.find("job-z").unwrap());
+        app.snapshot.claude.reverse();
+        assert_eq!(before, render(&app, 100, 20, monitor));
+    }
+
+    #[test]
+    fn claude_monitor_and_details_keep_multiple_sessions_and_provider_freshness() {
+        let mut app = fixture();
+        app.snapshot.claude_checked = Some(Instant::now());
+        for (id, status) in [("claude-one", "busy"), ("claude-two", "waiting")] {
+            let session: crate::claude::Session = serde_json::from_value(json!({
+                "cwd":"/alpha", "kind":"interactive", "startedAt":1,
+                "sessionId":id, "name":id, "status":status,
+                "waitingFor":"permission prompt"
+            }))
+            .unwrap();
+            app.snapshot
+                .claude_associations
+                .insert(session.key().unwrap(), ("alpha".into(), "/alpha".into()));
+            app.snapshot.claude.push(session);
+        }
+        let before = render(&app, 100, 20, monitor);
+        let output = text(&before);
+        assert!(output.contains("claude-one") && output.contains("claude-two"));
+        assert!(output.contains("Claude 等待处理"));
+        app.history = true;
+        app.filters = ["absent".into(), "absent".into(), "absent".into()];
+        assert_eq!(before, render(&app, 100, 20, monitor));
+        app.filters = Default::default();
+        app.history = false;
+        app.project = Some("alpha".into());
+        app.task = Some("/alpha".into());
+        let detail = text(&render(&app, 100, 30, sessions));
+        assert!(detail.contains("claude-one") && detail.contains("claude-two"));
+        app.snapshot.claude_notification_error = Some("Claude 提醒保存失败：disk full".into());
+        let output = text(&render(&app, 100, 20, monitor));
+        assert!(!output.contains("过期"));
+        assert!(text(&render(&app, 100, 30, sessions)).contains("提醒保存失败"));
+        let threads = std::mem::take(&mut app.snapshot.threads);
+        let selected = app.thread.take();
+        let detail = text(&render(&app, 100, 30, sessions));
+        assert!(detail.contains("claude-one"));
+        assert!(detail.contains("暂无匹配的 Codex 会话"));
+        app.snapshot.threads = threads;
+        app.thread = selected;
+        app.snapshot.claude_error = Some("mock unavailable".into());
+        let output = text(&render(&app, 100, 20, monitor));
+        assert!(
+            output
+                .lines()
+                .any(|line| line.contains("Claude") && line.contains("过期"))
+        );
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.contains("● Codex") && line.contains("过期"))
+        );
+        assert!(text(&render(&app, 100, 30, sessions)).contains("mock unavailable"));
+        assert!(text(&render(&app, 55, 5, monitor)).contains("另有"));
+    }
+
+    #[test]
     fn monitor_marks_overflow_staleness_and_unavailable_service() {
         let mut app = fixture();
         let output = text(&render(&app, 55, 6, monitor));
@@ -1896,7 +2377,7 @@ mod tests {
         assert!(output.contains("另有 1 个会话"));
         assert!(!output.contains("alpha 会话"));
         app.snapshot.codex_error = Some("offline".into());
-        assert!(text(&render(&app, 55, 8, monitor)).contains("状态过期"));
+        assert!(text(&render(&app, 55, 8, monitor)).contains("Codex 不可用"));
         app.snapshot.threads.clear();
         assert!(text(&render(&app, 55, 8, monitor)).contains("Codex 不可用"));
     }
@@ -2025,7 +2506,7 @@ mod tests {
                     super::draw(frame, app)
                 }));
                 assert!(
-                    output.contains("全局 Codex"),
+                    output.contains("全局 Agent"),
                     "{width}x{height}, focus {focus}"
                 );
             }
