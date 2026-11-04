@@ -572,14 +572,14 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
         || app.notifications.source_count(project, None, true) > 0;
     let agents = codex || claude;
     let compact = area.width < if agents { 80 } else { 50 };
-    let (mut headers, widths): (Vec<_>, Vec<_>) = match (compact, codex, claude) {
-        (true, false, false) => (vec!["任务", "Git / 窗口"], vec![55, 45]),
-        (true, _, _) => (vec!["任务", "Git / 窗口", "Agent"], vec![35, 30, 35]),
-        (false, true, true) => (vec!["任务", "Git", "窗口"], vec![28, 20, 12, 20, 20]),
-        (false, false, false) => (vec!["任务", "Git", "窗口"], vec![45, 40, 15]),
-        (false, _, _) => (vec!["任务", "Git", "窗口"], vec![34, 28, 12, 26]),
+    let mut headers = if compact {
+        vec!["任务", "Git / 窗口"]
+    } else {
+        vec!["任务", "Git", "窗口"]
     };
-    if !compact {
+    if compact && agents {
+        headers.push("Agent");
+    } else if !compact {
         if codex {
             headers.push("Codex");
         }
@@ -587,24 +587,44 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             headers.push("Claude");
         }
     }
-    let widths: Vec<_> = if !compact && codex && claude {
-        // 扣除边框、选择箭头及四个列间隔，按字符分配两个等宽状态列。
-        let available = area.width.saturating_sub(8);
-        let agent_width = available / 5;
-        vec![
+    let panel = block(
+        format!(" {} · 任务 / {} ", safe(project), safe(&app.filters[1])),
+        app.focus == 1,
+    );
+    let highlight_symbol = "› ";
+    let column_spacing = 1;
+    let content_width = panel
+        .inner(area)
+        .width
+        .saturating_sub(Line::from(highlight_symbol).width() as u16);
+    let available = content_width.saturating_sub(column_spacing * (headers.len() as u16 - 1));
+    // 两个来源列按相同字符数分配（各 20%），取整余量留给任务列。
+    let share = |percent| (u32::from(available) * percent / 100) as u16;
+    let widths = match (compact, codex, claude) {
+        (false, true, true) => vec![
             Constraint::Fill(1),
-            Constraint::Length(available / 5),
-            Constraint::Length(available * 12 / 100),
-            Constraint::Length(agent_width),
-            Constraint::Length(agent_width),
-        ]
-    } else {
-        widths.into_iter().map(Constraint::Percentage).collect()
+            Constraint::Length(share(20)),
+            Constraint::Length(share(12)),
+            Constraint::Length(share(20)),
+            Constraint::Length(share(20)),
+        ],
+        _ => {
+            let percentages = match (compact, agents) {
+                (true, false) => vec![55, 45],
+                (true, true) => vec![35, 30, 35],
+                (false, false) => vec![45, 40, 15],
+                (false, true) => vec![34, 28, 12, 26],
+            };
+            percentages
+                .into_iter()
+                .map(Constraint::Percentage)
+                .collect()
+        }
     };
-    // 与 Table 相同的列分配，用于按列宽加省略号；扣除边框和选中箭头。
+    // 内容截断与 Table 共用边框、选择区和列间隔的计算依据。
     let columns: Vec<usize> = Layout::horizontal(widths.clone())
-        .spacing(1)
-        .split(Rect::new(0, 0, area.width.saturating_sub(4), 1))
+        .spacing(column_spacing)
+        .split(Rect::new(0, 0, content_width, 1))
         .iter()
         .map(|r| usize::from(r.width))
         .collect();
@@ -717,17 +737,10 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
         .collect::<Vec<_>>();
     let table = Table::new(items, widths)
         .header(Row::new(headers).style(Style::default().fg(Color::DarkGray)))
-        .column_spacing(1)
-        .block(block(
-            format!(
-                " {} · 任务 / {} ",
-                safe(app.project.as_deref().unwrap_or("—")),
-                safe(&app.filters[1])
-            ),
-            app.focus == 1,
-        ))
+        .column_spacing(column_spacing)
+        .block(panel)
         .row_highlight_style(highlight(app.focus == 1))
-        .highlight_symbol("› ")
+        .highlight_symbol(highlight_symbol)
         .highlight_spacing(ratatui::widgets::HighlightSpacing::Always);
     let mut state = TableState::default().with_selected(
         tasks
@@ -819,11 +832,7 @@ fn claude_sessions<'a>(
                 })
         })
         .collect();
-    sessions.sort_by(|a, b| {
-        a.priority()
-            .cmp(&b.priority())
-            .then(a.session_id.cmp(&b.session_id))
-    });
+    sessions.sort_by(|a, b| a.priority().cmp(&b.priority()).then(a.id().cmp(&b.id())));
     sessions
 }
 
@@ -842,11 +851,7 @@ impl ObservedSession<'_> {
     fn id(&self) -> &str {
         match self {
             Self::Codex(thread) => &thread.id,
-            Self::Claude(session) => session
-                .session_id
-                .as_deref()
-                .or(session.id.as_deref())
-                .unwrap_or(""),
+            Self::Claude(session) => session.id().unwrap_or(""),
         }
     }
     fn title(&self) -> &str {
@@ -1243,14 +1248,7 @@ fn sessions(frame: &mut Frame, area: Rect, app: &App) {
             claude_style(session, &app.snapshot),
         ));
         if app.metadata {
-            lines.push(field(
-                "ID",
-                session
-                    .session_id
-                    .as_deref()
-                    .or(session.id.as_deref())
-                    .unwrap_or("未知"),
-            ));
+            lines.push(field("ID", session.id().unwrap_or("未知")));
             lines.push(field("类型", &session.kind));
             lines.push(field("目录", &session.cwd.display().to_string()));
         }
@@ -2283,6 +2281,32 @@ mod tests {
         assert!(output.contains("Claude 不可用"));
         assert!(!output.contains("状态过期"));
         assert!(!output.contains("（过期）"));
+    }
+
+    #[test]
+    fn background_claude_order_does_not_depend_on_cli_order() {
+        let mut app = fixture();
+        for id in ["job-z", "job-a"] {
+            let session: crate::claude::Session = serde_json::from_value(json!({
+                "cwd":"/alpha", "kind":"background", "startedAt":1,
+                "id":id, "state":"working"
+            }))
+            .unwrap();
+            app.snapshot
+                .claude_associations
+                .insert(session.key().unwrap(), ("alpha".into(), "/alpha".into()));
+            app.snapshot.claude.push(session);
+        }
+        let ids: Vec<_> = claude_sessions(&app.snapshot, "alpha", None)
+            .iter()
+            .map(|s| s.id().unwrap())
+            .collect();
+        assert_eq!(ids, ["job-a", "job-z"]);
+        let before = render(&app, 100, 20, monitor);
+        let output = text(&before);
+        assert!(output.find("job-a").unwrap() < output.find("job-z").unwrap());
+        app.snapshot.claude.reverse();
+        assert_eq!(before, render(&app, 100, 20, monitor));
     }
 
     #[test]

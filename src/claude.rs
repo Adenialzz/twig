@@ -19,18 +19,26 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn key(&self) -> Option<String> {
+    fn identity(&self) -> Option<(&'static str, &str)> {
         // 不使用 PID 作为会话身份；后台尚未分配 UUID 时用其 job ID。
         self.session_id
-            .as_ref()
+            .as_deref()
             .filter(|id| !id.is_empty())
-            .map(|id| format!("session:{id}"))
+            .map(|id| ("session", id))
             .or_else(|| {
                 self.id
-                    .as_ref()
+                    .as_deref()
                     .filter(|id| !id.is_empty())
-                    .map(|id| format!("job:{id}"))
+                    .map(|id| ("job", id))
             })
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        self.identity().map(|(_, id)| id)
+    }
+
+    pub fn key(&self) -> Option<String> {
+        self.identity().map(|(kind, id)| format!("{kind}:{id}"))
     }
 
     pub fn status(&self) -> Option<ClaudeState> {
@@ -65,8 +73,7 @@ impl Session {
         self.name
             .as_deref()
             .filter(|name| !name.is_empty())
-            .or(self.session_id.as_deref())
-            .or(self.id.as_deref())
+            .or_else(|| self.id())
             .unwrap_or("未命名会话")
     }
 
@@ -116,7 +123,8 @@ impl Observer {
         self.previous.clear();
     }
 
-    /// 仅比较连续成功采集。首次发现、重启、失联或消失均不推断完成。
+    /// 仅在连续成功采集中离开运行中或进入等待处理时提醒。
+    /// 首次发现、重启、失联、消失或未知状态均不推断完成。
     /// 写入成功后才推进本会话水位，失败重试使用相同事件 ID。
     pub fn observe(
         &mut self,
@@ -136,8 +144,8 @@ impl Observer {
                 && cwd == &current.0
                 && *started == current.1
                 && let Some(after) = current.2
-                && *before != after
-                && after != ClaudeState::Busy
+                && ((*before == ClaudeState::Busy && after != ClaudeState::Busy)
+                    || (after == ClaudeState::Waiting && *before != ClaudeState::Waiting))
             {
                 let id = format!("claude-state:{}:{}", self.generation, self.sequence);
                 emit(session, after, &id)?;
@@ -178,6 +186,76 @@ mod tests {
         assert_eq!(s.status(), Some(ClaudeState::Done));
         s.state = Some("new-state".into());
         assert_eq!(s.status(), None);
+    }
+
+    #[test]
+    fn only_running_exits_and_new_waits_notify() {
+        use ClaudeState::{Done, Failed, Idle, Stopped, Waiting};
+        for (before, after, expected) in [
+            ("idle", "done", None),
+            ("done", "idle", None),
+            ("failed", "stopped", None),
+            ("waiting", "idle", None),
+            ("waiting", "done", None),
+            ("waiting", "failed", None),
+            ("busy", "busy", None),
+            ("waiting", "waiting", None),
+            ("idle", "busy", None),
+            ("busy", "idle", Some(Idle)),
+            ("busy", "done", Some(Done)),
+            ("busy", "failed", Some(Failed)),
+            ("busy", "stopped", Some(Stopped)),
+            ("busy", "waiting", Some(Waiting)),
+            ("idle", "waiting", Some(Waiting)),
+            ("done", "waiting", Some(Waiting)),
+            ("failed", "waiting", Some(Waiting)),
+            ("busy", "unknown", None),
+            ("unknown", "waiting", None),
+        ] {
+            let sample = |status: &str| {
+                let mut sample = session(status);
+                if matches!(status, "done" | "failed" | "stopped") {
+                    sample.status = None;
+                    sample.state = Some(status.into());
+                }
+                sample
+            };
+            let mut observer = Observer::default();
+            observer
+                .observe(&[sample(before)], |_, _, _| unreachable!())
+                .unwrap();
+            let mut events = Vec::new();
+            observer
+                .observe(&[sample(after)], |_, state, _| {
+                    events.push(state);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                events,
+                expected.into_iter().collect::<Vec<_>>(),
+                "{before} -> {after}"
+            );
+            observer
+                .observe(&[sample(after)], |_, _, _| unreachable!())
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn display_and_identity_use_the_same_nonempty_id() {
+        let mut s = session("idle");
+        s.id = Some("job-one".into());
+        assert_eq!(s.id(), Some("one"));
+        assert_eq!(s.key().as_deref(), Some("session:one"));
+        s.session_id = Some(String::new());
+        assert_eq!(s.id(), Some("job-one"));
+        assert_eq!(s.title(), "job-one");
+        assert_eq!(s.key().as_deref(), Some("job:job-one"));
+        s.id = None;
+        assert_eq!(s.id(), None);
+        assert_eq!(s.key(), None);
+        assert_eq!(s.title(), "未命名会话");
     }
 
     #[test]
@@ -324,6 +402,22 @@ mod tests {
         ] {
             assert!(read(Command::new(&executable).env("REPLY", reply)).is_err());
         }
+        for field in ["cwd", "kind", "startedAt"] {
+            let mut invalid = serde_json::to_value(session("busy")).unwrap();
+            invalid.as_object_mut().unwrap().remove(field);
+            let reply = json!([session("idle"), invalid]).to_string();
+            assert!(read(Command::new(&executable).env("REPLY", reply)).is_err());
+        }
+        let duplicate = json!([session("idle"), session("busy")]).to_string();
+        assert!(read(Command::new(&executable).env("REPLY", duplicate)).is_err());
+        let mut extended = serde_json::to_value(session("busy")).unwrap();
+        extended["newField"] = json!(true);
+        assert_eq!(
+            read(Command::new(&executable).env("REPLY", json!([extended]).to_string()))
+                .unwrap()
+                .len(),
+            1
+        );
         fs::write(&executable, "#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
         let result = std::thread::spawn(move || {
             crate::console::query::install(Arc::new(AtomicBool::new(false)));
