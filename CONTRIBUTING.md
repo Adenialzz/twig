@@ -116,3 +116,13 @@ feat(memory): 新增持久化记忆能力
 ```
 
 **原则：开发分支允许灵活、细粒度提交；主分支保持简洁、清晰、可追溯的提交历史。**
+
+## 持续集成
+
+[CI 工作流](.github/workflows/ci.yml) 在 PR、推送到 main 和手动触发时运行，文档改动也执行。`check`、`terminal`、`agent` 均覆盖 Ubuntu 24.04 和 macOS 26，共六项检查：
+
+- `check`：格式检查、严格 Clippy、Rust 测试和对应平台的服务示例校验。
+- `terminal`：构建 Control Mode example，顺序运行十次隔离 PTY 验收，遇错立即失败。
+- `agent`：固定 Node 22、Python 3.11 和 Codex 0.164.0，构建正式二进制，使用隔离 Twig 后台、app-server、本地固定模型和模拟飞书验收，不使用真实用户凭证或会话。
+
+Linux 从源码构建 tmux 3.8，macOS 通过 Homebrew 安装。每项 Job 限时 20 分钟，Agent 验收步骤限时 5 分钟，失败日志保留 7 天。同分支或 PR 的新运行取消旧运行，一个平台失败不取消其他平台检查；当前不包含自动发布。实际结果以对应提交的 CI 为准，本地运行和隔离边界见 [独立验收入口](examples/README.md)。
