@@ -1391,6 +1391,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn copy_uses_tmux_wrap_flags_for_history_and_hard_breaks() {
+        let (server, mut output) = Server::stream();
+        let mut client = Client::connect(&server.args).unwrap();
+        client.command("refresh-client -C 20,10").unwrap();
+        let text = "0123456789012345678 中文long text\r\n01234567890123456789\r\nhard break\r\n\r\n    code";
+        write!(output, "{text}\r\nREADY").unwrap();
+        output.flush().unwrap();
+        server.wait_for("%0", "READY");
+        for in_history in [false, true] {
+            if in_history {
+                write!(output, "{}BOTTOM", "\r\nfiller".repeat(20)).unwrap();
+                output.flush().unwrap();
+                server.wait_for("%0", "BOTTOM");
+            }
+            let pane = snapshot(&mut client, "%0", if in_history { 999 } else { 0 })
+                .unwrap()
+                .unwrap();
+            let ready = pane
+                .parser
+                .text()
+                .lines()
+                .position(|line| line == "READY")
+                .unwrap() as u16;
+            for reverse in [false, true] {
+                let start = (pane.rect.x, pane.rect.y);
+                let end = (pane.rect.right() - 1, pane.rect.y + ready);
+                let (start, end) = if reverse { (end, start) } else { (start, end) };
+                let mut selection = Selection::new(&pane, start.0, start.1);
+                selection
+                    .capture_history(&mut client, pane.scroll_offset)
+                    .unwrap();
+                selection.update(end.0, end.1);
+                assert_eq!(
+                    selection.text(),
+                    format!("{}\nREADY", text.replace("\r\n", "\n"))
+                );
+            }
+        }
+    }
+
     fn drain_output(client: &mut Client, pane: &mut Pane, needle: &str) {
         let until = Instant::now() + Duration::from_secs(3);
         loop {

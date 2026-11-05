@@ -6,6 +6,8 @@ pub(super) struct Selection {
     pub pane: String,
     pub rect: Rect,
     cells: Vec<Vec<Cell>>,
+    wrapped: Vec<bool>,
+    lengths: Vec<usize>,
     start: (usize, u16),
     end: (usize, u16),
     pub dragging: bool,
@@ -28,6 +30,8 @@ impl Selection {
                         .collect()
                 })
                 .collect(),
+            wrapped: vec![false; usize::from(pane.rect.height)],
+            lengths: vec![usize::from(pane.rect.width); usize::from(pane.rect.height)],
             start: point,
             end: point,
             dragging: true,
@@ -39,12 +43,26 @@ impl Selection {
     }
 
     pub fn capture_history(&mut self, client: &mut Client, offset: usize) -> Result<()> {
-        let rows = client.command(&format!("capture-pane -p -e -N -S - -E - -t {}", self.pane))?;
+        let rows = client.command(&format!(
+            "capture-pane -p -e -N -T -F -S - -E - -t {}",
+            self.pane
+        ))?;
         let mut parser = TerminalState::new(1, self.rect.width, 0);
         let mut cells = Vec::with_capacity(rows.len());
+        self.wrapped.clear();
+        self.lengths.clear();
         for row in rows {
+            let split = row
+                .iter()
+                .position(|&b| b == b' ')
+                .context("Pane 历史缺少行标记")?;
+            self.wrapped.push(row[..split].contains(&b'W'));
+            let row = &row[split + 1..];
             parser.process(b"\r\x1b[2K");
-            parser.process(&row);
+            parser.process(row);
+            let cursor = &parser.term.grid().cursor;
+            self.lengths
+                .push(cursor.point.column.0 + usize::from(cursor.input_needs_wrap));
             cells.push(
                 (0..self.rect.width)
                     .map(|x| parser.cell(0, x).clone())
@@ -183,23 +201,32 @@ impl Selection {
         }
         let start = self.start.min(self.end);
         let end = self.start.max(self.end);
-        (start.0..=end.0)
-            .map(|y| {
-                let mut line = String::new();
-                for x in 0..self.rect.width {
-                    let cell = self.history_cell(y, x);
-                    if self.contains_history(y, x) && !cell.flags.contains(Flags::WIDE_CHAR_SPACER)
-                    {
-                        line.push(cell.c);
-                        if let Some(extra) = cell.zerowidth() {
-                            line.extend(extra);
-                        }
+        let mut text = String::new();
+        for y in start.0..=end.0 {
+            let joined = y < end.0 && self.wrapped[y];
+            let mut line = String::new();
+            for x in 0..self.rect.width {
+                let cell = self.history_cell(y, x);
+                if self.contains_history(y, x)
+                    && usize::from(x) < self.lengths[y]
+                    && !cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                {
+                    line.push(cell.c);
+                    if let Some(extra) = cell.zerowidth() {
+                        line.extend(extra);
                     }
                 }
-                line.trim_end_matches(' ').to_owned()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            }
+            text.push_str(if joined {
+                &line
+            } else {
+                line.trim_end_matches(' ')
+            });
+            if y < end.0 && !joined {
+                text.push('\n');
+            }
+        }
+        text
     }
 }
 
@@ -227,6 +254,8 @@ mod tests {
                 (0..8).map(|x| parser.cell(0, x).clone()).collect()
             })
             .collect();
+        selected.wrapped = vec![false; selected.cells.len()];
+        selected.lengths = vec![8; selected.cells.len()];
         selected.view_top = 8;
         selected.anchor = (8, 1);
         selected.start = selected.anchor;

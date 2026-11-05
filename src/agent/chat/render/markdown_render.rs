@@ -50,6 +50,7 @@ use super::style::table_separator_style;
 use super::terminal_hyperlinks::HyperlinkLine;
 use super::terminal_hyperlinks::annotate_web_urls_in_line;
 use super::terminal_hyperlinks::remap_wrapped_line;
+#[cfg(test)]
 use super::terminal_hyperlinks::visible_lines;
 use super::terminal_hyperlinks::web_destination;
 use super::wrapping::RtOptions;
@@ -69,6 +70,7 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
+#[cfg(test)]
 use ratatui::text::Text;
 use regex_lite::Regex;
 use std::ops::Range;
@@ -285,6 +287,7 @@ struct TableColumnMetrics {
 /// The `cwd` parameter controls how absolute local targets are shortened before display. Passing
 /// the session cwd keeps full renders, history cells, and streamed deltas visually aligned even
 /// when rendering happens away from the process cwd.
+#[cfg(test)]
 pub(crate) fn render_markdown_text_with_width_and_cwd(
     input: &str,
     width: Option<usize>,
@@ -1799,7 +1802,17 @@ where
                     .into_iter()
                     .map(|wrapped| line_to_static(&wrapped))
                     .collect();
-                for wrapped in remap_wrapped_line(&line, wrapped) {
+                let mut wrapped = remap_wrapped_line(&line, wrapped);
+                super::copy_wrapped(
+                    &line.line,
+                    &mut wrapped,
+                    self.current_initial_indent.iter().map(|s| s.width()).sum(),
+                    self.current_subsequent_indent
+                        .iter()
+                        .map(|s| s.width())
+                        .sum(),
+                );
+                for wrapped in wrapped {
                     self.push_output_line(wrapped.style(style));
                 }
             } else {

@@ -1,9 +1,29 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier, text::Line};
 use twig_cli::mouse_selection::word_class;
 
+/// 排版时记录的正文列范围和到下一显示行的原文分隔；None 表示真正换行。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CopyRow {
+    pub skip: usize,
+    pub width: usize,
+    pub join: Option<String>,
+    pub tabs: Vec<usize>,
+}
+impl Default for CopyRow {
+    fn default() -> Self {
+        Self {
+            skip: 0,
+            width: usize::MAX,
+            join: None,
+            tabs: Vec::new(),
+        }
+    }
+}
+
 /// 保存起始区域的已显示字符；数据采集继续，直到用户清除选区。
 pub(crate) struct Selection {
     buffer: Buffer,
+    copy_rows: Vec<CopyRow>,
     area: Rect,
     screen: Rect,
     start: (u16, u16),
@@ -27,6 +47,7 @@ impl Selection {
         }
         Self {
             buffer: region,
+            copy_rows: Vec::new(),
             screen: buffer.area,
             area,
             start: (y, x),
@@ -102,25 +123,54 @@ impl Selection {
             && (y, x) <= self.start.max(self.end)
     }
 
+    pub fn set_copy_rows(&mut self, rows: Vec<CopyRow>) {
+        self.copy_rows = rows;
+    }
+
     pub fn text(&self) -> String {
         if !self.moved {
             return String::new();
         }
-        let mut lines = Vec::new();
+        let mut text = String::new();
+        let first = self.start.min(self.end).0;
+        let last = self.start.max(self.end).0;
         for y in self.start.min(self.end).0..=self.start.max(self.end).0 {
+            let row = self.copy_rows.get(usize::from(y - self.area.y));
+            let continuation = y > first
+                && self
+                    .copy_rows
+                    .get(usize::from(y - self.area.y - 1))
+                    .is_some_and(|r| r.join.is_some());
             let mut line = String::new();
             let mut x = self.area.x;
             while x < self.area.right() {
                 let symbol = self.buffer[(x, y)].symbol();
                 let width = Line::from(symbol).width().max(1) as u16;
-                if self.selected(x, y, width) {
-                    line.push_str(symbol);
+                if self.selected(x, y, width)
+                    && row.is_none_or(|r| {
+                        usize::from(x - self.area.x) < r.width
+                            && (!continuation || usize::from(x - self.area.x) >= r.skip)
+                    })
+                {
+                    if row.is_some_and(|r| r.tabs.contains(&usize::from(x - self.area.x))) {
+                        line.push('\t');
+                    } else {
+                        line.push_str(symbol);
+                    }
                 }
                 x += width;
             }
-            lines.push(line.trim_end_matches(' ').to_owned());
+            let joined = y < last && row.is_some_and(|r| r.join.is_some());
+            text.push_str(if joined {
+                &line
+            } else {
+                line.trim_end_matches(' ')
+            });
+            if y < last {
+                text.push_str(row.and_then(|r| r.join.as_deref()).unwrap_or("\n"));
+            }
         }
-        lines.join("\n")
+        text
     }
 
     pub fn draw(&self, target: &mut Buffer) {

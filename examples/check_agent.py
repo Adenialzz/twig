@@ -406,6 +406,17 @@ supports_websockets = false
         frontend.send(b"\x1b[14~")  # F4
         frontend.wait(original)
         frontend.send(b"\x1b[14~")
+        copy_draft = "COPY_DRAFT_" + "中文 hello\tworld " * 8 + "END_DRAFT\n    NEXT_HARD_LINE"
+        frontend.send(b"\x1b[200~" + copy_draft.encode() + b"\x1b[201~")
+        frontend.wait("NEXT_HARD_LINE")
+        first_row = next(y for y, line in enumerate(frontend.screen.display) if "COPY_DRAFT_" in line)
+        last_row = next(y for y, line in enumerate(frontend.screen.display) if "NEXT_HARD_LINE" in line)
+        first_col = frontend.screen.display[first_row].index("COPY_DRAFT_")
+        last_col = frontend.screen.display[last_row].index("NEXT_HARD_LINE") + len("NEXT_HARD_LINE")
+        frontend.output.clear()
+        frontend.send(f"\x1b[<0;{first_col+1};{first_row+1}M\x1b[<32;{last_col};{last_row+1}M\x1b[<0;{last_col};{last_row+1}m".encode())
+        assert frontend.copied() == copy_draft
+        frontend.send(b"\x15")
         long_draft = "第一行\n" + "中文输入" * 180 + "末尾可见"
         frontend.send(b"\x1b[200~" + long_draft.encode() + b"\x1b[201~")
         frontend.wait("末尾可见")

@@ -14,6 +14,7 @@ pub(crate) struct TerminalHyperlink {
 pub(crate) struct HyperlinkLine {
     pub(crate) line: Line<'static>,
     pub(crate) hyperlinks: Vec<TerminalHyperlink>,
+    pub(crate) copy: crate::console::selection::CopyRow,
 }
 
 impl HyperlinkLine {
@@ -21,6 +22,7 @@ impl HyperlinkLine {
         Self {
             line,
             hyperlinks: Vec::new(),
+            copy: Default::default(),
         }
     }
 
@@ -66,6 +68,7 @@ impl From<String> for HyperlinkLine {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn visible_lines(lines: Vec<HyperlinkLine>) -> Vec<Line<'static>> {
     lines.into_iter().map(|line| line.line).collect()
 }
@@ -243,4 +246,24 @@ pub(crate) fn web_destination(destination: &str) -> Option<String> {
         .then(|| parsed.host_str())
         .flatten()?;
     Some(safe_destination)
+}
+
+impl std::ops::Deref for HyperlinkLine {
+    type Target = Line<'static>;
+    fn deref(&self) -> &Self::Target {
+        &self.line
+    }
+}
+impl std::fmt::Display for HyperlinkLine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.line.fmt(f)
+    }
+}
+impl HyperlinkLine {
+    pub(crate) fn styled(
+        text: impl Into<std::borrow::Cow<'static, str>>,
+        style: ratatui::style::Style,
+    ) -> Self {
+        Self::new(Line::styled(text, style))
+    }
 }

@@ -302,6 +302,24 @@ def main():
                 print(mux("list-panes", "-F", "#{pane_id} pid=#{pane_pid} command=#{pane_current_command} dead=#{pane_dead}").decode(), flush=True)
                 raise
 
+            # 自动折行与真实换行混合，经过鼠标拖选和 OSC 52 验证原文。
+            copied_text = "COPY_WRAP_" + "中文 hello world " * 9 + "END_WRAP\n    NEXT_HARD_LINE"
+            copy_file = Path(root) / "copy-text"
+            copy_file.write_text(copied_text + "\n")
+            second.send(f"cat {shlex.quote(str(copy_file))}\r".encode())
+            second.wait("NEXT_HARD_LINE")
+            second.settle()
+            first_row = next(y for y, line in enumerate(second.screen.display) if "COPY_WRAP_" in line)
+            last_row = next(y for y, line in enumerate(second.screen.display) if "NEXT_HARD_LINE" in line)
+            first_col = second.screen.display[first_row].index("COPY_WRAP_")
+            last_col = second.screen.display[last_row].index("NEXT_HARD_LINE") + len("NEXT_HARD_LINE")
+            second.output.clear()
+            second.send(f"\x1b[<0;{first_col+1};{first_row+1}M\x1b[<32;{last_col};{last_row+1}M\x1b[<0;{last_col};{last_row+1}m".encode())
+            second.until(lambda: b"\x1b]52;" in second.output, "合并自动折行复制")
+            encoded = re.findall(rb"\x1b\]52;c;([^\x07]*)\x07", second.output)
+            assert base64.b64decode(encoded[-1]).decode() == copied_text
+            second.send(b"\x1b")
+
             # 隔离的模拟程序接收滚轮；右侧非活动 Pane 验证坐标和目标归属。
             receiver = Path(root) / "mouse-input"
             pane = mux("split-window", "-h", "-d", "-P", "-F", "#{pane_id}").strip().decode()
