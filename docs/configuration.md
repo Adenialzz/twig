@@ -45,7 +45,7 @@ Console 任务详情顶部显示「用 Zed 打开 ↗」，其 `zed://ssh/...` �
 
 主仓库 `.twig/config.toml` 的 `[tmux]` 整体覆盖用户 `[tmux]`，不合并 Pane。项目未定义该节时才继承用户配置；空 `[tmux]` 或 `panes = []` 明确恢复单 Shell。配置错误直接报错。
 
-项目配置始终从主仓库读取，不从任务分支或调用目录读取。字段、运行模式和实例见 [任务窗口](windows.md)（`twig guide windows`）。tmux 快捷键、鼠标和外观仍由 `~/.tmux.conf` 管理。
+项目配置始终从主仓库读取，不从任务分支或调用目录读取。字段、运行模式和实例见 [任务窗口](windows.md)（`twig guide windows`）。Twig 内置工作台的快捷键、鼠标交互与外观由 Twig 定义，不加载 tmux 状态栏或键绑定；操作见 [Console](console.md)。
 
 ## 项目资源与任务状态
 

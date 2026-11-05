@@ -1,10 +1,12 @@
+> 历史归档（2026-11-05）：以下保留当时的方案、交接与验证记录，包含已被替代的行为；不作为当前规范或待办。当前架构见 [DESIGN](../DESIGN.md)，操作说明见 [用户手册](../docs/index.md)。
+
 # RFC 主控 Agent 与全局 Chat
 
 状态：草案，待评审。日期：2026-10-22。
 
 Twig 拟新增全局 Chat 和可持续运行的主控 Agent。用户通过 Chat 交代目标，主控查看已登记项目、创建并派发任务、与任务 Codex 沟通、跟进结果，并在需要用户决策或重要目标完成时通过 webhook 通知用户。Console 继续提供项目导航、任务状态和终端工作台。
 
-本文是方案讨论，不代表功能已经实现，也不自动授权实施所有建议。现有行为以 [README](README.md)、[DESIGN](DESIGN.md) 和 [开发约定](AGENTS.md) 为准。
+本文是方案讨论，不代表功能已经实现，也不自动授权实施所有建议。现有行为以 [README](../README.md)、[DESIGN](DESIGN.md) 和 [开发约定](../AGENTS.md) 为准。
 
 ## 需求与决策状态
 
@@ -290,7 +292,7 @@ HTTP 请求可能已被接收但响应丢失，重试可能产生重复通知；
 
 ## 第一阶段验证记录 2026-10-22
 
-新增 [可重复运行的协议验收](examples/check_controller.py)，运行方式为 `uv run examples/check_controller.py`。使用 Codex 0.163.0、临时 CODEX_HOME、专用 Unix socket、固定本地 Responses 响应；没有访问真实会话、认证、远端模型或飞书。测试启动的是独立 app-server 进程，不操作用户的受管理 daemon。
+新增 [可重复运行的协议验收](../examples/check_controller.py)，运行方式为 `uv run examples/check_controller.py`。使用 Codex 0.163.0、临时 CODEX_HOME、专用 Unix socket、固定本地 Responses 响应；没有访问真实会话、认证、远端模型或飞书。测试启动的是独立 app-server 进程，不操作用户的受管理 daemon。
 
 已验证：
 
@@ -308,4 +310,4 @@ HTTP 请求可能已被接收但响应丢失，重试可能产生重复通知；
 
 已实现原生 Chat/Console 切换、主控 CLI、受管 session、状态文件、完成回调、持久队列、未知投递对账、停止与删除保护、飞书通知。受管任务通过 `new --agent` 显式创建；普通任务维持现有启动配置，不迁移历史任务。Codex daemon 不可用只提示启动。
 
-第一版暂不包含 Chat 内任务跳转、复杂审批表单、自主预算和独立暂停按钮；结束本轮等待即可由任务完成反馈唤醒。飞书仅使用 webhook URL，暂不实现签名认证或自动重试。原生 Codex 输入与 Twig 投递之间仍存在服务端并发竞争；断线恢复由 Chat/F5 或 agent drain 触发，后者补查完成轮次。具体命令、已实现边界与恢复操作以 [用户手册](docs/agent.md) 为准。
+第一版暂不包含 Chat 内任务跳转、复杂审批表单、自主预算和独立暂停按钮；结束本轮等待即可由任务完成反馈唤醒。飞书仅使用 webhook URL，暂不实现签名认证或自动重试。原生 Codex 输入与 Twig 投递之间仍存在服务端并发竞争；断线恢复由 Chat/F5 或 agent drain 触发，后者补查完成轮次。具体命令、已实现边界与恢复操作以 [用户手册](../docs/agent.md) 为准。
