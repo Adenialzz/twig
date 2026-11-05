@@ -190,11 +190,16 @@ def main():
             assert target.read_text() == (
                 "ORIGINAL_MARKER\nBEFORE_DETACH\nAFTER_RECONNECT\n"
             )
-            second.send(b"i=0; while [ $i -lt 60 ]; do printf 'SCROLL_%03d\\n' $i; i=$((i+1)); done\r")
+            second.send(b"PS1='SCROLL_READY> '; i=0; while [ $i -lt 60 ]; do printf 'SCROLL_%03d\\n' $i; i=$((i+1)); done\r")
             second.wait("SCROLL_059")
+            second.until(lambda: any(line.rstrip() == "SCROLL_READY>" for line in second.screen.display), "历史输出与 Shell 提示符完成")
+            height, top = map(int, mux("display-message", "-p", "#{pane_height} #{pane_top}").split())
+            expected_history = mux("capture-pane", "-p", "-S", "-36", "-E", str(height - 1 - 36)).decode().splitlines()
+            assert len(expected_history) == height, expected_history
             second.send(b"\x1b[<64;2;3M" * 12)
-            second.wait("SCROLL_010")
-            second.settle()
+            # 短暂无输出不代表 12 个滚轮都已处理；完整视口一致才可按坐标选字。
+            second.until(lambda: [line.rstrip() for line in second.screen.display[top:top + height]] == expected_history,
+                         "滚轮队列完成且完整历史视口已绘制")
             # 历史中的选区固定在开始拖动的画面，后台新增输出不能更改复制内容。
             row = next(y for y, line in enumerate(second.screen.display) if "SCROLL_010" in line)
             col = second.screen.display[row].index("SCROLL_010")
@@ -210,7 +215,8 @@ def main():
             second.until(lambda: "已请求复制" not in "\n".join(second.screen.display), "复制提示自动消失")
             assert second.screen.buffer[row][col].reverse != old_reverse
             copies = re.findall(rb"\x1b\]52;c;([^\x07]*)\x07", second.output)
-            assert [base64.b64decode(value) for value in copies] == [b"SCROLL_010"]
+            decoded = [base64.b64decode(value) for value in copies]
+            assert decoded == [b"SCROLL_010"], {"copies": decoded, "selected_row": second.screen.display[row], "row": row, "col": col}
             assert "SCROLL_010" in second.screen.display[row]
             # Esc 只清除选区，不向程序发送；Ctrl-C 仍照常传给程序。
             second.send(b"\x1b")
