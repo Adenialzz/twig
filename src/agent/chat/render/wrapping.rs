@@ -801,7 +801,9 @@ fn flatten_line(line: &Line<'_>) -> (String, Vec<(Range<usize>, ratatui::style::
     for span in &line.spans {
         let text = span.content.as_ref();
         let start = acc;
-        flat.push_str(text);
+        // Tab 与 Ratatui 一致占一列；替换为同字节长度的空格测量，
+        // 切片仍来自原 Span，保留 Tab 供复制映射使用。
+        flat.extend(text.chars().map(|c| if c == '\t' { ' ' } else { c }));
         acc += text.len();
         span_bounds.push((start..acc, span.style));
     }

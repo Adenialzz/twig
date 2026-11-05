@@ -544,6 +544,11 @@ fn run_ui(
                         .find(|area| area.contains((x, y).into()))
                         .map(|area| {
                             let mut selected = Selection::new(frame.buffer_mut(), area, x, y);
+                            selected.set_copy_rows(if area == areas.history {
+                                areas.history_copy.clone()
+                            } else {
+                                areas.input_copy.clone()
+                            });
                             selected.select_click(clicks.next(&area, x, y, Instant::now()));
                             selected
                         });
@@ -638,9 +643,8 @@ fn run_ui(
                 let text: String = text
                     .replace("\r\n", "\n")
                     .replace('\r', "\n")
-                    .replace('\t', "    ")
                     .chars()
-                    .filter(|c| !c.is_control() || *c == '\n')
+                    .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
                     .collect();
                 draft.text.insert_str(draft.cursor, &text);
                 draft.cursor += text.len();

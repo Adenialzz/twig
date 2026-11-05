@@ -8,7 +8,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Wrap,
     },
 };
 
@@ -16,7 +15,7 @@ pub(super) use crate::agent::history::{Entry, Kind, Tool, clean};
 #[cfg(test)]
 pub(super) use crate::agent::history::{apply_sources, transcript};
 
-fn tool_lines(entry: &Entry, expanded: bool, width: usize) -> Vec<Line<'static>> {
+fn tool_lines(entry: &Entry, expanded: bool, width: usize) -> Vec<render::CopyLine> {
     let Some(tool) = &entry.tool else {
         return render::plain(&entry.text, width, Style::default());
     };
@@ -78,8 +77,8 @@ fn tool_lines(entry: &Entry, expanded: bool, width: usize) -> Vec<Line<'static>>
 }
 
 fn append_preview(
-    lines: &mut Vec<Line<'static>>,
-    content: Vec<Line<'static>>,
+    lines: &mut Vec<render::CopyLine>,
+    content: Vec<render::CopyLine>,
     expanded: bool,
     limit: usize,
     tail: bool,
@@ -90,7 +89,7 @@ fn append_preview(
         content.len().saturating_sub(limit)
     };
     let marker = || {
-        Line::styled(
+        render::CopyLine::styled(
             format!("  … 省略 {hidden} 行 · F4 展开"),
             Style::default().fg(Color::DarkGray),
         )
@@ -102,20 +101,30 @@ fn append_preview(
     let take = content.len() - hidden;
     for line in content.into_iter().skip(skip).take(take) {
         let mut spans = vec![Span::raw("  ")];
-        spans.extend(line.spans);
-        lines.push(Line::from(spans).style(line.style));
+        spans.extend(line.line.spans);
+        let mut row = render::CopyLine::new(Line::from(spans).style(line.line.style));
+        row.copy = line.copy;
+        row.copy.skip += 2;
+        for column in &mut row.copy.tabs {
+            *column += 2;
+        }
+        row.copy.width = row.copy.width.saturating_add(2);
+        lines.push(row);
     }
     if !tail && hidden > 0 {
+        if let Some(last) = lines.last_mut() {
+            last.copy.join = None;
+        }
         lines.push(marker());
     }
 }
 
-fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
+fn history(view: &View, draft: &Draft, width: usize) -> Vec<render::CopyLine> {
     let mut lines = Vec::new();
     for entry in &view.entries {
         if entry.kind == Kind::Tool {
             lines.extend(tool_lines(entry, draft.details, width));
-            lines.push(Line::from(""));
+            lines.push(render::CopyLine::from(""));
             continue;
         }
         let (_, color) = match entry.kind {
@@ -128,7 +137,7 @@ fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
             Kind::Error => ("需要处理", Color::Red),
         };
         let label = entry.label();
-        lines.push(Line::styled(
+        lines.push(render::CopyLine::styled(
             format!("▎ {label}"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
@@ -144,24 +153,24 @@ fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
                 Style::default().fg(Color::DarkGray),
             ));
         }
-        lines.push(Line::from(""));
+        lines.push(render::CopyLine::from(""));
     }
     for (label, text, color) in [
         ("连接 / 投递错误", &view.error, Color::Red),
         ("需要用户处理 · 原生 Codex", &view.approval, Color::Yellow),
     ] {
         if let Some(text) = text {
-            lines.push(Line::styled(
+            lines.push(render::CopyLine::styled(
                 label,
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ));
             lines.extend(render::plain(&clean(text), width, Style::default()));
-            lines.push(Line::from(""));
+            lines.push(render::CopyLine::from(""));
         }
     }
     if lines.is_empty() && view.connected {
         let dim = Style::default().fg(Color::DarkGray);
-        lines.push(Line::styled(
+        lines.push(render::CopyLine::styled(
             "还没有对话。可以这样开始：",
             dim.add_modifier(Modifier::BOLD),
         ));
@@ -170,27 +179,45 @@ fn history(view: &View, draft: &Draft, width: usize) -> Text<'static> {
             "· 汇总所有受管任务的进展和阻塞",
             "· 检查 fix/login 的回报是否达到验收标准",
         ] {
-            lines.push(Line::styled(example, dim));
+            lines.push(render::CopyLine::styled(example, dim));
         }
     }
     if draft.details && !view.thread.is_empty() {
-        lines.push(Line::styled(
+        lines.push(render::CopyLine::styled(
             format!("会话 {}", view.thread),
             Style::default().fg(Color::DarkGray),
         ));
     }
-    Text::from(lines)
+    lines
+        .into_iter()
+        .flat_map(|line| render::fit_line(line, width))
+        .collect()
 }
 
 // 按终端列宽折行，渲染与光标共享同一布局，中文和多行输入不会错位。
+#[cfg(test)]
 fn input_lines(input: &str, cursor: usize, width: u16) -> (Vec<Line<'static>>, (u16, u16)) {
+    let (lines, position, _) = input_layout(input, cursor, width);
+    (lines, position)
+}
+
+type InputLayout = (
+    Vec<Line<'static>>,
+    (u16, u16),
+    Vec<crate::console::selection::CopyRow>,
+);
+fn input_layout(input: &str, cursor: usize, width: u16) -> InputLayout {
     let width = usize::from(width.max(2));
+    let mut copy = vec![crate::console::selection::CopyRow::default()];
     let mut lines = vec![String::new()];
     let mut column = 0;
     let mut position = (0, 0);
     for (index, c) in input.char_indices() {
         let cell_width = Line::from(c.to_string()).width();
         if c != '\n' && column + cell_width > width {
+            copy.last_mut().unwrap().join = Some(String::new());
+            copy.last_mut().unwrap().width = column;
+            copy.push(Default::default());
             lines.push(String::new());
             column = 0;
         }
@@ -198,27 +225,37 @@ fn input_lines(input: &str, cursor: usize, width: u16) -> (Vec<Line<'static>>, (
             position = (column as u16, (lines.len() - 1) as u16);
         }
         if c == '\n' {
+            copy.push(Default::default());
             lines.push(String::new());
             column = 0;
         } else {
-            lines.last_mut().unwrap().push(c);
+            if c == '\t' {
+                copy.last_mut().unwrap().tabs.push(column);
+                lines.last_mut().unwrap().push(' ');
+            } else {
+                lines.last_mut().unwrap().push(c);
+            }
             column += cell_width;
         }
     }
     if column == width {
+        copy.last_mut().unwrap().join = Some(String::new());
+        copy.push(Default::default());
         lines.push(String::new());
         column = 0;
     }
     if cursor == input.len() {
         position = (column as u16, (lines.len() - 1) as u16);
     }
-    (lines.into_iter().map(Line::from).collect(), position)
+    (lines.into_iter().map(Line::from).collect(), position, copy)
 }
 
 #[derive(Default)]
 pub(super) struct Areas {
     pub history: Rect,
     pub input: Rect,
+    pub history_copy: Vec<crate::console::selection::CopyRow>,
+    pub input_copy: Vec<crate::console::selection::CopyRow>,
 }
 
 pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_cursor: bool) -> Areas {
@@ -251,7 +288,8 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
         width,
         screen.height - crate::tabs::HEADER_HEIGHT - 1,
     );
-    let (input, (cx, cy)) = input_lines(&draft.text, draft.cursor, width.saturating_sub(4));
+    let (input, (cx, cy), input_copy) =
+        input_layout(&draft.text, draft.cursor, width.saturating_sub(4));
     let input_height = (input.len() as u16)
         .clamp(1, 6)
         .min(screen.height.saturating_sub(11))
@@ -308,15 +346,15 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
             ..header
         },
     );
-    let transcript = Paragraph::new(history(
-        view,
-        draft,
-        usize::from(rows[0].width.saturating_sub(2)),
-    ))
-    .wrap(Wrap { trim: false });
-    let height = transcript
-        .line_count(rows[0].width.saturating_sub(2))
-        .min(u16::MAX as usize) as u16;
+    let transcript = history(view, draft, usize::from(rows[0].width.saturating_sub(2)));
+    let history_copy: Vec<_> = transcript.iter().map(|line| line.copy.clone()).collect();
+    let height = transcript.len().min(u16::MAX as usize) as u16;
+    let transcript = Paragraph::new(Text::from(
+        transcript
+            .into_iter()
+            .map(|line| line.line)
+            .collect::<Vec<_>>(),
+    ));
     if draft.scroll > 0 && draft.history_height > 0 && height > draft.history_height {
         draft.scroll = draft.scroll.saturating_add(height - draft.history_height);
     }
@@ -388,6 +426,16 @@ pub(super) fn draw(frame: &mut Frame, view: &View, draft: &mut Draft, show_curso
     Areas {
         history: history_area,
         input: input_area,
+        history_copy: history_copy
+            .into_iter()
+            .skip(usize::from(offset))
+            .take(usize::from(history_area.height))
+            .collect(),
+        input_copy: input_copy
+            .into_iter()
+            .skip(usize::from(start))
+            .take(usize::from(input_area.height))
+            .collect(),
     }
 }
 
@@ -495,7 +543,11 @@ mod tests {
             entries,
             ..View::default()
         };
-        let rendered = history(&view, &Draft::default(), 80).to_string();
+        let rendered = history(&view, &Draft::default(), 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
         for label in [
             "▎ 你",
             "▎ 子任务 · 项目/任务",
@@ -545,7 +597,6 @@ mod tests {
                 &Draft::default(),
                 80
             )
-            .lines
             .iter()
             .any(|line| line.to_string().contains("还没有对话"))
         );
@@ -594,6 +645,110 @@ mod tests {
             assert!(text.contains("SEND_ERROR"), "{width}×{height}");
             let cursor = terminal.get_cursor_position().unwrap();
             assert!(input.contains(cursor), "{width}×{height}: {cursor:?}");
+        }
+    }
+
+    #[test]
+    fn selections_follow_history_and_input_layout() {
+        use crate::console::selection::Selection;
+        use ratatui::{Terminal, backend::TestBackend};
+        for width in [32, 65, 120] {
+            let text =
+                "中文开头 hello world with spaces and long_variable_name();\n\n    next line";
+            let view = View {
+                entries: vec![Entry::new(Kind::User, text)],
+                connected: true,
+                ..View::default()
+            };
+            let mut draft = Draft {
+                text: text.into(),
+                cursor: text.len(),
+                ..Draft::default()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            let mut areas = Areas::default();
+            let completed = terminal
+                .draw(|frame| areas = draw(frame, &view, &mut draft, false))
+                .unwrap();
+            for (area, rows, expected) in [
+                (areas.history, areas.history_copy, format!("▎ 你\n{text}")),
+                (areas.input, areas.input_copy, text.to_owned()),
+            ] {
+                let last = area.y + rows.len() as u16 - 1;
+                let mut selection = Selection::new(completed.buffer, area, area.right() - 1, last);
+                selection.set_copy_rows(rows);
+                selection.update(area.x, area.y);
+                assert_eq!(selection.text().trim_end(), expected, "width={width}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_message_at_eighty_columns_keeps_every_character_and_copy_mapping() {
+        use crate::console::selection::Selection;
+        use ratatui::{Terminal, backend::TestBackend};
+        let text = format!("{}\tdef xyz end", "a".repeat(71));
+        for kind in [Kind::User, Kind::Assistant, Kind::Tool] {
+            let mut entry = Entry::new(
+                kind,
+                if kind == Kind::Assistant {
+                    format!("```rust\n{text}\n```")
+                } else {
+                    text.clone()
+                },
+            );
+            if kind == Kind::Tool {
+                entry.tool = Some(Tool::Command {
+                    status: "completed".into(),
+                    exit_code: Some(0),
+                });
+            }
+            let view = View {
+                entries: vec![entry],
+                connected: true,
+                ..View::default()
+            };
+            let mut draft = Draft {
+                text: text.clone(),
+                cursor: text.len(),
+                details: true,
+                ..Draft::default()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+            let mut areas = Areas::default();
+            let completed = terminal
+                .draw(|frame| areas = draw(frame, &view, &mut draft, true))
+                .unwrap();
+            for (area, rows) in [
+                (areas.history, areas.history_copy),
+                (areas.input, areas.input_copy),
+            ] {
+                let screen_text = (area.y..area.bottom())
+                    .map(|y| {
+                        (area.x..area.right())
+                            .map(|x| completed.buffer[(x, y)].symbol())
+                            .collect::<String>()
+                            .trim_end()
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(screen_text.contains("def xyz end"), "{screen_text:?}");
+                assert!(!screen_text.contains('\t'));
+                for reverse in [false, true] {
+                    let first = (area.x, area.y);
+                    let last = (area.right() - 1, area.y + rows.len() as u16 - 1);
+                    let (first, last) = if reverse {
+                        (last, first)
+                    } else {
+                        (first, last)
+                    };
+                    let mut selection = Selection::new(completed.buffer, area, first.0, first.1);
+                    selection.set_copy_rows(rows.clone());
+                    selection.update(last.0, last.1);
+                    assert!(selection.text().contains(&text), "{:?}", selection.text());
+                }
+            }
         }
     }
 

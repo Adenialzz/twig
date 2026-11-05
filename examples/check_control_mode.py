@@ -190,11 +190,16 @@ def main():
             assert target.read_text() == (
                 "ORIGINAL_MARKER\nBEFORE_DETACH\nAFTER_RECONNECT\n"
             )
-            second.send(b"i=0; while [ $i -lt 60 ]; do printf 'SCROLL_%03d\\n' $i; i=$((i+1)); done\r")
+            second.send(b"PS1='SCROLL_READY> '; i=0; while [ $i -lt 60 ]; do printf 'SCROLL_%03d\\n' $i; i=$((i+1)); done\r")
             second.wait("SCROLL_059")
+            second.until(lambda: any(line.rstrip() == "SCROLL_READY>" for line in second.screen.display), "历史输出与 Shell 提示符完成")
+            height, top = map(int, mux("display-message", "-p", "#{pane_height} #{pane_top}").split())
+            expected_history = mux("capture-pane", "-p", "-S", "-36", "-E", str(height - 1 - 36)).decode().splitlines()
+            assert len(expected_history) == height, expected_history
             second.send(b"\x1b[<64;2;3M" * 12)
-            second.wait("SCROLL_010")
-            second.settle()
+            # 短暂无输出不代表 12 个滚轮都已处理；完整视口一致才可按坐标选字。
+            second.until(lambda: [line.rstrip() for line in second.screen.display[top:top + height]] == expected_history,
+                         "滚轮队列完成且完整历史视口已绘制")
             # 历史中的选区固定在开始拖动的画面，后台新增输出不能更改复制内容。
             row = next(y for y, line in enumerate(second.screen.display) if "SCROLL_010" in line)
             col = second.screen.display[row].index("SCROLL_010")
@@ -210,7 +215,8 @@ def main():
             second.until(lambda: "已请求复制" not in "\n".join(second.screen.display), "复制提示自动消失")
             assert second.screen.buffer[row][col].reverse != old_reverse
             copies = re.findall(rb"\x1b\]52;c;([^\x07]*)\x07", second.output)
-            assert [base64.b64decode(value) for value in copies] == [b"SCROLL_010"]
+            decoded = [base64.b64decode(value) for value in copies]
+            assert decoded == [b"SCROLL_010"], {"copies": decoded, "selected_row": second.screen.display[row], "row": row, "col": col}
             assert "SCROLL_010" in second.screen.display[row]
             # Esc 只清除选区，不向程序发送；Ctrl-C 仍照常传给程序。
             second.send(b"\x1b")
@@ -301,6 +307,24 @@ def main():
                 print(mux("capture-pane", "-p", "-S", "-150").decode(), flush=True)
                 print(mux("list-panes", "-F", "#{pane_id} pid=#{pane_pid} command=#{pane_current_command} dead=#{pane_dead}").decode(), flush=True)
                 raise
+
+            # 自动折行与真实换行混合，经过鼠标拖选和 OSC 52 验证原文。
+            copied_text = "COPY_WRAP_" + "中文 hello world " * 9 + "END_WRAP\n    NEXT_HARD_LINE"
+            copy_file = Path(root) / "copy-text"
+            copy_file.write_text(copied_text + "\n")
+            second.send(f"cat {shlex.quote(str(copy_file))}\r".encode())
+            second.wait("NEXT_HARD_LINE")
+            second.settle()
+            first_row = next(y for y, line in enumerate(second.screen.display) if "COPY_WRAP_" in line)
+            last_row = next(y for y, line in enumerate(second.screen.display) if "NEXT_HARD_LINE" in line)
+            first_col = second.screen.display[first_row].index("COPY_WRAP_")
+            last_col = second.screen.display[last_row].index("NEXT_HARD_LINE") + len("NEXT_HARD_LINE")
+            second.output.clear()
+            second.send(f"\x1b[<0;{first_col+1};{first_row+1}M\x1b[<32;{last_col};{last_row+1}M\x1b[<0;{last_col};{last_row+1}m".encode())
+            second.until(lambda: b"\x1b]52;" in second.output, "合并自动折行复制")
+            encoded = re.findall(rb"\x1b\]52;c;([^\x07]*)\x07", second.output)
+            assert base64.b64decode(encoded[-1]).decode() == copied_text
+            second.send(b"\x1b")
 
             # 隔离的模拟程序接收滚轮；右侧非活动 Pane 验证坐标和目标归属。
             receiver = Path(root) / "mouse-input"
