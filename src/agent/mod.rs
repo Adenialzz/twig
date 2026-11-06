@@ -207,6 +207,9 @@ impl Store {
             .context("缺少 Twig 会话绑定；主控可运行 twig agent init，已有任务请核对 agent status。普通 session 的读取与授权通信见 twig guide agent；不要重复 new")
     }
     pub fn validate(&self, binding: &Binding) -> Result<()> {
+        self.validate_binding(binding, true)
+    }
+    fn validate_binding(&self, binding: &Binding, require_branch: bool) -> Result<()> {
         if let (Some(alias), Some(name)) = (&binding.project, &binding.task) {
             let entry = crate::registry::entry(&self.registry, alias)?;
             let project = crate::config::Project::discover_at(
@@ -219,10 +222,18 @@ impl Store {
                 task.agent_thread.as_deref() == Some(&binding.thread) && task.path == binding.cwd,
                 "任务实例已变化；停止投递旧消息"
             );
-            ensure!(
-                crate::check_worktree(&project.config()?, task)?,
-                "任务 Worktree 不存在"
-            );
+            let config = project.config()?;
+            let present = if require_branch {
+                crate::check_worktree(&config, task)?
+            } else {
+                crate::check_worktree_identity_in(
+                    &crate::git::worktrees(&config.main)?,
+                    &project.common,
+                    task,
+                )?
+                .is_some()
+            };
+            ensure!(present, "任务 Worktree 不存在");
         }
         Ok(())
     }
@@ -698,7 +709,7 @@ impl Store {
         let _lock = self.lock()?;
         let mut state = self.load()?;
         let binding = state.bindings.get(thread).context("任务会话绑定缺失")?;
-        self.validate(binding)?;
+        self.validate_binding(binding, false)?;
         state.bindings.get_mut(thread).unwrap().stopped = false;
         self.save(&state)
     }

@@ -485,7 +485,7 @@ pub(crate) fn fingerprint(registry: &Path, action: &Action) -> Result<Value> {
             .transpose()?;
         if matches!(action, Action::Open { .. }) {
             // 打开只固定目标身份；启动程序写文件或 Git 提交不改变资源归属。
-            // 执行时仍在项目锁内实时核对 Worktree 分支和路径归属。
+            // 执行时仍在项目锁内实时核对 Worktree 仓库和路径归属，允许分支变化。
             return Ok(json!({"path":path,"common":project.common,"config":config,
                 "task":name.and_then(|name| state.get(name)),"directory":directory,"window":window}));
         }

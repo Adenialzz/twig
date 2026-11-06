@@ -136,7 +136,7 @@ enum Action {
     },
     /// 进入任务窗口；窗口丢失时重建 Shell
     #[command(
-        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。\n打开内置终端工作台，Ctrl-W d 返回 Console 并选中任务。普通任务不恢复原进程或对话；--agent 任务连接原 Codex session。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
+        after_help = "窗口缺失时会执行当前启动配置；Worktree 缺失或归属错误时报错。分支切换、重命名或 detached HEAD 不阻止进入，删除仍校验登记分支。\n打开内置终端工作台，Ctrl-W d 返回 Console 并选中任务。普通任务不恢复原进程或对话；--agent 任务连接原 Codex session。需要交互终端；脚本准备环境用 new --no-open。\n示例：twig open myapp auth\n详细说明：twig guide windows"
     )]
     Open {
         /// 已登记的项目别名，不根据当前目录推断
@@ -362,10 +362,23 @@ fn execute_business(
                 )
             } else {
                 let feature = feature(&state, &name)?;
-                ensure!(
-                    check_worktree(&config, feature)?,
-                    "Worktree 不存在；请检查 twig ls <项目名>，new 不恢复已登记任务"
-                );
+                let branch = check_worktree_identity_in(
+                    &git::worktrees(&config.main)?,
+                    &project.common,
+                    feature,
+                )?
+                .context("Worktree 不存在；请检查 twig ls <项目名>，new 不恢复已登记任务")?;
+                if branch != feature.branch {
+                    crate::diagnostic!(
+                        "Worktree 分支已改变：登记为 {}，当前为 {}；允许进入，删除仍须核对登记分支",
+                        feature.branch,
+                        if branch.is_empty() {
+                            "(detached)"
+                        } else {
+                            &branch
+                        }
+                    );
+                }
                 let window = if let Some(window) = expected["window"].as_str() {
                     tmux::reuse_window(&config, &project, &name, window)?
                 } else {
@@ -532,15 +545,33 @@ fn check_worktree_in(
     expected: &Path,
     feature: &Feature,
 ) -> Result<bool> {
+    let branch = check_worktree_identity_in(trees, expected, feature)?;
+    if let Some(branch) = &branch {
+        ensure!(
+            branch == &feature.branch,
+            "Worktree 分支已改变：{}；登记为 {}，当前为 {}；仍可进入工作台，其他操作须核对登记分支",
+            feature.path.display(),
+            feature.branch,
+            if branch.is_empty() {
+                "(detached)"
+            } else {
+                branch
+            }
+        );
+    }
+    Ok(branch.is_some())
+}
+
+// 进入工作台只要求目录仍属于登记仓库；分支变化不改变 Worktree 身份。
+fn check_worktree_identity_in(
+    trees: &[(PathBuf, String)],
+    expected: &Path,
+    feature: &Feature,
+) -> Result<Option<String>> {
     if let Some((_, branch)) = trees.iter().find(|(path, _)| path == &feature.path) {
         ensure!(
             feature.path.is_dir(),
             "Worktree 记录存在但目录丢失：{}；请先检查 git worktree prune --dry-run，再手动修复或清理失效记录",
-            feature.path.display()
-        );
-        ensure!(
-            branch == &feature.branch,
-            "Worktree 分支已改变，拒绝操作：{}",
             feature.path.display()
         );
         let common = PathBuf::from(git(
@@ -552,14 +583,14 @@ fn check_worktree_in(
             common == expected && feature.path.canonicalize()? == feature.path,
             "Worktree 路径归属异常，拒绝操作"
         );
-        return Ok(true);
+        return Ok(Some(branch.clone()));
     }
     ensure!(
         !feature.path.exists(),
         "路径已存在但不属于登记的 Worktree：{}",
         feature.path.display()
     );
-    Ok(false)
+    Ok(None)
 }
 
 // 斜杠任务使用子目录；中间目录不得是符号链接或另一个仓库。
