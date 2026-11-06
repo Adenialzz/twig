@@ -33,7 +33,7 @@ twig ls myapp
 | 窗口初始化未完成 | 直接用 tmux 检查部分创建的 Pane；修正配置，确认可终止进程后 stop，再 open；不会自动重复启动 |
 | 命令找不到/退出非零 | 检查对应 Pane 输出、任务分支中的脚本及依赖；shell 模式回到提示符，process 模式保留退出现场 |
 | 同名窗口归属冲突 | 不会自动接管；核实后由用户重命名或关闭冲突窗口，再重试 |
-| Worktree 显示 Mismatch | 检查目录存在、当前分支与仓库归属；不要盲目覆盖任务记录 |
+| Worktree 显示 Mismatch | 检查目录存在、当前分支与仓库归属；仅分支变化时仍可 open 或从 Console 进入，删除仍拒绝；不要盲目覆盖任务记录 |
 | rm 拒绝删除 | 按错误检查脏文件、ignored 文件、活动进程和合并/upstream；见 cleanup |
 | Worktree 已删但分支删除失败 | Git branch -d 有额外检查；分支和记录仍保留，可用 rm PROJECT NAME --keep-branch 完成清理 |
 

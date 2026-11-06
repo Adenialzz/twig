@@ -1430,7 +1430,20 @@ fn new_and_open_share_workbench_and_return_to_the_selected_task() {
     f.init();
     let target = f.repo.with_file_name("repo.worktrees").join("feat/unified");
     let mut previous_pids = None;
-    for action in ["new", "open", "open"] {
+    for (index, action) in ["new", "open", "open"].into_iter().enumerate() {
+        if index > 0 {
+            let args = if index == 1 {
+                vec!["switch", "-c", "other"]
+            } else {
+                vec!["switch", "--detach"]
+            };
+            let output = Command::new("git")
+                .current_dir(&target)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
         let mut command = Command::new("sh");
         f.env(&mut command);
         // 启动目录故意与目标任务无关，选中项必须来自显式命令参数。

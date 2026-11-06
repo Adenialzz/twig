@@ -446,6 +446,11 @@ supports_websockets = false
         assert command("git", "-C", str(task_dir), "status", "--porcelain") == ""
         assert "state.md" in command("git", "-C", str(task_dir), "ls-files", "--others", "--ignored", "--exclude-standard")
         assert "已存在" in twig("new", "demo", "--no-fetch", "test", "--agent", "--no-open", success=False)
+        command("git", "-C", str(task_dir), "switch", "-c", "other")
+        opened = twig("open", "demo", "test", success=False)
+        assert "需要交互式终端" in opened, opened
+        assert "分支已改变" in twig("rm", "demo", "test", "-y", success=False)
+        command("git", "-C", str(task_dir), "switch", "test")
         first = twig("agent", "send", "--from-project", "demo", "--from-task", "test", "--message", "hold-controller").strip()
         assert next(m for m in state()["messages"] if m["id"] == first)["source"] == {"kind": "task", "project": "demo", "task": "test"}
         wait_for(model.entered["controller"].is_set, "主控未收到请求")

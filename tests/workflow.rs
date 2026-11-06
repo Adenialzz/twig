@@ -785,6 +785,53 @@ fn detects_conflicts_and_preserves_partial_creation() {
 }
 
 #[test]
+fn open_allows_changed_branch_without_relaxing_delete_protection() {
+    for change in ["switch", "rename", "detach"] {
+        let f = Fixture::new();
+        f.ok(&["new", "local", "task", "--no-fetch", "--no-open"]);
+        let path = f.root.join("task");
+        let state_path = support::project_dir(&f.repo, &f.registry_path()).join("state.json");
+        let state = fs::read(&state_path).unwrap();
+        let args = match change {
+            "switch" => vec!["switch", "-c", "other"],
+            "rename" => vec!["branch", "-m", "other"],
+            "detach" => vec!["switch", "--detach"],
+            _ => unreachable!(),
+        };
+        success(
+            Command::new("git")
+                .current_dir(&path)
+                .args(args)
+                .output()
+                .unwrap(),
+        );
+        let head = f.git(&["-C", path.to_str().unwrap(), "rev-parse", "HEAD"]);
+        // 已有窗口与缺失窗口都经过归属校验，最终到达非交互终端检查。
+        for rebuild in [false, true] {
+            if rebuild {
+                f.ok(&["stop", "local", "task", "-y"]);
+            }
+            let output = f.run(&["open", "local", "task"]);
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success());
+            assert!(error.contains("需要交互式终端"), "{change}: {error}");
+            assert!(error.contains("允许进入"), "{change}: {error}");
+            assert!(f.ok(&["ls", "local"]).contains("Open"));
+            f.fail(
+                &["rm", "local", "task", "-y", "--keep-branch"],
+                "分支已改变",
+            );
+            assert!(path.join(".git").exists());
+            assert_eq!(fs::read(&state_path).unwrap(), state);
+            assert_eq!(
+                f.git(&["-C", path.to_str().unwrap(), "rev-parse", "HEAD"]),
+                head
+            );
+        }
+    }
+}
+
+#[test]
 fn ignored_files_and_missing_directory_are_protected() {
     let f = Fixture::new();
     f.ok(&["new", "local", "--no-fetch", "--no-open", "ignored"]);
@@ -1620,17 +1667,13 @@ fn open_plan_allows_work_changes_but_preserves_resource_and_delete_guards() {
         let output = child.wait_with_output().unwrap();
         let error = reader.join().unwrap();
         assert!(!output.status.success());
-        if matches!(change, "files" | "main") {
+        if matches!(change, "files" | "main" | "branch") {
             assert!(error.contains("需要交互式终端"), "{change}: {error}");
+            if change == "branch" {
+                assert!(error.contains("允许进入"), "{error}");
+            }
         } else {
-            assert!(
-                error.contains(if change == "branch" {
-                    "Worktree 分支已改变"
-                } else {
-                    "资源已变化"
-                }),
-                "{change}: {error}"
-            );
+            assert!(error.contains("资源已变化"), "{change}: {error}");
             assert!(path.exists());
         }
     }
