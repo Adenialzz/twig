@@ -164,7 +164,7 @@ jobs:
           node-version: '22'
           package-manager-cache: false
       - name: 安装固定版本 Codex
-        run: npm install --global @openai/codex@0.164.0
+        run: npm install --global @openai/codex@0.169.0
       - name: 安装 Linux Agent 验收依赖
         if: runner.os == 'Linux'
         run: |
