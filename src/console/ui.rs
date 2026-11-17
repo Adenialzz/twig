@@ -527,8 +527,8 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
             let active = active_codex_groups(&app.snapshot, &repo.name);
             if active > 0 && !codex_stale(app) {
                 spans.push(Span::styled(
-                    format!(" Codex 活跃 {active}"),
-                    Style::default().fg(Color::Green),
+                    format!(" 运行中 {active}"),
+                    Style::default().fg(Color::Cyan),
                 ));
             }
             Line::from(spans)
@@ -2252,9 +2252,9 @@ mod tests {
         let expanded = text(&render(&app, 100, 30, monitor));
         assert!(expanded.contains("subagent"));
         assert!(expanded.find("alpha 会话").unwrap() < expanded.find("Scout").unwrap());
-        assert!(text(&render(&app, 100, 15, projects)).contains("Codex 活跃 1"));
+        assert!(text(&render(&app, 100, 15, projects)).contains("运行中 1"));
         app.snapshot.codex_error = Some("offline".into());
-        assert!(!text(&render(&app, 100, 15, projects)).contains("Codex 活跃"));
+        assert!(!text(&render(&app, 100, 15, projects)).contains("运行中"));
         assert!(text(&render(&app, 100, 30, monitor)).contains("过期"));
         app.snapshot.codex_error = None;
         app.snapshot.threads.last_mut().unwrap().status = json!({"type":"idle"});
