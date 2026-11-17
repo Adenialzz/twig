@@ -20,6 +20,23 @@ pub struct Event {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subagent_cleanup_preserves_other_notifications_and_deduplication() {
+        let temp = tempfile::tempdir().unwrap();
+        let inbox = Inbox::new(&temp.path().join("config.toml")).unwrap();
+        inbox.record(event("turn:child:done", true), false).unwrap();
+        inbox
+            .record(event("message:delivery", true), false)
+            .unwrap();
+        inbox
+            .record(event("turn:parent:done", false), false)
+            .unwrap();
+        inbox.forget_subagent("task-thread").unwrap();
+        let state = inbox.load().unwrap();
+        assert_eq!(state.unread.len(), 2);
+        assert!(state.seen.contains("turn:child:done"));
+        assert!(state.unread.iter().any(|e| e.id == "message:delivery"));
+    }
     use super::*;
     use crate::console::notifications::{ChatNotifications, Notifications};
     use std::time::{Duration, Instant};
@@ -520,6 +537,15 @@ impl Inbox {
                 .seen
                 .extend(deliveries.seen.iter().cloned());
             state.watched.extend(watched.clone());
+        })
+    }
+
+    pub fn forget_subagent(&self, thread: &str) -> Result<()> {
+        self.update(|state| {
+            state.watched.remove(thread);
+            state
+                .unread
+                .retain(|event| event.thread != thread || !event.id.starts_with("turn:"));
         })
     }
 }

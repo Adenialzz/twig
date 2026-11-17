@@ -156,7 +156,7 @@ impl Updates {
 #[derive(Default)]
 struct AssociationCache {
     tasks: Vec<(String, PathBuf)>,
-    threads: Vec<(String, PathBuf)>,
+    threads: Vec<(String, PathBuf, Option<String>)>,
     claude: Vec<(String, PathBuf)>,
     claude_associations: BTreeMap<String, (String, PathBuf)>,
     checked: Option<Instant>,
@@ -178,7 +178,7 @@ impl AssociationCache {
             .threads
             .iter()
             .chain(&snapshot.history)
-            .map(|t| (t.id.clone(), t.cwd.clone()))
+            .map(|t| (t.id.clone(), t.cwd.clone(), t.parent().map(str::to_owned)))
             .collect();
         let claude: Vec<_> = snapshot
             .claude
@@ -1103,6 +1103,19 @@ fn collect(
                     let mut errors = Vec::new();
                     for (id, path) in paths {
                         let result = (|| -> Result<()> {
+                            // 原生子会话完成由父会话汇总，不能冒充任务完成。
+                            let subagent = match threads.iter().find(|t| t.id == id) {
+                                Some(thread) => thread.is_subagent(),
+                                None => client.thread(&id)?.is_subagent(),
+                            };
+                            if subagent {
+                                if watched.contains_key(&id) {
+                                    inbox.forget_subagent(&id)?;
+                                }
+                                watched.remove(&id);
+                                catchup.remove(&id);
+                                return Ok(());
+                            }
                             if controller.is_some_and(|c| c.thread == id) {
                                 let (latest, turns) = client
                                     .completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
@@ -1166,7 +1179,9 @@ fn collect(
                         })();
                         if let Err(error) = result {
                             // 卸载不代表完成或空历史；保留水位，待重新加载后补查。
-                            if crate::codex::thread_not_loaded(&error, "thread/turns/list", &id) {
+                            if crate::codex::thread_not_loaded(&error, "thread/turns/list", &id)
+                                || crate::codex::thread_not_loaded(&error, "thread/read", &id)
+                            {
                                 continue;
                             }
                             errors.push(format!("会话 {id}：{error:#}"));
@@ -1240,6 +1255,26 @@ pub(crate) fn associate(snapshot: &mut Snapshot) {
         .chain(&snapshot.history)
         .filter_map(|t| owners.get(&t.cwd).map(|owner| (t.id.clone(), owner)))
         .collect();
+    // 子会话可在不同 cwd 执行；优先跟随父会话归属，支持多层派生。
+    let threads: Vec<_> = snapshot.threads.iter().chain(&snapshot.history).collect();
+    for _ in 0..threads.len() {
+        let mut changed = false;
+        for thread in &threads {
+            if thread.is_subagent()
+                && let Some(owner) = thread
+                    .parent()
+                    .and_then(|id| snapshot.associations.get(id))
+                    .cloned()
+                && snapshot.associations.get(&thread.id) != Some(&owner)
+            {
+                snapshot.associations.insert(thread.id.clone(), owner);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     snapshot.claude_associations = snapshot
         .claude
         .iter()
@@ -1264,6 +1299,36 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subagent_ownership_follows_parent_and_invalidates_cached_lineage() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let make = |id: &str, cwd: &Path, parent: Option<&str>| {
+            serde_json::from_value(
+                serde_json::json!({"id":id,"cwd":cwd,"status":null,"parentThreadId":parent}),
+            )
+            .unwrap()
+        };
+        let mut snapshot = Snapshot {
+            repos: vec![repo("a", a.clone()), repo("b", b.clone())],
+            threads: vec![
+                make("grandchild", &b, Some("child")),
+                make("child", &b, Some("parent")),
+                make("parent", &a, None),
+            ],
+            ..Default::default()
+        };
+        let mut cache = AssociationCache::default();
+        cache.apply(&mut snapshot);
+        assert_eq!(snapshot.associations["grandchild"].0, "a");
+        snapshot.threads[1].parent_thread_id = None;
+        cache.apply(&mut snapshot);
+        assert_eq!(snapshot.associations["grandchild"].0, "b");
+    }
+
     #[test]
     fn disappearing_idle_and_empty_sessions_remain_pending_until_caught_up() {
         let thread = |id: &str| -> Thread {
