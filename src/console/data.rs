@@ -1077,6 +1077,9 @@ fn collect(
                     }
                     let client = client.as_mut().unwrap();
                     let threads = client.loaded()?;
+                    // 即使上次为空历史或已完成，消失前也可能执行了一个快速轮次。
+                    // 失败时保留待查集合，只有轮次与通知处理成功才移除。
+                    catchup.extend(disappeared_threads(&snapshot.threads, &threads));
                     let controller = state.bindings.get("controller");
                     let mut owners = Owners::new(&snapshot.repos);
                     let mut paths: BTreeMap<_, _> = threads
@@ -1169,7 +1172,14 @@ fn collect(
                             errors.push(format!("会话 {id}：{error:#}"));
                         }
                     }
-                    ensure!(errors.is_empty(), "{}", errors.join("\n"));
+                    if !errors.is_empty() {
+                        // 轮次查询或通知落盘失败不否定已成功取得的 loaded 快照。
+                        let error = format!("Codex 轮次提醒查询失败：{}", errors.join("\n"));
+                        snapshot.delivery_error = Some(match snapshot.delivery_error.take() {
+                            Some(previous) => format!("{previous}\n{error}"),
+                            None => error,
+                        });
+                    }
                     Ok(threads)
                 })();
                 match result {
@@ -1213,6 +1223,15 @@ fn collect(
         thread::sleep(Duration::from_millis(50));
     }
 }
+fn disappeared_threads(previous: &[Thread], current: &[Thread]) -> Vec<String> {
+    let loaded: HashSet<_> = current.iter().map(|thread| &thread.id).collect();
+    previous
+        .iter()
+        .filter(|thread| !loaded.contains(&thread.id))
+        .map(|thread| thread.id.clone())
+        .collect()
+}
+
 pub(crate) fn associate(snapshot: &mut Snapshot) {
     let mut owners = Owners::new(&snapshot.repos);
     snapshot.associations = snapshot
@@ -1245,6 +1264,30 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disappearing_idle_and_empty_sessions_remain_pending_until_caught_up() {
+        let thread = |id: &str| -> Thread {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "cwd": "/tmp/task", "status": {"type": "idle"}
+            }))
+            .unwrap()
+        };
+        let previous = vec![thread("completed"), thread("empty"), thread("still-loaded")];
+        let current = vec![thread("still-loaded")];
+        let mut catchup = HashSet::new();
+        catchup.extend(disappeared_threads(&previous, &current));
+        assert_eq!(catchup.len(), 2);
+        assert!(catchup.contains("empty"));
+        assert!(catchup.contains("completed"));
+        // 后续快照不再包含消失会话，失败的补查仍须保留。
+        catchup.extend(disappeared_threads(&current, &current));
+        assert_eq!(catchup.len(), 2);
+        catchup.remove("empty");
+        catchup.extend(disappeared_threads(&current, &current));
+        assert!(!catchup.contains("empty"));
+        assert!(catchup.contains("completed"));
+    }
+
     #[test]
     fn backend_disconnect_invalidates_both_providers() {
         let mut snapshot = Snapshot {
