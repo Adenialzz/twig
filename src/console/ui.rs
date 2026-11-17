@@ -370,6 +370,7 @@ const HELP: [(&str, &[(&str, &str)]); 5] = [
             ("/", "搜索当前区域；/new /delete /refresh /help /quit"),
             ("Esc", "取消搜索或详情，返回上一层"),
             ("r", "重新查询"),
+            ("I", "展开 / 收起空闲 Codex 会话"),
             ("q / Ctrl-C", "退出导航，保留所有任务和 Agent"),
         ],
     ),
@@ -455,6 +456,41 @@ fn help(frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
+fn codex_root<'a>(
+    snapshot: &'a data::Snapshot,
+    thread: &'a crate::codex::Thread,
+) -> Option<&'a str> {
+    let mut current = thread;
+    let mut visited = std::collections::HashSet::new();
+    while current.is_subagent() {
+        if !visited.insert(current.id.as_str()) {
+            return None;
+        }
+        let parent = current.parent()?;
+        let Some(ancestor) = snapshot.threads.iter().find(|t| t.id == parent) else {
+            return Some(parent);
+        };
+        current = ancestor;
+    }
+    Some(current.id.as_str())
+}
+
+fn active_codex_groups(snapshot: &data::Snapshot, project: &str) -> usize {
+    snapshot
+        .threads
+        .iter()
+        .filter(|thread| {
+            thread.status["type"] == "active"
+                && snapshot
+                    .associations
+                    .get(&thread.id)
+                    .is_some_and(|(owner, _)| owner == project)
+        })
+        .filter_map(|thread| codex_root(snapshot, thread))
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
 fn projects(frame: &mut Frame, area: Rect, app: &App) {
     let repos = app.repos();
     if repos.is_empty() {
@@ -487,6 +523,13 @@ fn projects(frame: &mut Frame, area: Rect, app: &App) {
             ];
             if repo.error.is_some() {
                 spans.push(Span::styled("异常", Style::default().fg(Color::Red)));
+            }
+            let active = active_codex_groups(&app.snapshot, &repo.name);
+            if active > 0 && !codex_stale(app) {
+                spans.push(Span::styled(
+                    format!(" 运行中 {active}"),
+                    Style::default().fg(Color::Cyan),
+                ));
             }
             Line::from(spans)
         })
@@ -664,7 +707,16 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 }),
             );
             let mut codex_counts = std::collections::BTreeMap::new();
+            let mut groups = std::collections::BTreeMap::<_, &crate::codex::Thread>::new();
             for thread in sessions {
+                if let Some(root) = codex_root(&app.snapshot, thread) {
+                    let representative = groups.entry(root).or_insert(*thread);
+                    if thread.priority() < representative.priority() {
+                        *representative = thread;
+                    }
+                }
+            }
+            for thread in groups.values() {
                 let entry = codex_counts
                     .entry((thread.priority(), thread.label()))
                     .or_insert((0, status_style(thread, stale)));
@@ -852,6 +904,12 @@ enum ObservedSession<'a> {
     Claude(&'a crate::claude::Session),
 }
 impl ObservedSession<'_> {
+    fn parent(&self) -> Option<&str> {
+        match self {
+            Self::Codex(t) if t.is_subagent() => t.parent(),
+            _ => None,
+        }
+    }
     fn id(&self) -> &str {
         match self {
             Self::Codex(thread) => &thread.id,
@@ -866,7 +924,15 @@ impl ObservedSession<'_> {
     }
     fn label(&self) -> String {
         match self {
-            Self::Codex(t) => format!("Codex {}", t.label()),
+            Self::Codex(t) => format!(
+                "{} {}",
+                if t.is_subagent() {
+                    "Codex subagent"
+                } else {
+                    "Codex"
+                },
+                t.label()
+            ),
             Self::Claude(s) => format!("Claude {}", s.label()),
         }
     }
@@ -889,8 +955,33 @@ impl ObservedSession<'_> {
 fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
     let snapshot = &app.snapshot;
     let mut grouped = std::collections::BTreeMap::<_, Vec<_>>::new();
+    let mut visible: std::collections::HashSet<_> = snapshot
+        .threads
+        .iter()
+        .filter(|t| app.monitor_idle || codex_stale(app) || t.status["type"] != "idle")
+        .map(|t| t.id.as_str())
+        .collect();
+    loop {
+        let before = visible.len();
+        for t in &snapshot.threads {
+            if visible.contains(t.id.as_str())
+                && t.is_subagent()
+                && let Some(parent) = t.parent()
+            {
+                visible.insert(parent);
+            }
+        }
+        if visible.len() == before {
+            break;
+        }
+    }
+    let mut hidden = 0;
     for thread in &snapshot.threads {
         if let Some(owner) = snapshot.associations.get(&thread.id) {
+            if !visible.contains(thread.id.as_str()) {
+                hidden += 1;
+                continue;
+            }
             grouped
                 .entry(owner)
                 .or_default()
@@ -968,7 +1059,47 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                 ),
                 false,
             ));
-            for (index, thread) in threads.iter().enumerate() {
+            let mut ordered: Vec<(usize, usize)> = Vec::new();
+            let mut pending: Vec<_> = (0..threads.len()).rev().collect();
+            let mut seen = std::collections::HashSet::new();
+            while let Some(index) = pending.pop() {
+                if seen.contains(&index) {
+                    continue;
+                }
+                // 父节点先于子节点，缺失父节点或环状数据仍保留可见行。
+                let mut lineage = vec![index];
+                while let Some(parent) = threads[*lineage.last().unwrap()]
+                    .parent()
+                    .and_then(|id| threads.iter().position(|t| t.id() == id))
+                {
+                    if seen.contains(&parent) || lineage.contains(&parent) {
+                        break;
+                    }
+                    lineage.push(parent);
+                }
+                for index in lineage.into_iter().rev() {
+                    if !seen.insert(index) {
+                        continue;
+                    }
+                    let depth = threads[index]
+                        .parent()
+                        .and_then(|id| {
+                            ordered
+                                .iter()
+                                .find(|(i, _)| threads[*i].id() == id)
+                                .map(|(_, depth)| depth + 1)
+                        })
+                        .unwrap_or(0);
+                    ordered.push((index, depth));
+                    for child in (0..threads.len()).rev() {
+                        if threads[child].parent() == Some(threads[index].id()) {
+                            pending.push(child);
+                        }
+                    }
+                }
+            }
+            for (index, (thread_index, depth)) in ordered.iter().enumerate() {
+                let thread = &threads[*thread_index];
                 let title = safe(thread.title());
                 let duplicate = threads
                     .iter()
@@ -988,6 +1119,7 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                     .saturating_sub(Line::from(label.as_str()).width())
                     .max(2);
                 let mut spans = vec![
+                    Span::raw("  ".repeat(*depth)),
                     Span::styled(
                         format!(
                             "{}{} ",
@@ -1010,6 +1142,17 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
                         title
                     }),
                 ];
+                if let ObservedSession::Codex(t) = thread {
+                    if let Some(role) = &t.agent_role {
+                        spans.push(Span::raw(format!(" [{}]", safe(role))));
+                    }
+                    if t.is_subagent()
+                        && t.parent()
+                            .is_none_or(|id| !threads.iter().any(|p| p.id() == id))
+                    {
+                        spans.push(Span::raw(" · 父会话未显示"));
+                    }
+                }
                 if duplicate {
                     spans.push(Span::styled(
                         format!(
@@ -1023,7 +1166,16 @@ fn monitor_rows(app: &App) -> (Vec<(Line<'static>, bool)>, usize) {
             }
         }
     }
-    (rows, total)
+    if hidden > 0 {
+        rows.push((
+            Line::styled(
+                format!("空闲 Codex {hidden} 个已折叠 · I 展开"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            false,
+        ));
+    }
+    (rows, total + hidden)
 }
 
 fn monitor(frame: &mut Frame, area: Rect, app: &App) {
@@ -2046,6 +2198,7 @@ mod tests {
 
     fn fixture() -> App {
         let mut app = App::new("/alpha".into());
+        app.monitor_idle = true;
         app.snapshot.codex_error = None;
         app.snapshot.codex_checked = Some(Instant::now());
         for (project, status) in [("alpha", "idle"), ("beta", "active")] {
@@ -2077,6 +2230,84 @@ mod tests {
         }
         app.reconcile();
         app
+    }
+
+    #[test]
+    fn idle_folding_preserves_active_children_and_project_freshness() {
+        let mut app = fixture();
+        app.monitor_idle = false;
+        let folded = text(&render(&app, 100, 30, monitor));
+        assert!(folded.contains("已折叠"));
+        assert!(!folded.contains("alpha 会话"));
+        assert!(folded.contains("beta 会话"));
+        let child: crate::codex::Thread = serde_json::from_value(json!({
+            "id":"child", "cwd":"/alpha", "parentThreadId":"alpha-full-id",
+            "agentNickname":"Scout", "status":{"type":"active","activeFlags":[]}
+        }))
+        .unwrap();
+        app.snapshot.threads.push(child);
+        app.snapshot
+            .associations
+            .insert("child".into(), ("alpha".into(), "/alpha".into()));
+        let expanded = text(&render(&app, 100, 30, monitor));
+        assert!(expanded.contains("subagent"));
+        assert!(expanded.find("alpha 会话").unwrap() < expanded.find("Scout").unwrap());
+        assert!(text(&render(&app, 100, 15, projects)).contains("运行中 1"));
+        app.snapshot.codex_error = Some("offline".into());
+        assert!(!text(&render(&app, 100, 15, projects)).contains("运行中"));
+        assert!(text(&render(&app, 100, 30, monitor)).contains("过期"));
+        app.snapshot.codex_error = None;
+        app.snapshot.threads.last_mut().unwrap().status = json!({"type":"idle"});
+        app.monitor_idle = true;
+        assert!(text(&render(&app, 100, 30, monitor)).contains("Scout"));
+    }
+
+    #[test]
+    fn project_activity_counts_roots_not_active_descendants() {
+        let mut app = fixture();
+        for (id, parent) in [
+            ("child1", "alpha-full-id"),
+            ("child2", "alpha-full-id"),
+            ("grandchild", "child1"),
+        ] {
+            app.snapshot.threads.push(
+                serde_json::from_value(json!({
+                    "id":id, "cwd":"/alpha", "parentThreadId":parent,
+                    "status":{"type":"active","activeFlags":[]}
+                }))
+                .unwrap(),
+            );
+            app.snapshot
+                .associations
+                .insert(id.into(), ("alpha".into(), "/alpha".into()));
+        }
+        // 空闲父会话下的多个活跃子会话（含多层）合计为一组。
+        assert_eq!(active_codex_groups(&app.snapshot, "alpha"), 1);
+        app.project = Some("alpha".into());
+        let task_summary = text(&render(&app, 120, 15, tasks));
+        assert!(task_summary.contains("运行中 1"), "{task_summary}");
+        assert!(!task_summary.contains("运行中 3"), "{task_summary}");
+        assert!(!task_summary.contains("空闲 1"), "{task_summary}");
+        app.snapshot.threads.last_mut().unwrap().status =
+            json!({"type":"active","activeFlags":["waitingOnApproval"]});
+        let task_summary = text(&render(&app, 120, 15, tasks));
+        assert!(task_summary.contains("等待审批 1"), "{task_summary}");
+        assert!(!task_summary.contains("运行中 1"), "{task_summary}");
+        app.snapshot.threads[0].status = json!({"type":"active","activeFlags":[]});
+        assert_eq!(active_codex_groups(&app.snapshot, "alpha"), 1);
+        let mut another = app.snapshot.threads[0].clone();
+        another.id = "another".into();
+        app.snapshot.threads.push(another);
+        app.snapshot
+            .associations
+            .insert("another".into(), ("alpha".into(), "/alpha".into()));
+        assert_eq!(active_codex_groups(&app.snapshot, "alpha"), 2);
+        app.snapshot.threads.retain(|t| t.id != "alpha-full-id");
+        assert_eq!(active_codex_groups(&app.snapshot, "alpha"), 2);
+        for thread in &mut app.snapshot.threads {
+            thread.status = json!({"type":"idle"});
+        }
+        assert_eq!(active_codex_groups(&app.snapshot, "alpha"), 0);
     }
 
     fn render(app: &App, width: u16, height: u16, draw: fn(&mut Frame, Rect, &App)) -> Buffer {

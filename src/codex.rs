@@ -53,15 +53,28 @@ pub struct Thread {
     #[serde(default)]
     pub parent_thread_id: Option<String>,
     #[serde(default)]
+    pub agent_nickname: Option<String>,
+    #[serde(default)]
+    pub agent_role: Option<String>,
+    #[serde(default)]
     pub updated_at: i64,
     #[serde(default)]
     pub created_at: i64,
 }
 impl Thread {
+    pub fn is_subagent(&self) -> bool {
+        self.parent_thread_id.is_some() || self.source.get("subAgent").is_some()
+    }
+    pub fn parent(&self) -> Option<&str> {
+        self.source["subAgent"]["thread_spawn"]["parent_thread_id"]
+            .as_str()
+            .or(self.parent_thread_id.as_deref())
+    }
     pub fn title(&self) -> &str {
-        self.name
+        self.agent_nickname
             .as_deref()
             .filter(|s| !s.is_empty())
+            .or(self.name.as_deref().filter(|s| !s.is_empty()))
             .unwrap_or(&self.preview)
     }
     pub fn label(&self) -> String {
@@ -257,6 +270,11 @@ impl Client {
         }
         Ok(threads)
     }
+    pub fn thread(&mut self, id: &str) -> Result<Thread> {
+        let mut result =
+            self.request("thread/read", json!({"threadId":id,"includeTurns":false}))?;
+        serde_json::from_value(result["thread"].take()).context("Codex 线程格式不兼容")
+    }
     pub fn history(&mut self, cwd: Option<&Path>, cursor: Option<&str>) -> Result<Page> {
         let result = self.request("thread/list", json!({"cwd":cwd,"cursor":cursor,"limit":50,"useStateDbOnly":true,"sortKey":"updated_at","sortDirection":"desc"}))?;
         serde_json::from_value(result).context("Codex 历史列表格式不兼容")
@@ -356,6 +374,26 @@ pub(crate) fn completed_turns(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subagent_identity_uses_protocol_fields_not_title() {
+        let parse = |extra: Value| {
+            let mut value = json!({"id":"child","cwd":"/tmp","status":{"type":"idle"}});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<Thread>(value).unwrap()
+        };
+        let child = parse(
+            json!({"source":{"subAgent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}},"agentNickname":"Scout","agentRole":"explorer"}),
+        );
+        assert!(child.is_subagent());
+        assert_eq!(child.parent(), Some("parent"));
+        assert_eq!(child.title(), "Scout");
+        assert!(parse(json!({"parentThreadId":"parent"})).is_subagent());
+        assert!(parse(json!({"source":{"subAgent":"review"}})).is_subagent());
+        assert!(!parse(json!({"source":"cli","name":"subagent"})).is_subagent());
+    }
     use super::*;
     use std::{
         os::unix::net::UnixListener,
@@ -412,6 +450,11 @@ mod tests {
         let threads = client.loaded().unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "healthy");
+        let error = client.thread("gone").unwrap_err();
+        assert!(thread_not_loaded(&error, "thread/read", "gone"));
+        assert!(!thread_not_loaded(&error, "thread/read", "healthy"));
+        assert!(!thread_not_loaded(&error, "thread/turns/list", "gone"));
+        assert_eq!(client.thread("healthy").unwrap().id, "healthy");
         let (running, _) = client.completed_turns("healthy", None).unwrap();
         let error = client
             .completed_turns("healthy", Some(&running))

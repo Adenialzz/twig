@@ -156,7 +156,7 @@ impl Updates {
 #[derive(Default)]
 struct AssociationCache {
     tasks: Vec<(String, PathBuf)>,
-    threads: Vec<(String, PathBuf)>,
+    threads: Vec<(String, PathBuf, Option<String>)>,
     claude: Vec<(String, PathBuf)>,
     claude_associations: BTreeMap<String, (String, PathBuf)>,
     checked: Option<Instant>,
@@ -178,7 +178,7 @@ impl AssociationCache {
             .threads
             .iter()
             .chain(&snapshot.history)
-            .map(|t| (t.id.clone(), t.cwd.clone()))
+            .map(|t| (t.id.clone(), t.cwd.clone(), t.parent().map(str::to_owned)))
             .collect();
         let claude: Vec<_> = snapshot
             .claude
@@ -1077,6 +1077,9 @@ fn collect(
                     }
                     let client = client.as_mut().unwrap();
                     let threads = client.loaded()?;
+                    // 即使上次为空历史或已完成，消失前也可能执行了一个快速轮次。
+                    // 失败时保留待查集合，只有轮次与通知处理成功才移除。
+                    catchup.extend(disappeared_threads(&snapshot.threads, &threads));
                     let controller = state.bindings.get("controller");
                     let mut owners = Owners::new(&snapshot.repos);
                     let mut paths: BTreeMap<_, _> = threads
@@ -1100,6 +1103,19 @@ fn collect(
                     let mut errors = Vec::new();
                     for (id, path) in paths {
                         let result = (|| -> Result<()> {
+                            // 原生子会话完成由父会话汇总，不能冒充任务完成。
+                            let subagent = match threads.iter().find(|t| t.id == id) {
+                                Some(thread) => thread.is_subagent(),
+                                None => client.thread(&id)?.is_subagent(),
+                            };
+                            if subagent {
+                                if watched.contains_key(&id) {
+                                    inbox.forget_subagent(&id)?;
+                                }
+                                watched.remove(&id);
+                                catchup.remove(&id);
+                                return Ok(());
+                            }
                             if controller.is_some_and(|c| c.thread == id) {
                                 let (latest, turns) = client
                                     .completed_turns(&id, watched.get(&id).map(|(_, turn)| turn))?;
@@ -1163,13 +1179,22 @@ fn collect(
                         })();
                         if let Err(error) = result {
                             // 卸载不代表完成或空历史；保留水位，待重新加载后补查。
-                            if crate::codex::thread_not_loaded(&error, "thread/turns/list", &id) {
+                            if crate::codex::thread_not_loaded(&error, "thread/turns/list", &id)
+                                || crate::codex::thread_not_loaded(&error, "thread/read", &id)
+                            {
                                 continue;
                             }
                             errors.push(format!("会话 {id}：{error:#}"));
                         }
                     }
-                    ensure!(errors.is_empty(), "{}", errors.join("\n"));
+                    if !errors.is_empty() {
+                        // 轮次查询或通知落盘失败不否定已成功取得的 loaded 快照。
+                        let error = format!("Codex 轮次提醒查询失败：{}", errors.join("\n"));
+                        snapshot.delivery_error = Some(match snapshot.delivery_error.take() {
+                            Some(previous) => format!("{previous}\n{error}"),
+                            None => error,
+                        });
+                    }
                     Ok(threads)
                 })();
                 match result {
@@ -1213,6 +1238,15 @@ fn collect(
         thread::sleep(Duration::from_millis(50));
     }
 }
+fn disappeared_threads(previous: &[Thread], current: &[Thread]) -> Vec<String> {
+    let loaded: HashSet<_> = current.iter().map(|thread| &thread.id).collect();
+    previous
+        .iter()
+        .filter(|thread| !loaded.contains(&thread.id))
+        .map(|thread| thread.id.clone())
+        .collect()
+}
+
 pub(crate) fn associate(snapshot: &mut Snapshot) {
     let mut owners = Owners::new(&snapshot.repos);
     snapshot.associations = snapshot
@@ -1221,6 +1255,26 @@ pub(crate) fn associate(snapshot: &mut Snapshot) {
         .chain(&snapshot.history)
         .filter_map(|t| owners.get(&t.cwd).map(|owner| (t.id.clone(), owner)))
         .collect();
+    // 子会话可在不同 cwd 执行；优先跟随父会话归属，支持多层派生。
+    let threads: Vec<_> = snapshot.threads.iter().chain(&snapshot.history).collect();
+    for _ in 0..threads.len() {
+        let mut changed = false;
+        for thread in &threads {
+            if thread.is_subagent()
+                && let Some(owner) = thread
+                    .parent()
+                    .and_then(|id| snapshot.associations.get(id))
+                    .cloned()
+                && snapshot.associations.get(&thread.id) != Some(&owner)
+            {
+                snapshot.associations.insert(thread.id.clone(), owner);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
     snapshot.claude_associations = snapshot
         .claude
         .iter()
@@ -1245,6 +1299,60 @@ pub fn prepare_terminal(registry_path: &Path, name: &str, task: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subagent_ownership_follows_parent_and_invalidates_cached_lineage() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = temp.path().join("a");
+        let b = temp.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let make = |id: &str, cwd: &Path, parent: Option<&str>| {
+            serde_json::from_value(
+                serde_json::json!({"id":id,"cwd":cwd,"status":null,"parentThreadId":parent}),
+            )
+            .unwrap()
+        };
+        let mut snapshot = Snapshot {
+            repos: vec![repo("a", a.clone()), repo("b", b.clone())],
+            threads: vec![
+                make("grandchild", &b, Some("child")),
+                make("child", &b, Some("parent")),
+                make("parent", &a, None),
+            ],
+            ..Default::default()
+        };
+        let mut cache = AssociationCache::default();
+        cache.apply(&mut snapshot);
+        assert_eq!(snapshot.associations["grandchild"].0, "a");
+        snapshot.threads[1].parent_thread_id = None;
+        cache.apply(&mut snapshot);
+        assert_eq!(snapshot.associations["grandchild"].0, "b");
+    }
+
+    #[test]
+    fn disappearing_idle_and_empty_sessions_remain_pending_until_caught_up() {
+        let thread = |id: &str| -> Thread {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "cwd": "/tmp/task", "status": {"type": "idle"}
+            }))
+            .unwrap()
+        };
+        let previous = vec![thread("completed"), thread("empty"), thread("still-loaded")];
+        let current = vec![thread("still-loaded")];
+        let mut catchup = HashSet::new();
+        catchup.extend(disappeared_threads(&previous, &current));
+        assert_eq!(catchup.len(), 2);
+        assert!(catchup.contains("empty"));
+        assert!(catchup.contains("completed"));
+        // 后续快照不再包含消失会话，失败的补查仍须保留。
+        catchup.extend(disappeared_threads(&current, &current));
+        assert_eq!(catchup.len(), 2);
+        catchup.remove("empty");
+        catchup.extend(disappeared_threads(&current, &current));
+        assert!(!catchup.contains("empty"));
+        assert!(catchup.contains("completed"));
+    }
+
     #[test]
     fn backend_disconnect_invalidates_both_providers() {
         let mut snapshot = Snapshot {

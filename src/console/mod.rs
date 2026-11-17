@@ -47,6 +47,7 @@ pub(super) struct App {
     refresh: u64,
     detail: bool,
     metadata: bool,
+    monitor_idle: bool,
     scroll: u16,
     message: Option<String>,
     initial_cwd: PathBuf,
@@ -96,6 +97,7 @@ impl App {
             refresh: 0,
             detail: false,
             metadata: false,
+            monitor_idle: false,
             scroll: 0,
             message: None,
             initial_cwd: cwd,
@@ -1222,6 +1224,7 @@ fn run_inner(
             }
             KeyCode::Char('q') => break,
             KeyCode::Char('?') => app.help = true,
+            KeyCode::Char('I') => app.monitor_idle = !app.monitor_idle,
             KeyCode::Char('i') => {
                 app.metadata = !app.metadata;
                 app.scroll = 0;
