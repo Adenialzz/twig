@@ -6,7 +6,7 @@ Twig 的可选主控使用已有 Codex app-server daemon。主控可以查看项
 
 ## 开始使用
 
-需要支持 app-server daemon 的 Codex（当前隔离验收版本 0.164.0）；飞书通知另外需要 curl。
+需要支持 app-server daemon 的 Codex（当前隔离验收版本 0.169.0）；飞书通知另外需要 curl。
 
 ```sh
 # 由用户自行启动；Twig 不启动、重启或更新共享服务。

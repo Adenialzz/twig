@@ -209,7 +209,7 @@ impl Client {
                     .map(|b| format!("\\{b:03o}"))
                     .collect::<String>();
                 self.command(&format!(
-                    "set-buffer {} -b {name} \"{value}\"",
+                    "set-buffer {} -b {name} -- \"{value}\"",
                     if index == 0 { "" } else { "-a" }
                 ))?;
             }
@@ -1479,7 +1479,12 @@ mod tests {
         client
             .key("%0", event::KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             .unwrap();
-        let text = format!("中文\n$HOME '\"; kill-server\n{}", "文本".repeat(800));
+        // 首块与追加块都以短横线开头，正文不能被解析为 set-buffer 选项。
+        let text = format!(
+            "-- {}-a 中文\n$HOME '\"; kill-server\n{}",
+            "x".repeat(4096 - 3),
+            "文本".repeat(800)
+        );
         client.paste("%0", &text).unwrap();
         let expected = format!("\x1bOA\x1b[200~{text}\x1b[201~");
         loop {

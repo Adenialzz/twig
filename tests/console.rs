@@ -525,13 +525,55 @@ impl Pty {
 }
 impl Drop for Pty {
     fn drop(&mut self) {
-        if self.child.try_wait().unwrap().is_none() {
-            unsafe {
-                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        unsafe {
+            libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+        }
+        // 进程组清理不能代替对直接子进程的终止；失败路径也不能无限 wait。
+        let _ = self.child.kill();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // 丢弃待输出内容，避免析构期间再次触发测试断言。
+            let mut bytes = [0; 16384];
+            for _ in 0..16 {
+                if !matches!(self.master.read(&mut bytes), Ok(n) if n > 0) {
+                    break;
+                }
             }
-            let _ = self.child.wait();
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {}
+                result => {
+                    eprintln!(
+                        "PTY 清理失败：PID {}，状态 {result:?}，输出：{}",
+                        self.child.id(),
+                        self.text
+                    );
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+#[test]
+fn pty_drop_terminates_active_output_and_reaps_child() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "while :; do printf 'PTY_ACTIVE\\n'; done"]);
+    let mut p = Pty::spawn(command);
+    p.wait("PTY_ACTIVE");
+    let pid = p.child.id() as i32;
+    let started = Instant::now();
+    drop(p);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH)
+    );
 }
 
 #[test]
@@ -3429,7 +3471,7 @@ fn task_creation_enters_workbench_while_startup_writes_files() {
     fs::write(
         f.repo.join(".twig/config.toml"),
         r#"[tmux]
-panes = [{ command = ["sh", "-c", "i=0; while [ $i -lt 100 ]; do touch startup-$i; i=$((i+1)); sleep 0.02; done; echo STARTUP_DONE"] }]
+panes = [{ command = ["sh", "-c", "i=0; while [ $i -lt 100 ]; do touch startup-$i; i=$((i+1)); sleep 0.02; done; printf 'STARTUP_%s\\n' DONE"] }]
 "#,
     ).unwrap();
     let mut p = f.terminal(false);
@@ -3439,13 +3481,13 @@ panes = [{ command = ["sh", "-c", "i=0; while [ $i -lt 100 ]; do touch startup-$
     p.send(b"writer\r");
     p.wait(" · 全局 Codex ");
     p.wait_screen("STARTUP_DONE");
-    p.created_task(&f, "writer");
     assert!(
         f.repo
             .with_file_name("repo.worktrees")
             .join("writer/startup-99")
             .is_file()
     );
+    p.created_task(&f, "writer");
     p.send(b"q");
     p.wait("TERMINAL_RESTORED:0");
     assert!(p.wait_exit().success());

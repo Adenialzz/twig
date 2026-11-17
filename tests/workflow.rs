@@ -377,6 +377,20 @@ fn startup_commands_return_to_shell_and_ctrl_d_closes_panes() {
 #[test]
 fn startup_shells_inherit_global_options_and_honor_session_overrides() {
     let f = Fixture::new();
+    // 使用隔离的登录配置，以真正出现的提示符作为 Shell 就绪信号。
+    for profile in [".profile", ".bash_profile"] {
+        fs::write(
+            f._temp.path().join(profile),
+            "sleep 0.2\nPS1='TWIG_SHELL_READY> '\n",
+        )
+        .unwrap();
+    }
+    f.mux(&[
+        "set-environment",
+        "-g",
+        "HOME",
+        f._temp.path().to_str().unwrap(),
+    ]);
     fs::create_dir(f.repo.join(".twig")).unwrap();
     fs::write(
         f.repo.join(".twig/config.toml"),
@@ -400,6 +414,18 @@ fn startup_shells_inherit_global_options_and_honor_session_overrides() {
         for (index, pane) in panes.lines().enumerate() {
             let command = f.mux(&["display-message", "-p", "-t", pane, "#{pane_start_command}"]);
             assert!(command.contains(shell), "Shell 启动命令错误：{command}");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let screen = f.mux(&["capture-pane", "-p", "-t", pane]);
+                if screen.contains("TWIG_SHELL_READY>") {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{task}/{pane} Shell 未就绪：{screen}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             let marker = format!("shell-ready-{index}");
             f.mux(&[
                 "send-keys",
@@ -414,7 +440,15 @@ fn startup_shells_inherit_global_options_and_honor_session_overrides() {
             while fs::read_to_string(&path).ok().as_deref() != Some("ready") {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "Shell 未执行输入的命令"
+                    "{task}/{pane} Shell 未执行输入的命令，状态：{}，画面：{}",
+                    f.mux(&[
+                        "display-message",
+                        "-p",
+                        "-t",
+                        pane,
+                        "#{pane_pid} #{pane_dead} #{pane_current_command}"
+                    ]),
+                    f.mux(&["capture-pane", "-p", "-t", pane])
                 );
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }

@@ -557,7 +557,7 @@ supports_websockets = false
         twig("agent", "drain")
         assert json.loads(twig("agent", "read", "--project", "demo", "--task", "test"))["thread"]["id"] == new_task["thread"]
         print("PASS: 同名任务重建后定位新 session，恢复跳过已删除实例", flush=True)
-        # 模拟没有 notify 的原生客户端轮次，恢复时须从服务端补查完成事实。
+        # 模拟没有 notify 的原生客户端轮次，后台须从服务端补查完成事实。
         client = Client(socket)
         wait_for(lambda: client.call("thread/read", {"threadId": new_task["thread"], "includeTurns": False})["thread"]["status"]["type"] == "idle", "新任务未空闲")
         client.call("thread/resume", {"threadId": new_task["thread"], "config": {"notify": []}})
@@ -567,14 +567,15 @@ supports_websockets = false
             return any(t["id"] == turn and t["status"] == "completed" for t in result["thread"]["turns"])
         wait_for(completed, "无回调轮次未完成")
         key = new_task["thread"] + ":" + turn
-        assert key not in state()["seen"]
-        twig("agent", "drain")
-        assert key in state()["seen"]
+        # 后台会主动补查，不能假设显式 drain 前尚未消费该轮次。
+        wait_for(lambda: key in state()["seen"], "后台未补查无回调轮次")
         count = len([m for m in state()["messages"] if turn in m["text"]])
         twig("agent", "drain")
         assert count == 1 == len([m for m in state()["messages"] if turn in m["text"]])
+        twig("agent", "drain")
+        assert len([m for m in state()["messages"] if turn in m["text"]]) == 1
         client.socket.close()
-        print("PASS: 漏失完成回调由 drain 补查，重复恢复不重复反馈", flush=True)
+        print("PASS: 漏失完成回调由后台补查，重复 drain 不重复反馈", flush=True)
         # 即使全局配置受限，主控恢复仍使用 YOLO，子任务保留原策略。
         client = Client(socket)
         restored = client.call("thread/resume", {"threadId": main["thread"]})

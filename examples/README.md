@@ -8,7 +8,7 @@ uv run examples/check_controller.py
 
 需要 Codex CLI 和 uv；脚本只使用 Python 标准库。它在临时 CODEX_HOME 和专用 Unix socket 上启动真实 app-server，以本地固定 Responses 响应代替模型；不读取真实认证、不连接真实 daemon、不消耗模型额度、不发送飞书消息。模拟模型名称仅用于协议配置，不选择或调用线上模型。
 
-在 Codex 0.163.0 验证：忙时 turn/start 加入当前轮次；所有 UI 客户端断开后 notify 继续执行；两个完成回调通过临时队列使主控在当前轮次完成后再处理反馈；主控调用独立 CLI 并读取模拟通知环境变量；重新连接可读取历史，重复完成事件不重复派发。
+在 Codex 0.169.0 复验：忙时 turn/start 加入当前轮次；所有 UI 客户端断开后 notify 继续执行；两个完成回调通过临时队列使主控在当前轮次完成后再处理反馈；主控调用独立 CLI 并读取模拟通知环境变量；重新连接可读取历史，重复完成事件不重复派发。
 
 这是[早期 RFC](../archive/RFC-agent-controller.md) 第一阶段的协议原型，回调和队列由验收脚本模拟；正式 Twig 命令由下文的主控验收覆盖。它使用前台启动、独立于客户端存活的 app-server，未覆盖受管理 daemon 重启、30 分钟卸载、回调崩溃或投递结果未知、人工输入竞争、tmux 启动配置及审批场景。不会据此宣称生产消息队列已具备可靠性。
 
@@ -69,4 +69,4 @@ CI 在 Ubuntu 24.04（tmux 3.8）和 macOS Tahoe 26（Homebrew tmux）上执行�
 
 后台系统托管示例见 [services/twig.service](services/twig.service) 与 [services/com.twig.daemon.plist](services/com.twig.daemon.plist)，安装步骤见 [后台指南](../docs/daemon.md)。Agent 验收同时启动隔离 Twig 后台；`feishu_mock.py` 提供本机应用机器人 HTTP/WebSocket，验证全部 UI 退出后的双向收发及重启去重，不使用真实凭证。
 
-Agent CI 在 Ubuntu 24.04 与 macOS 26 上固定 Python 3.11、Codex 0.164.0，构建正式二进制后执行上述脚本。验收步骤限时 5 分钟，失败日志保留 7 天；长输入、后台等待和退出期间持续读取 PTY，超时前输出线程栈。
+Agent CI 在 Ubuntu 24.04 与 macOS 26 上固定 Python 3.11、Codex 0.169.0，构建正式二进制后执行上述脚本。验收步骤限时 5 分钟，失败日志保留 7 天；长输入、后台等待和退出期间持续读取 PTY，超时前输出线程栈。

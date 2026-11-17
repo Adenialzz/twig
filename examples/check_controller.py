@@ -1,7 +1,7 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""隔离验证 Codex 0.163.0：uv run examples/check_controller.py。
+"""隔离验证 Codex 0.169.0：uv run examples/check_controller.py。
 
 真实 app-server + 本地固定 Responses 响应，不读取真实认证、不调用远端模型。
 仅验证协议与进程行为，不是正式主控、消息队列或完整 WebSocket 客户端。
