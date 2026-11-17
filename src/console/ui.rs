@@ -456,6 +456,25 @@ fn help(frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }
+fn codex_root<'a>(
+    snapshot: &'a data::Snapshot,
+    thread: &'a crate::codex::Thread,
+) -> Option<&'a str> {
+    let mut current = thread;
+    let mut visited = std::collections::HashSet::new();
+    while current.is_subagent() {
+        if !visited.insert(current.id.as_str()) {
+            return None;
+        }
+        let parent = current.parent()?;
+        let Some(ancestor) = snapshot.threads.iter().find(|t| t.id == parent) else {
+            return Some(parent);
+        };
+        current = ancestor;
+    }
+    Some(current.id.as_str())
+}
+
 fn active_codex_groups(snapshot: &data::Snapshot, project: &str) -> usize {
     snapshot
         .threads
@@ -467,21 +486,7 @@ fn active_codex_groups(snapshot: &data::Snapshot, project: &str) -> usize {
                     .get(&thread.id)
                     .is_some_and(|(owner, _)| owner == project)
         })
-        .filter_map(|thread| {
-            let mut current = thread;
-            let mut visited = std::collections::HashSet::new();
-            while current.is_subagent() {
-                if !visited.insert(current.id.as_str()) {
-                    return None;
-                }
-                let parent = current.parent()?;
-                let Some(ancestor) = snapshot.threads.iter().find(|t| t.id == parent) else {
-                    return Some(parent);
-                };
-                current = ancestor;
-            }
-            Some(current.id.as_str())
-        })
+        .filter_map(|thread| codex_root(snapshot, thread))
         .collect::<std::collections::HashSet<_>>()
         .len()
 }
@@ -702,7 +707,16 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 }),
             );
             let mut codex_counts = std::collections::BTreeMap::new();
+            let mut groups = std::collections::BTreeMap::<_, &crate::codex::Thread>::new();
             for thread in sessions {
+                if let Some(root) = codex_root(&app.snapshot, thread) {
+                    let representative = groups.entry(root).or_insert(*thread);
+                    if thread.priority() < representative.priority() {
+                        *representative = thread;
+                    }
+                }
+            }
+            for thread in groups.values() {
                 let entry = codex_counts
                     .entry((thread.priority(), thread.label()))
                     .or_insert((0, status_style(thread, stale)));
@@ -2269,6 +2283,16 @@ mod tests {
         }
         // 空闲父会话下的多个活跃子会话（含多层）合计为一组。
         assert_eq!(active_codex_groups(&app.snapshot, "alpha"), 1);
+        app.project = Some("alpha".into());
+        let task_summary = text(&render(&app, 120, 15, tasks));
+        assert!(task_summary.contains("运行中 1"), "{task_summary}");
+        assert!(!task_summary.contains("运行中 3"), "{task_summary}");
+        assert!(!task_summary.contains("空闲 1"), "{task_summary}");
+        app.snapshot.threads.last_mut().unwrap().status =
+            json!({"type":"active","activeFlags":["waitingOnApproval"]});
+        let task_summary = text(&render(&app, 120, 15, tasks));
+        assert!(task_summary.contains("等待审批 1"), "{task_summary}");
+        assert!(!task_summary.contains("运行中 1"), "{task_summary}");
         app.snapshot.threads[0].status = json!({"type":"active","activeFlags":[]});
         assert_eq!(active_codex_groups(&app.snapshot, "alpha"), 1);
         let mut another = app.snapshot.threads[0].clone();
