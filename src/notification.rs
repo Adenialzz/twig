@@ -3,8 +3,8 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Line,
-    widgets::{Block, BorderType, Borders, Clear, List, ListState, Paragraph, Wrap},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -325,11 +325,15 @@ impl TaskPicker {
                     } else {
                         task
                     };
+                    let mut line = Line::from(format!("{project} / {label}"));
                     if running.is_some_and(|tasks| tasks.contains(key)) {
-                        format!("{project} / {label} · Codex 运行中")
-                    } else {
-                        format!("{project} / {label}")
+                        line.push_span(" · ");
+                        line.push_span(Span::styled(
+                            "Codex 运行中",
+                            Style::default().fg(Color::Cyan),
+                        ));
                     }
+                    ListItem::new(line)
                 })
                 .collect();
             draw_task_list(
@@ -349,12 +353,12 @@ impl TaskPicker {
             .map(|task| {
                 let clean =
                     |text: &str| text.chars().filter(|c| !c.is_control()).collect::<String>();
-                format!(
+                ListItem::new(format!(
                     "{} / {} / 未读 {}",
                     clean(&task.notice.project),
                     clean(&task.notice.task),
                     task.count
-                )
+                ))
             })
             .collect::<Vec<_>>();
         draw_task_list(
@@ -380,7 +384,7 @@ fn draw_task_list(
     frame: &mut Frame,
     title: &str,
     empty: &str,
-    items: Vec<String>,
+    items: Vec<ListItem>,
     selected: Option<usize>,
     footer: &str,
 ) {
@@ -405,6 +409,13 @@ fn draw_task_list(
         frame.render_widget(Paragraph::new(empty).block(block), area);
         return;
     }
+    let items = items.into_iter().enumerate().map(|(index, item)| {
+        if Some(index) == selected {
+            item.style(Style::default().fg(Color::Yellow))
+        } else {
+            item
+        }
+    });
     let mut state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(
         List::new(items)
@@ -412,7 +423,6 @@ fn draw_task_list(
             .highlight_symbol("› ")
             .highlight_style(
                 Style::default()
-                    .fg(Color::Yellow)
                     .bg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
             ),
@@ -425,6 +435,30 @@ fn draw_task_list(
 mod picker_tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn recent_running_status_keeps_cyan_on_both_row_backgrounds() {
+        let tasks = vec![("demo".into(), "one".into()), ("demo".into(), "two".into())];
+        let running = tasks.iter().cloned().collect();
+        let mut picker = TaskPicker::new(Ok(tasks));
+        picker.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &[]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, &[], Some(&running)))
+            .unwrap();
+        let cells = &terminal.backend().buffer().content;
+        for symbol in ["C", "运", "行", "中"] {
+            let colors: Vec<_> = cells
+                .iter()
+                .filter(|cell| cell.symbol() == symbol)
+                .map(|cell| (cell.fg, cell.bg))
+                .collect();
+            assert_eq!(
+                colors,
+                [(Color::Cyan, Color::DarkGray), (Color::Cyan, Color::Black)]
+            );
+        }
+    }
 
     #[test]
     fn picker_keeps_task_selected_when_notice_type_changes() {
