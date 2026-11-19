@@ -304,18 +304,32 @@ impl TaskPicker {
         });
     }
 
-    pub fn draw(&self, frame: &mut Frame, tasks: &[UnreadTask]) {
+    pub fn showing_recent(&self) -> bool {
+        self.showing_recent
+    }
+
+    pub fn draw(
+        &self,
+        frame: &mut Frame,
+        tasks: &[UnreadTask],
+        running: Option<&std::collections::BTreeSet<(String, String)>>,
+    ) {
         if self.showing_recent {
             let items = self
                 .recent
                 .iter()
-                .map(|(project, task)| {
+                .map(|key| {
+                    let (project, task) = key;
                     let label = if task == "main" {
                         "主工作目录"
                     } else {
                         task
                     };
-                    format!("{project} / {label}")
+                    if running.is_some_and(|tasks| tasks.contains(key)) {
+                        format!("{project} / {label} · Codex 运行中")
+                    } else {
+                        format!("{project} / {label}")
+                    }
                 })
                 .collect();
             draw_task_list(
@@ -473,7 +487,9 @@ mod picker_tests {
         for width in [38, 80, 140] {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             let mut picker = TaskPicker::default();
-            terminal.draw(|frame| picker.draw(frame, &[])).unwrap();
+            terminal
+                .draw(|frame| picker.draw(frame, &[], None))
+                .unwrap();
             let tasks = (0..30)
                 .map(|i| task(&format!("task{i}")))
                 .collect::<Vec<_>>();
@@ -481,7 +497,9 @@ mod picker_tests {
             for _ in 0..29 {
                 picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tasks);
             }
-            terminal.draw(|frame| picker.draw(frame, &tasks)).unwrap();
+            terminal
+                .draw(|frame| picker.draw(frame, &tasks, None))
+                .unwrap();
             let text = terminal
                 .backend()
                 .buffer()

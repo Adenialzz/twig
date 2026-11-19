@@ -624,6 +624,7 @@ fn open_terminal(
     let mut usage_error = None;
     let result = loop {
         let mut recorded = None;
+        let mut running_tasks = None;
         let initial_task = app.task.clone();
         let result = twig_cli::workbench::run(
             terminal,
@@ -631,7 +632,7 @@ fn open_terminal(
             &target.window,
             |task| recent_tasks(registry, Some((&target.project, task))),
             |project, task| mark_unread(worker, registry, project, task),
-            |window, task| {
+            |window, task, showing_recent| {
                 if recorded.as_deref() != Some(task) {
                     recorded = Some(task.to_owned());
                     usage_error = crate::core::record_use(registry, &target.project, task)
@@ -643,6 +644,7 @@ fn open_terminal(
                 }
                 if let Some(snapshot) = worker.updates.take() {
                     app.snapshot = snapshot;
+                    running_tasks = None;
                 }
                 let viewed = app
                     .snapshot
@@ -693,6 +695,13 @@ fn open_terminal(
                     chat_notification: app.chat_status.1,
                     notification: app.notifications.current().cloned(),
                     unread: app.notifications.tasks(),
+                    running: (showing_recent && ui::fresh_codex(&app.snapshot)).then(|| {
+                        running_tasks
+                            .get_or_insert_with(|| {
+                                std::sync::Arc::new(ui::running_tasks(&app.snapshot))
+                            })
+                            .clone()
+                    }),
                 }
             },
         );
@@ -960,7 +969,9 @@ fn run_inner(
                     notice.draw(frame);
                 }
                 if let Some(picker) = &task_picker {
-                    picker.draw(frame, &unread_tasks);
+                    let running = (picker.showing_recent() && ui::fresh_codex(&app.snapshot))
+                        .then(|| ui::running_tasks(&app.snapshot));
+                    picker.draw(frame, &unread_tasks, running.as_ref());
                 }
             })?;
             let link = if selection.is_none() && task_picker.is_none() {

@@ -819,11 +819,12 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
         None,
         &mut |_| Ok(Vec::new()),
         &mut |_, _| anyhow::bail!("实验工作台没有任务登记表"),
-        &mut |_, _| Status {
+        &mut |_, _, _| Status {
             text: "twig 实验工作台".into(),
             notification: None,
             chat_notification: false,
             unread: Vec::new(),
+            running: None,
         },
     )
     .map(|_| ())
@@ -835,6 +836,7 @@ pub struct Status {
     pub notification: Option<crate::notification::CompletionNotice>,
     pub chat_notification: bool,
     pub unread: Vec<UnreadTask>,
+    pub running: Option<std::sync::Arc<std::collections::BTreeSet<(String, String)>>>,
 }
 
 pub enum Destination {
@@ -850,7 +852,7 @@ pub fn run(
     window: &str,
     mut recent: impl FnMut(&str) -> Result<Vec<(String, String)>>,
     mut mark: impl FnMut(&str, &str) -> Result<()>,
-    mut status: impl FnMut(&str, &str) -> Status,
+    mut status: impl FnMut(&str, &str, bool) -> Status,
 ) -> Result<Option<Destination>> {
     // 防止把正在运行本前端的 Pane 捕获回来，形成递归显示和输入。
     if let Ok(pane) = std::env::var("TMUX_PANE") {
@@ -887,7 +889,7 @@ fn run_inner(
     window: Option<&str>,
     recent: &mut impl FnMut(&str) -> Result<Vec<(String, String)>>,
     mark: &mut impl FnMut(&str, &str) -> Result<()>,
-    status: &mut impl FnMut(&str, &str) -> Status,
+    status: &mut impl FnMut(&str, &str, bool) -> Status,
 ) -> Result<Option<Destination>> {
     let _cursor_style = CursorStyleGuard;
     let mut client = Client::connect(&args)?;
@@ -965,7 +967,11 @@ fn run_inner(
         let window_id = fields.next().unwrap_or_default();
         let task = fields.next().unwrap_or_default();
         let name = fields.next().unwrap_or_default();
-        let next_label = status(window_id, task);
+        let next_label = status(
+            window_id,
+            task,
+            task_picker.as_ref().is_some_and(TaskPicker::showing_recent),
+        );
         if next_label != label {
             label = next_label;
             dirty = true;
@@ -1027,7 +1033,7 @@ fn run_inner(
                     notice.draw(frame);
                 }
                 if let Some(picker) = &task_picker {
-                    picker.draw(frame, &label.unread);
+                    picker.draw(frame, &label.unread, label.running.as_deref());
                 }
             })?;
             dirty = false;
