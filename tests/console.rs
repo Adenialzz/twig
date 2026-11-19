@@ -1887,6 +1887,102 @@ fn codex_completion_shortcut_from_navigation() {
 }
 
 #[test]
+fn recent_picker_switches_projects_and_preserves_the_original_shell() {
+    let f = Fixture::core();
+    f.init();
+    let other = f.temp.path().join("other");
+    f.git(&[
+        "clone",
+        "--local",
+        "--single-branch",
+        ".",
+        other.to_str().unwrap(),
+    ]);
+    f.twig(&["add", "other", "--path", other.to_str().unwrap()]);
+    f.twig(&["new", "other", "auth", "--no-fetch", "--no-open"]);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .arg("--config")
+        .arg(&f.registry)
+        .args(["open", "demo", "auth"]);
+    let mut p = Pty::spawn(command);
+    p.wait_screen("demo · 全局 Codex");
+    p.send(b"recent_marker=still_here\r");
+    p.send(b"\x17u\t");
+    p.wait_screen("j/k 选择 · Enter 进入 · Esc 关闭");
+    p.wait_screen("› other / auth");
+    assert!(!p.screen_text().contains("demo / auth"));
+    p.send(b"uuuu\t");
+    p.wait_screen("other / auth / 未读 1");
+    let registry = fs::read(&f.registry).unwrap();
+    p.send(b"\x1b");
+    p.wait_screen_absent("最近任务");
+    p.wait_screen_absent("j/k 选择");
+    assert_eq!(registry, fs::read(&f.registry).unwrap());
+    p.send(b"\x17u\t\r");
+    p.wait_screen("other · 全局 Codex");
+    p.send(b"\x17u\t");
+    p.wait_screen("j/k 选择 · Enter 进入 · Esc 关闭");
+    p.wait_screen("› demo / auth");
+    p.send(b"\r");
+    p.wait_screen("demo · 全局 Codex");
+    p.send(b"printf 'RETURNED_%s\\n' \"$recent_marker\"\r");
+    p.wait_screen("RETURNED_still_here");
+    p.send(b"\x17d");
+    p.wait_screen("主工作目录");
+    p.send(b"\x17u\t");
+    p.wait_screen("j/k 选择 · Enter 进入 · Esc 关闭");
+    p.wait_screen("› demo / auth");
+    p.send(b"\x17u");
+    p.wait_screen_absent("最近任务");
+    p.wait_screen_absent("j/k 选择");
+    p.send(b"\x17u");
+    p.wait_screen("[未读任务]");
+    p.send(b"\tj");
+    p.wait_screen("› other / auth");
+    p.send(b"\t");
+    p.wait_screen("暂无未读任务");
+    p.send(b"\t");
+    p.wait_screen("› other / auth");
+    p.send(b"\r");
+    p.wait_screen("other · 全局 Codex");
+    p.send(b"\x17d");
+    p.wait_screen("主工作目录");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+}
+
+#[test]
+fn manual_unread_survives_restart_and_clears_on_enter() {
+    let f = Fixture::core();
+    f.init();
+    let mut p = f.terminal(false);
+    p.wait_screen("主工作目录");
+    p.send(b"2/auth\r1uu");
+    p.send(b"2uu");
+    p.send(b"\x17u");
+    p.wait_screen("demo / auth / 未读 1");
+    p.send(b"\x17uq");
+    assert!(p.wait_exit().success());
+
+    let mut p = f.terminal(false);
+    p.wait_screen("主工作目录");
+    p.send(b"\x17u");
+    p.wait_screen("demo / auth / 未读 1");
+    p.send(b"\r");
+    p.wait_screen("demo · 全局 Codex");
+    p.send(b"printf 'RAW_%s\\n' uu\r");
+    p.wait_screen("RAW_uu");
+    p.send(b"\x17u");
+    p.wait_screen("暂无未读任务");
+    p.send(b"\x17u\x17d");
+    p.wait_screen("主工作目录");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+}
+
+#[test]
 fn unread_picker_from_workbench() {
     completion_shortcut(false, true, false);
 }
@@ -2063,7 +2159,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool, restart: bool) {
         phase.store(2, Ordering::Relaxed);
     }
     p.wait("Codex 本轮已完成");
-    p.wait("Ctrl-W f 跳转");
+    p.wait("Ctrl-W g 跳转");
     p.resize(80, 30);
     p.send(b"printf 'NOTIFY_INPUT_%s\\n' OK\r");
     p.wait("NOTIFY_INPUT_OK");
@@ -2085,10 +2181,10 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool, restart: bool) {
         p.wait_screen("demo / auth / 未读 1");
         p.send(b"jk\x1b[B\x1b[A\r");
     } else {
-        p.send(b"\x17f");
+        p.send(b"\x17g");
     }
     // 无提示时快捷键不退出终端，也不向 Shell 输入 f。
-    p.send(b"\x17f");
+    p.send(b"\x17g");
     p.send(b"printf 'WINDOW_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
         "WINDOW_DIR:{}",
@@ -3377,7 +3473,7 @@ fn claude_state_changes_notify_and_jump_without_hooks_or_agent_control() {
     p.wait("Claude 状态变化");
     p.send(b"\x17u");
     p.wait_screen("demo / auth / 未读 1");
-    p.send(b"\x17u\x17f");
+    p.send(b"\x17u\x17g");
     p.wait(" · 全局 Codex ");
     p.send(b"\x17u");
     p.wait_screen("暂无未读任务");

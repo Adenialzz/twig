@@ -68,7 +68,7 @@ pub fn draw(frame: &mut Frame, notice: &CompletionNotice) {
             Line::from(format!("项目：{}", safe(&notice.project))),
             Line::from(format!("任务：{}", safe(&notice.task))),
             Line::from(""),
-            Line::from("Ctrl-W f 跳转"),
+            Line::from("Ctrl-W g 跳转"),
         ],
     );
 }
@@ -80,7 +80,7 @@ pub fn draw_chat(frame: &mut Frame) {
         vec![
             Line::from("主控收到消息或完成回复"),
             Line::from(""),
-            Line::from("Ctrl-W f 查看 Agent"),
+            Line::from("Ctrl-W g 查看 Agent"),
         ],
     );
 }
@@ -151,7 +151,7 @@ mod tests {
             assert!(row(1).contains("Codex 本轮已完成"));
             assert!(row(2).contains("项目：demo"));
             assert!(row(3).contains("任务：notify"));
-            assert!(row(5).contains("Ctrl-W f 跳转"));
+            assert!(row(5).contains("Ctrl-W g 跳转"));
             assert!(row(23).contains("底部状态"));
             assert_eq!(buffer[(width - 2, 1)].symbol(), "┓");
             assert_eq!(terminal.get_cursor_position().unwrap(), (2, 12).into());
@@ -172,8 +172,14 @@ pub struct UnreadTask {
 }
 
 #[derive(Default)]
-pub struct UnreadPicker {
+pub struct TaskPicker {
     selected: Option<CompletionNotice>,
+    recent: Vec<(String, String)>,
+    recent_error: Option<String>,
+    recent_index: usize,
+    mark_prefix: bool,
+    feedback: Option<String>,
+    showing_recent: bool,
     prefix: bool,
 }
 
@@ -181,9 +187,60 @@ pub enum PickerAction {
     Stay,
     Close,
     Open(CompletionNotice),
+    Recent(String, String),
+    Mark(String, String),
 }
 
-impl UnreadPicker {
+enum ListAction {
+    Stay,
+    Close,
+    Select(usize),
+    Open(usize),
+}
+
+fn list_key(key: KeyEvent, prefix: &mut bool, index: Option<usize>, len: usize) -> ListAction {
+    if key.kind == KeyEventKind::Release {
+        return ListAction::Stay;
+    }
+    if key.code == KeyCode::Esc {
+        return ListAction::Close;
+    }
+    if std::mem::take(prefix) {
+        return if key.code == KeyCode::Char('u') {
+            ListAction::Close
+        } else {
+            ListAction::Stay
+        };
+    }
+    if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        *prefix = true;
+        return ListAction::Stay;
+    }
+    let Some(index) = index.filter(|i| *i < len) else {
+        return ListAction::Stay;
+    };
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => ListAction::Select((index + 1).min(len - 1)),
+        KeyCode::Char('k') | KeyCode::Up => ListAction::Select(index.saturating_sub(1)),
+        KeyCode::Enter => ListAction::Open(index),
+        _ => ListAction::Stay,
+    }
+}
+
+impl TaskPicker {
+    pub fn new(recent: anyhow::Result<Vec<(String, String)>>) -> Self {
+        match recent {
+            Ok(recent) => Self {
+                recent,
+                ..Self::default()
+            },
+            Err(error) => Self {
+                recent_error: Some(format!("读取最近任务失败：{error:#}")),
+                ..Self::default()
+            },
+        }
+    }
+
     pub fn sync(&mut self, tasks: &[UnreadTask]) {
         if !tasks.iter().any(|task| {
             self.selected
@@ -198,58 +255,79 @@ impl UnreadPicker {
         if key.kind == KeyEventKind::Release {
             return PickerAction::Stay;
         }
-        if key.code == KeyCode::Esc {
-            return PickerAction::Close;
+        self.feedback = None;
+        if self.showing_recent
+            && !self.prefix
+            && key.code == KeyCode::Char('u')
+            && key.modifiers.is_empty()
+        {
+            if !std::mem::take(&mut self.mark_prefix) {
+                self.mark_prefix = true;
+            } else if let Some((project, task)) = self.recent.get(self.recent_index) {
+                return PickerAction::Mark(project.clone(), task.clone());
+            }
+            return PickerAction::Stay;
         }
-        if self.prefix {
-            self.prefix = false;
-            return if key.code == KeyCode::Char('u') {
-                PickerAction::Close
-            } else {
+        self.mark_prefix = false;
+        if key.kind == KeyEventKind::Press && key.code == KeyCode::Tab && !self.prefix {
+            self.showing_recent = !self.showing_recent;
+            return PickerAction::Stay;
+        }
+        let (index, len) = if self.showing_recent {
+            (Some(self.recent_index), self.recent.len())
+        } else {
+            (self.unread_index(tasks), tasks.len())
+        };
+        match list_key(key, &mut self.prefix, index, len) {
+            ListAction::Close => PickerAction::Close,
+            ListAction::Open(i) if self.showing_recent => {
+                let (project, task) = self.recent[i].clone();
+                PickerAction::Recent(project, task)
+            }
+            ListAction::Open(i) => PickerAction::Open(tasks[i].notice.clone()),
+            ListAction::Select(i) => {
+                if self.showing_recent {
+                    self.recent_index = i;
+                } else {
+                    self.selected = Some(tasks[i].notice.clone());
+                }
                 PickerAction::Stay
-            };
+            }
+            ListAction::Stay => PickerAction::Stay,
         }
-        if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.prefix = true;
-            return PickerAction::Stay;
-        }
-        let Some(index) = tasks.iter().position(|task| {
-            self.selected
-                .as_ref()
-                .is_some_and(|selected| selected.same_task(&task.notice))
-        }) else {
-            return PickerAction::Stay;
-        };
-        let next = match key.code {
-            KeyCode::Char('j') | KeyCode::Down => (index + 1).min(tasks.len() - 1),
-            KeyCode::Char('k') | KeyCode::Up => index.saturating_sub(1),
-            KeyCode::Enter => return PickerAction::Open(tasks[index].notice.clone()),
-            _ => return PickerAction::Stay,
-        };
-        self.selected = Some(tasks[next].notice.clone());
-        PickerAction::Stay
+    }
+
+    pub fn marked(&mut self, result: anyhow::Result<()>) {
+        self.feedback = Some(match result {
+            Ok(()) => "已标为未读".into(),
+            Err(error) => format!("标记失败：{error:#}"),
+        });
     }
 
     pub fn draw(&self, frame: &mut Frame, tasks: &[UnreadTask]) {
-        let screen = frame.area();
-        let width = screen.width.saturating_sub(2).min(76);
-        let height = screen.height.saturating_sub(2).min(16);
-        let area = Rect::new(
-            screen.x + (screen.width - width) / 2,
-            screen.y + (screen.height - height) / 2,
-            width,
-            height,
-        );
-        let block = Block::default()
-            .title(" 未读任务 ")
-            .title_bottom(" j/k 选择 · Enter 进入 · Esc 关闭 ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .style(Style::default().fg(Color::White).bg(Color::Black))
-            .border_style(Style::default().fg(Color::Yellow));
-        frame.render_widget(Clear, area);
-        if tasks.is_empty() {
-            frame.render_widget(Paragraph::new("暂无未读任务").block(block), area);
+        if self.showing_recent {
+            let items = self
+                .recent
+                .iter()
+                .map(|(project, task)| {
+                    let label = if task == "main" {
+                        "主工作目录"
+                    } else {
+                        task
+                    };
+                    format!("{project} / {label}")
+                })
+                .collect();
+            draw_task_list(
+                frame,
+                " 未读任务  [最近任务] ",
+                self.recent_error.as_deref().unwrap_or("暂无其他最近任务"),
+                items,
+                Some(self.recent_index),
+                self.feedback
+                    .as_deref()
+                    .unwrap_or(" Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 · uu 标为未读 "),
+            );
             return;
         }
         let items = tasks
@@ -265,25 +343,68 @@ impl UnreadPicker {
                 )
             })
             .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(tasks.iter().position(|task| {
+        draw_task_list(
+            frame,
+            " [未读任务]  最近任务 ",
+            "暂无未读任务",
+            items,
+            self.unread_index(tasks),
+            " Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 ",
+        );
+    }
+
+    fn unread_index(&self, tasks: &[UnreadTask]) -> Option<usize> {
+        tasks.iter().position(|task| {
             self.selected
                 .as_ref()
                 .is_some_and(|selected| selected.same_task(&task.notice))
-        }));
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(block)
-                .highlight_symbol("› ")
-                .highlight_style(
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            area,
-            &mut state,
-        );
+        })
     }
+}
+
+fn draw_task_list(
+    frame: &mut Frame,
+    title: &str,
+    empty: &str,
+    items: Vec<String>,
+    selected: Option<usize>,
+    footer: &str,
+) {
+    let screen = frame.area();
+    let width = screen.width.saturating_sub(2).min(76);
+    let height = screen.height.saturating_sub(2).min(16);
+    let area = Rect::new(
+        screen.x + (screen.width - width) / 2,
+        screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    );
+    let block = Block::default()
+        .title(title)
+        .title_bottom(footer)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(Style::default().fg(Color::White).bg(Color::Black))
+        .border_style(Style::default().fg(Color::Yellow));
+    frame.render_widget(Clear, area);
+    if items.is_empty() {
+        frame.render_widget(Paragraph::new(empty).block(block), area);
+        return;
+    }
+    let mut state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_symbol("› ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        area,
+        &mut state,
+    );
 }
 
 #[cfg(test)]
@@ -294,7 +415,7 @@ mod picker_tests {
     #[test]
     fn picker_keeps_task_selected_when_notice_type_changes() {
         let mut tasks = vec![task("first"), task("selected")];
-        let mut picker = UnreadPicker::default();
+        let mut picker = TaskPicker::default();
         picker.sync(&tasks);
         picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &tasks);
         tasks[1].notice.message = true;
@@ -318,7 +439,7 @@ mod picker_tests {
 
     #[test]
     fn selection_tracks_identity_during_reordering_and_empty_updates() {
-        let mut picker = UnreadPicker::default();
+        let mut picker = TaskPicker::default();
         let tasks = vec![task("one"), task("two")];
         picker.sync(&tasks);
         picker.key(
@@ -351,7 +472,7 @@ mod picker_tests {
     fn renders_empty_and_scrolls_selected_task_on_narrow_screens() {
         for width in [38, 80, 140] {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
-            let mut picker = UnreadPicker::default();
+            let mut picker = TaskPicker::default();
             terminal.draw(|frame| picker.draw(frame, &[])).unwrap();
             let tasks = (0..30)
                 .map(|i| task(&format!("task{i}")))

@@ -1,4 +1,4 @@
-use twig_cli::notification::{PickerAction, UnreadPicker};
+use twig_cli::notification::{PickerAction, TaskPicker};
 pub(crate) mod data;
 pub(crate) mod form;
 mod hyperlink;
@@ -547,6 +547,69 @@ fn notification_target(
     })
 }
 
+fn mark_unread(
+    worker: &Worker,
+    registry: &std::path::Path,
+    project: &str,
+    task: &str,
+) -> Result<()> {
+    let entry = crate::registry::entry(registry, project)?;
+    let repo =
+        crate::config::Project::discover_at(&crate::registry::expand(&entry.path)?, registry)?;
+    let path = if task == "main" {
+        repo.config()?.main
+    } else {
+        repo.state()?
+            .remove(task)
+            .context("任务已不在登记表中")?
+            .path
+    };
+    worker.inbox.mark_unread(notifications::Completion {
+        project: project.into(),
+        task: task.into(),
+        path,
+        message: false,
+        claude: None,
+    })
+}
+
+fn recent_tasks(
+    registry: &std::path::Path,
+    current: Option<(&str, &str)>,
+) -> Result<Vec<(String, String)>> {
+    let mut tasks = Vec::new();
+    for (alias, entry) in crate::registry::load(registry)?.projects {
+        for (task, used) in entry.task_last_used {
+            if current != Some((alias.as_str(), task.as_str())) {
+                tasks.push((std::cmp::Reverse(used), alias.clone(), task));
+            }
+        }
+    }
+    tasks.sort();
+    Ok(tasks
+        .into_iter()
+        .map(|(_, project, task)| (project, task))
+        .collect())
+}
+
+fn recent_target(
+    app: &mut App,
+    registry: &std::path::Path,
+    project: String,
+    name: String,
+) -> Result<TerminalTarget> {
+    let output = crate::core::execute(registry, crate::Action::Open { project, name })?;
+    let (path, next) = output.terminal.context("操作未返回终端目标")?;
+    app.project = Some(next.project.clone());
+    app.task = Some(path);
+    app.filters = Default::default();
+    app.detail = false;
+    app.history = false;
+    app.scroll = 0;
+    app.located = true;
+    Ok(next)
+}
+
 fn open_terminal(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -562,8 +625,13 @@ fn open_terminal(
     let result = loop {
         let mut recorded = None;
         let initial_task = app.task.clone();
-        let result =
-            twig_cli::workbench::run(terminal, target.session, &target.window, |window, task| {
+        let result = twig_cli::workbench::run(
+            terminal,
+            target.session,
+            &target.window,
+            |task| recent_tasks(registry, Some((&target.project, task))),
+            |project, task| mark_unread(worker, registry, project, task),
+            |window, task| {
                 if recorded.as_deref() != Some(task) {
                     recorded = Some(task.to_owned());
                     usage_error = crate::core::record_use(registry, &target.project, task)
@@ -626,7 +694,8 @@ fn open_terminal(
                     notification: app.notifications.current().cloned(),
                     unread: app.notifications.tasks(),
                 }
-            });
+            },
+        );
         match result {
             Ok(Some(twig_cli::workbench::Destination::Task(notice))) => {
                 match notification_target(app, registry, &notice) {
@@ -634,6 +703,12 @@ fn open_terminal(
                         target = next;
                         jump = Some(notice);
                     }
+                    Err(error) => break Err(error),
+                }
+            }
+            Ok(Some(twig_cli::workbench::Destination::Recent(project, name))) => {
+                match recent_target(app, registry, project, name) {
+                    Ok(next) => target = next,
                     Err(error) => break Err(error),
                 }
             }
@@ -729,7 +804,8 @@ fn run_inner(
         worker.requests.send(app.request())?;
     }
     let mut selection: Option<selection::Selection> = None;
-    let mut unread_picker: Option<UnreadPicker> = None;
+    let mut mark_prefix = false;
+    let mut task_picker: Option<TaskPicker> = None;
     let mut copy_notice: Option<twig_cli::clipboard::Notice> = None;
     let mut created_task = None;
     let mut dirty = true;
@@ -809,7 +885,7 @@ fn run_inner(
         }
         dirty |= app.receive_notifications(&worker, None);
         let unread_tasks = app.notifications.tasks();
-        if let Some(picker) = &mut unread_picker {
+        if let Some(picker) = &mut task_picker {
             picker.sync(&unread_tasks);
         }
         if let Some(notice) = twig_cli::clipboard::poll() {
@@ -883,11 +959,11 @@ fn run_inner(
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
                 }
-                if let Some(picker) = &unread_picker {
+                if let Some(picker) = &task_picker {
                     picker.draw(frame, &unread_tasks);
                 }
             })?;
-            let link = if selection.is_none() && unread_picker.is_none() {
+            let link = if selection.is_none() && task_picker.is_none() {
                 ui::zed_link(completed.area, &app)
             } else {
                 None
@@ -899,6 +975,10 @@ fn run_inner(
             continue;
         }
         let event = event::read()?;
+        let plain_u = matches!(event, Event::Key(key) if key.code == KeyCode::Char('u') && key.modifiers.is_empty());
+        if !plain_u {
+            mark_prefix = false;
+        }
         if !matches!(event, Event::Mouse(mouse) if matches!(mouse.kind,
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             | MouseEventKind::Moved))
@@ -906,13 +986,31 @@ fn run_inner(
             clicks.reset();
         }
         dirty = true;
-        if let Some(picker) = &mut unread_picker {
+        if let Some(picker) = &mut task_picker {
             if let Event::Key(key) = event {
                 match picker.key(key, &unread_tasks) {
+                    PickerAction::Mark(project, task) => {
+                        picker.marked(mark_unread(&worker, &registry, &project, &task))
+                    }
                     PickerAction::Stay => {}
-                    PickerAction::Close => unread_picker = None,
+                    PickerAction::Close => task_picker = None,
+                    PickerAction::Recent(project, name) => {
+                        task_picker = None;
+                        match recent_target(&mut app, &registry, project, name) {
+                            Ok(target) => open_terminal(
+                                &mut app,
+                                &mut terminal,
+                                &worker,
+                                target,
+                                &registry,
+                                None,
+                            )?,
+                            Err(error) => app.message = Some(format!("跳转失败：{error:#}")),
+                        }
+                        worker.requests.send(app.request())?;
+                    }
                     PickerAction::Open(notice) => {
-                        unread_picker = None;
+                        task_picker = None;
                         match notification_target(&mut app, &registry, &notice) {
                             Ok(target) => open_terminal(
                                 &mut app,
@@ -1161,9 +1259,9 @@ fn run_inner(
         if app.pane_prefix {
             app.pane_prefix = false;
             if key.code == KeyCode::Char('u') {
-                unread_picker = Some(UnreadPicker::default());
+                task_picker = Some(TaskPicker::new(recent_tasks(&registry, None)));
                 selection = None;
-            } else if key.code == KeyCode::Char('f') {
+            } else if key.code == KeyCode::Char('g') {
                 if let Some(notice) = app.notifications.current().cloned() {
                     match notification_target(&mut app, &registry, &notice) {
                         Ok(target) => open_terminal(
@@ -1189,6 +1287,22 @@ fn run_inner(
                 };
             }
             worker.requests.send(app.request())?;
+            continue;
+        }
+        if plain_u && app.focus <= 1 && !app.delete_prefix && !app.top_prefix {
+            if std::mem::take(&mut mark_prefix) {
+                app.message = Some(match app.repo().zip(app.task()) {
+                    Some((repo, task)) => {
+                        match mark_unread(&worker, &registry, &repo.name, &task.name) {
+                            Ok(()) => format!("已标为未读：{} / {}", repo.name, task.name),
+                            Err(error) => format!("标记失败：{error:#}"),
+                        }
+                    }
+                    None => "没有选中的任务".into(),
+                });
+            } else {
+                mark_prefix = true;
+            }
             continue;
         }
         if app.delete_prefix {

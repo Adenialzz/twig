@@ -1,6 +1,6 @@
 //! Console 的 tmux Control Mode 终端视图；tmux 保存唯一的终端运行状态。
 use crate::clipboard;
-use crate::notification::{PickerAction, UnreadPicker, UnreadTask};
+use crate::notification::{PickerAction, TaskPicker, UnreadTask};
 mod selection;
 use alacritty_terminal::{
     Term,
@@ -45,6 +45,24 @@ struct Args {
     session: String,
 }
 impl Args {
+    fn reload_config(&self, window: &str) -> Result<()> {
+        let path = std::env::home_dir()
+            .context("找不到用户主目录")?
+            .join(".tmux.conf");
+        // 配置中的每条命令都可能产生应答，不能占用工作台的 Control Mode 应答队列。
+        let output = self
+            .command()
+            .args(["source-file", "-t", window])
+            .arg(path)
+            .output()?;
+        ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        Ok(())
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new("tmux");
         if let Some(socket) = &self.socket {
@@ -662,7 +680,7 @@ fn draw(
     let bar = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
     // 前缀等待第二个键时列出可用键；平时在右侧常驻返回与帮助入口。
     let hint = if prefix {
-        "d 返回 · s/v 分屏 · hjkl 切换 · z 放大 · o 下一个 · u 未读 · f 跳转 · Ctrl-W 删词 · Esc 取消"
+        "d 返回 · s/v 分屏 · hjkl 切换 · z 放大 · o 下一个 · u 未读/最近 · g 跳转 · Ctrl-W 删词 · Esc 取消"
     } else {
         "Ctrl-W d 返回 · Ctrl-W ? 键位"
     };
@@ -799,6 +817,8 @@ pub fn standalone(socket: PathBuf, session: String) -> Result<()> {
             session,
         },
         None,
+        &mut |_| Ok(Vec::new()),
+        &mut |_, _| anyhow::bail!("实验工作台没有任务登记表"),
         &mut |_, _| Status {
             text: "twig 实验工作台".into(),
             notification: None,
@@ -819,6 +839,7 @@ pub struct Status {
 
 pub enum Destination {
     Task(crate::notification::CompletionNotice),
+    Recent(String, String),
     Agent,
 }
 
@@ -827,6 +848,8 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: String,
     window: &str,
+    mut recent: impl FnMut(&str) -> Result<Vec<(String, String)>>,
+    mut mark: impl FnMut(&str, &str) -> Result<()>,
     mut status: impl FnMut(&str, &str) -> Status,
 ) -> Result<Option<Destination>> {
     // 防止把正在运行本前端的 Pane 捕获回来，形成递归显示和输入。
@@ -848,6 +871,8 @@ pub fn run(
             session,
         },
         Some(window),
+        &mut recent,
+        &mut mark,
         &mut status,
     );
     let restore = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
@@ -860,6 +885,8 @@ fn run_inner(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: Args,
     window: Option<&str>,
+    recent: &mut impl FnMut(&str) -> Result<Vec<(String, String)>>,
+    mark: &mut impl FnMut(&str, &str) -> Result<()>,
     status: &mut impl FnMut(&str, &str) -> Status,
 ) -> Result<Option<Destination>> {
     let _cursor_style = CursorStyleGuard;
@@ -882,7 +909,7 @@ fn run_inner(
     let mut window_name =
         client.command("display-message -p '#{window_id}\t#{@twig-feature}\t#{window_name}'")?;
     let mut prefix = false;
-    let mut unread_picker: Option<UnreadPicker> = None;
+    let mut task_picker: Option<TaskPicker> = None;
     let mut drag: Option<Drag> = None;
     let mut selection: Option<Selection> = None;
     let mut clicks = crate::mouse_selection::Clicks::default();
@@ -943,7 +970,7 @@ fn run_inner(
             label = next_label;
             dirty = true;
         }
-        if let Some(picker) = &mut unread_picker {
+        if let Some(picker) = &mut task_picker {
             picker.sync(&label.unread);
         }
         // 已到达的输入优先；持续输入时仍至少每 100ms 服务一次画面。
@@ -999,7 +1026,7 @@ fn run_inner(
                 if let Some(notice) = &copy_notice {
                     notice.draw(frame);
                 }
-                if let Some(picker) = &unread_picker {
+                if let Some(picker) = &task_picker {
                     picker.draw(frame, &label.unread);
                 }
             })?;
@@ -1039,11 +1066,15 @@ fn run_inner(
         if matches!(input, Event::Key(_)) {
             notice.clear();
         }
-        if let Some(picker) = &mut unread_picker {
+        if let Some(picker) = &mut task_picker {
             if let Event::Key(key) = input {
                 match picker.key(key, &label.unread) {
+                    PickerAction::Mark(project, task) => picker.marked(mark(&project, &task)),
                     PickerAction::Stay => {}
-                    PickerAction::Close => unread_picker = None,
+                    PickerAction::Close => task_picker = None,
+                    PickerAction::Recent(project, task) => {
+                        return Ok(Some(Destination::Recent(project, task)));
+                    }
                     PickerAction::Open(notice) => return Ok(Some(Destination::Task(notice))),
                 }
             }
@@ -1166,14 +1197,14 @@ fn run_inner(
                     let command = match key.code {
                         KeyCode::Char('d') => return Ok(None),
                         KeyCode::Char('u') => {
-                            unread_picker = Some(UnreadPicker::default());
+                            task_picker = Some(TaskPicker::new(recent(task)));
                             drag = None;
                             None
                         }
-                        KeyCode::Char('f') if label.notification.is_some() => {
+                        KeyCode::Char('g') if label.notification.is_some() => {
                             return Ok(label.notification.map(Destination::Task));
                         }
-                        KeyCode::Char('f') if label.chat_notification => {
+                        KeyCode::Char('g') if label.chat_notification => {
                             return Ok(Some(Destination::Agent));
                         }
                         KeyCode::Char('?') => {
@@ -1186,7 +1217,14 @@ fn run_inner(
                         KeyCode::Char('z') => Some("resize-pane -Z"),
                         KeyCode::Char('n') => Some("next-window"),
                         KeyCode::Char('p') => Some("previous-window"),
-                        KeyCode::Char('r') => Some("source-file ~/.tmux.conf"),
+                        KeyCode::Char('r') => {
+                            notice = match args.reload_config(window_id) {
+                                Ok(()) => "tmux.conf 已重载 · ".into(),
+                                Err(error) => format!("重载 tmux.conf 失败：{error:#} · "),
+                            };
+                            panes = reload(&mut client)?;
+                            None
+                        }
                         KeyCode::Char('h') => Some("select-pane -L"),
                         KeyCode::Char('j') => Some("select-pane -D"),
                         KeyCode::Char('k') => Some("select-pane -U"),
@@ -1201,9 +1239,6 @@ fn run_inner(
                     };
                     if let Some(command) = command {
                         client.command(command)?;
-                        if key.code == KeyCode::Char('r') {
-                            notice = "tmux.conf 已重载 · ".into();
-                        }
                         panes = reload(&mut client)?;
                     }
                 } else if key.code == KeyCode::Char('w')
