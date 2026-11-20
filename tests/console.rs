@@ -2159,7 +2159,7 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool, restart: bool) {
         phase.store(2, Ordering::Relaxed);
     }
     p.wait("Codex 本轮已完成");
-    p.wait("Ctrl-W g 跳转");
+    p.wait("Ctrl-W f 跳转");
     p.resize(80, 30);
     p.send(b"printf 'NOTIFY_INPUT_%s\\n' OK\r");
     p.wait("NOTIFY_INPUT_OK");
@@ -2181,10 +2181,10 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool, restart: bool) {
         p.wait_screen("demo / auth / 未读 1");
         p.send(b"jk\x1b[B\x1b[A\r");
     } else {
-        p.send(b"\x17g");
+        p.send(b"\x17f");
     }
     // 无提示时快捷键不退出终端，也不向 Shell 输入 f。
-    p.send(b"\x17g");
+    p.send(b"\x17f");
     p.send(b"printf 'WINDOW_DIR:%s\\n' \"$PWD\"\r");
     p.wait(&format!(
         "WINDOW_DIR:{}",
@@ -3473,7 +3473,7 @@ fn claude_state_changes_notify_and_jump_without_hooks_or_agent_control() {
     p.wait("Claude 状态变化");
     p.send(b"\x17u");
     p.wait_screen("demo / auth / 未读 1");
-    p.send(b"\x17u\x17g");
+    p.send(b"\x17u\x17f");
     p.wait(" · 全局 Codex ");
     p.send(b"\x17u");
     p.wait_screen("暂无未读任务");

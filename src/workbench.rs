@@ -680,7 +680,7 @@ fn draw(
     let bar = Rect::new(0, area.height.saturating_sub(1), area.width, 1);
     // 前缀等待第二个键时列出可用键；平时在右侧常驻返回与帮助入口。
     let hint = if prefix {
-        "d 返回 · s/v 分屏 · hjkl 切换 · z 放大 · o 下一个 · u 未读/最近 · g 跳转 · Ctrl-W 删词 · Esc 取消"
+        "d 返回 · s/v 分屏 · hjkl 切换 · z 放大 · o 下一个 · u 未读/最近 · f 跳转 · Ctrl-W 删词 · Esc 取消"
     } else {
         "Ctrl-W d 返回 · Ctrl-W ? 键位"
     };
@@ -1207,10 +1207,10 @@ fn run_inner(
                             drag = None;
                             None
                         }
-                        KeyCode::Char('g') if label.notification.is_some() => {
+                        KeyCode::Char('f') if label.notification.is_some() => {
                             return Ok(label.notification.map(Destination::Task));
                         }
-                        KeyCode::Char('g') if label.chat_notification => {
+                        KeyCode::Char('f') if label.chat_notification => {
                             return Ok(Some(Destination::Agent));
                         }
                         KeyCode::Char('?') => {

@@ -1278,7 +1278,7 @@ fn run_inner(
             if key.code == KeyCode::Char('u') {
                 task_picker = Some(TaskPicker::new(recent_tasks(&registry, None)));
                 selection = None;
-            } else if key.code == KeyCode::Char('g') {
+            } else if key.code == KeyCode::Char('f') {
                 if let Some(notice) = app.notifications.current().cloned() {
                     match notification_target(&mut app, &registry, &notice) {
                         Ok(target) => open_terminal(

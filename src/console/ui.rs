@@ -181,7 +181,7 @@ fn codex_stale(app: &App) -> bool {
 /// 底栏左侧的按键提示，随焦点和待完成的前缀变化。
 fn key_hints(app: &App) -> String {
     if app.pane_prefix {
-        return "Ctrl-W → h 项目 · l 任务 · j 详情 · k 任务 · u 未读/最近 · g 通知 · Esc 取消"
+        return "Ctrl-W → h 项目 · l 任务 · j 详情 · k 任务 · u 未读/最近 · f 通知 · Esc 取消"
             .into();
     }
     if app.delete_prefix {
@@ -408,7 +408,7 @@ const HELP: [(&str, &[(&str, &str)]); 5] = [
     (
         "通知",
         &[
-            ("Ctrl-W g", "跳转当前通知对应的任务或主控"),
+            ("Ctrl-W f", "跳转当前通知对应的任务或主控"),
             ("uu", "将选中的任务标为未读"),
             ("Ctrl-W u", "Tab 切换未读 / 最近，Enter 进入，Esc 关闭"),
         ],

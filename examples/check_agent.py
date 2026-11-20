@@ -344,7 +344,7 @@ supports_websockets = false
         wait_for(lambda: time.monotonic() >= card_expires, "通知卡片等待未完成")
         frontend.wait("Tab 切换标签")
         frontend.absent_for("主控有新消息", 1)
-        frontend.send(b"\x17g")
+        frontend.send(b"\x17f")
         frontend.absent_for("YOLO", 1)
         frontend.wait("Agent*")
         frontend.send(b"\t")
@@ -502,13 +502,13 @@ supports_websockets = false
         model.release["controller"].set()
         frontend.wait("主控有新消息")
         frontend.wait("Agent 有新消息")
-        frontend.wait("Ctrl-W g 查看 Agent")
+        frontend.wait("Ctrl-W f 查看 Agent")
         pane_pids = command("tmux", "list-panes", "-a", "-F", "#{pane_id}:#{pane_pid}")
-        frontend.send(b"\x17g")
+        frontend.send(b"\x17f")
         frontend.wait("chat-test hold-controller")
         assert command("tmux", "list-panes", "-a", "-F", "#{pane_id}:#{pane_pid}") == pane_pids
         frontend.absent_for("Agent*", 1)
-        print("PASS: 工作台 Ctrl-W g 直达主控、清除未读并保留 Pane 进程", flush=True)
+        print("PASS: 工作台 Ctrl-W f 直达主控、清除未读并保留 Pane 进程", flush=True)
         frontend.send(b"\x03")
         frontend.wait_exit(timeout=5)
         assert frontend.process.returncode == 0
@@ -655,8 +655,8 @@ supports_websockets = false
         frontend.wait("个项目")
         model.release["controller"].set()
         frontend.wait("主控有新消息")
-        frontend.wait("Ctrl-W g 查看 Agent")
-        frontend.send(b"\x17g")
+        frontend.wait("Ctrl-W f 查看 Agent")
+        frontend.send(b"\x17f")
         frontend.wait(navigation_reply, history=True)
         # “消息送达”和“轮次完成”是两个事件；两者采集并清除后才具备“无卡片”前提。
         def navigation_read():
@@ -672,14 +672,14 @@ supports_websockets = false
         frontend.wait("个项目")
         # 导航文字可能先于整帧刷新到达；等旧 Agent 标题消失后再测试无卡片快捷键。
         frontend.wait("YOLO", absent=True)
-        frontend.send(b"\x17g")
+        frontend.send(b"\x17f")
         frontend.absent_for("YOLO", 1)
         frontend.wait("个项目")
         frontend.send(b"q")
         frontend.wait_exit(timeout=10)
         frontend.close()
         frontend = None
-        print("PASS: 导航 Ctrl-W g 跳主控并清除未读，无卡片时不跳转", flush=True)
+        print("PASS: 导航 Ctrl-W f 跳主控并清除未读，无卡片时不跳转", flush=True)
 
         # 空子任务没有 rollout，daemon 重启后不能拖垮正常主控。
         twig("new", "demo", "--no-fetch", "empty", "--agent", "--no-open")
