@@ -1,6 +1,6 @@
 //! Console 的 tmux Control Mode 终端视图；tmux 保存唯一的终端运行状态。
 use crate::clipboard;
-use crate::notification::{PickerAction, TaskPicker, UnreadTask};
+use crate::notification::{PickerAction, RecentTask, TaskPicker, UnreadTask};
 mod selection;
 use alacritty_terminal::{
     Term,
@@ -850,7 +850,7 @@ pub fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: String,
     window: &str,
-    mut recent: impl FnMut(&str) -> Result<Vec<(String, String)>>,
+    mut recent: impl FnMut(&str) -> Result<Vec<RecentTask>>,
     mut mark: impl FnMut(&str, &str) -> Result<()>,
     mut status: impl FnMut(&str, &str, bool) -> Status,
 ) -> Result<Option<Destination>> {
@@ -887,7 +887,7 @@ fn run_inner(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: Args,
     window: Option<&str>,
-    recent: &mut impl FnMut(&str) -> Result<Vec<(String, String)>>,
+    recent: &mut impl FnMut(&str) -> Result<Vec<RecentTask>>,
     mark: &mut impl FnMut(&str, &str) -> Result<()>,
     status: &mut impl FnMut(&str, &str, bool) -> Status,
 ) -> Result<Option<Destination>> {

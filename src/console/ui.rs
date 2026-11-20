@@ -2304,11 +2304,11 @@ mod tests {
     #[test]
     fn recent_picker_updates_running_labels_without_moving_selection() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        use twig_cli::notification::TaskPicker;
+        use twig_cli::notification::{RecentTask, TaskPicker};
         let mut app = fixture();
         let mut picker = TaskPicker::new(Ok(vec![
-            ("alpha".into(), "main".into()),
-            ("beta".into(), "main".into()),
+            RecentTask::new(("alpha".into(), "main".into()), 0),
+            RecentTask::new(("beta".into(), "main".into()), 0),
         ]));
         picker.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &[]);
         picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &[]);

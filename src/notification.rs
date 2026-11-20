@@ -171,10 +171,27 @@ pub struct UnreadTask {
     pub count: usize,
 }
 
+pub struct RecentTask {
+    key: (String, String),
+    boundary: Option<&'static str>,
+}
+
+impl RecentTask {
+    pub fn new(key: (String, String), age_ms: u64) -> Self {
+        let boundary = match age_ms / 86_400_000 {
+            0 => Some("近一天"),
+            1..=2 => Some("近三天"),
+            3..=6 => Some("近一周"),
+            _ => None,
+        };
+        Self { key, boundary }
+    }
+}
+
 #[derive(Default)]
 pub struct TaskPicker {
     selected: Option<CompletionNotice>,
-    recent: Vec<(String, String)>,
+    recent: Vec<RecentTask>,
     recent_error: Option<String>,
     recent_index: usize,
     mark_prefix: bool,
@@ -228,7 +245,7 @@ fn list_key(key: KeyEvent, prefix: &mut bool, index: Option<usize>, len: usize) 
 }
 
 impl TaskPicker {
-    pub fn new(recent: anyhow::Result<Vec<(String, String)>>) -> Self {
+    pub fn new(recent: anyhow::Result<Vec<RecentTask>>) -> Self {
         match recent {
             Ok(recent) => Self {
                 recent,
@@ -263,8 +280,9 @@ impl TaskPicker {
         {
             if !std::mem::take(&mut self.mark_prefix) {
                 self.mark_prefix = true;
-            } else if let Some((project, task)) = self.recent.get(self.recent_index) {
-                return PickerAction::Mark(project.clone(), task.clone());
+            } else if let Some(row) = self.recent.get(self.recent_index) {
+                let (project, task) = row.key.clone();
+                return PickerAction::Mark(project, task);
             }
             return PickerAction::Stay;
         }
@@ -281,7 +299,7 @@ impl TaskPicker {
         match list_key(key, &mut self.prefix, index, len) {
             ListAction::Close => PickerAction::Close,
             ListAction::Open(i) if self.showing_recent => {
-                let (project, task) = self.recent[i].clone();
+                let (project, task) = self.recent[i].key.clone();
                 PickerAction::Recent(project, task)
             }
             ListAction::Open(i) => PickerAction::Open(tasks[i].notice.clone()),
@@ -315,33 +333,49 @@ impl TaskPicker {
         running: Option<&std::collections::BTreeSet<(String, String)>>,
     ) {
         if self.showing_recent {
-            let items = self
-                .recent
-                .iter()
-                .map(|key| {
-                    let (project, task) = key;
-                    let label = if task == "main" {
-                        "主工作目录"
-                    } else {
-                        task
-                    };
-                    let mut line = Line::from(format!("{project} / {label}"));
-                    if running.is_some_and(|tasks| tasks.contains(key)) {
-                        line.push_span(" · ");
-                        line.push_span(Span::styled(
-                            "Codex 运行中",
-                            Style::default().fg(Color::Cyan),
-                        ));
-                    }
-                    ListItem::new(line)
-                })
-                .collect();
+            let mut items = Vec::new();
+            let mut selected = None;
+            for (index, row) in self.recent.iter().enumerate() {
+                if row.boundary.is_none()
+                    && (index == 0 || self.recent[index - 1].boundary.is_some())
+                {
+                    items.push(
+                        ListItem::new("── 更早 ──").style(Style::default().fg(Color::DarkGray)),
+                    );
+                }
+                if index == self.recent_index {
+                    selected = Some(items.len());
+                }
+                let (project, task) = &row.key;
+                let label = if task == "main" {
+                    "主工作目录"
+                } else {
+                    task
+                };
+                let mut line = Line::from(format!("{project} / {label}"));
+                if running.is_some_and(|tasks| tasks.contains(&row.key)) {
+                    line.push_span(" · ");
+                    line.push_span(Span::styled(
+                        "Codex 运行中",
+                        Style::default().fg(Color::Cyan),
+                    ));
+                }
+                items.push(ListItem::new(line));
+                if let Some(label) = row.boundary
+                    && self.recent.get(index + 1).and_then(|next| next.boundary) != Some(label)
+                {
+                    items.push(
+                        ListItem::new(format!("── {label} ──"))
+                            .style(Style::default().fg(Color::DarkGray)),
+                    );
+                }
+            }
             draw_task_list(
                 frame,
                 " 未读任务  [最近任务] ",
                 self.recent_error.as_deref().unwrap_or("暂无其他最近任务"),
                 items,
-                Some(self.recent_index),
+                selected,
                 self.feedback
                     .as_deref()
                     .unwrap_or(" Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 · uu 标为未读 "),
@@ -437,10 +471,61 @@ mod picker_tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
+    fn recent_boundaries_follow_tasks_and_selection_skips_separators() {
+        let day = 86_400_000;
+        let ages = [day - 1, day, 3 * day, 7 * day];
+        let mut picker = TaskPicker::new(Ok(ages
+            .into_iter()
+            .enumerate()
+            .map(|(i, age)| RecentTask::new(("demo".into(), format!("task{i}")), age))
+            .collect()));
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        picker.key(key(KeyCode::Tab), &[]);
+        picker.key(key(KeyCode::Down), &[]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| picker.draw(frame, &[], None))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut screen = String::new();
+        for y in 0..buffer.area.height {
+            let mut x = 0;
+            while x < buffer.area.width {
+                let symbol = buffer[(x, y)].symbol();
+                screen.push_str(symbol);
+                x += Line::from(symbol).width().max(1) as u16;
+            }
+            screen.push('\n');
+        }
+        let mut rest = screen.as_str();
+        for label in [
+            "task0",
+            "近一天",
+            "› demo / task1",
+            "近三天",
+            "task2",
+            "近一周",
+            "更早",
+            "task3",
+        ] {
+            rest = rest
+                .split_once(label)
+                .unwrap_or_else(|| panic!("缺少 {label}: {screen}"))
+                .1;
+        }
+        assert!(
+            matches!(picker.key(key(KeyCode::Enter), &[]), PickerAction::Recent(_, task) if task == "task1")
+        );
+    }
+
+    #[test]
     fn recent_running_status_keeps_cyan_on_both_row_backgrounds() {
         let tasks = vec![("demo".into(), "one".into()), ("demo".into(), "two".into())];
         let running = tasks.iter().cloned().collect();
-        let mut picker = TaskPicker::new(Ok(tasks));
+        let mut picker = TaskPicker::new(Ok(tasks
+            .into_iter()
+            .map(|key| RecentTask::new(key, 0))
+            .collect()));
         picker.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &[]);
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         terminal

@@ -1,4 +1,4 @@
-use twig_cli::notification::{PickerAction, TaskPicker};
+use twig_cli::notification::{PickerAction, RecentTask, TaskPicker};
 pub(crate) mod data;
 pub(crate) mod form;
 mod hyperlink;
@@ -576,7 +576,7 @@ fn mark_unread(
 fn recent_tasks(
     registry: &std::path::Path,
     current: Option<(&str, &str)>,
-) -> Result<Vec<(String, String)>> {
+) -> Result<Vec<RecentTask>> {
     let mut tasks = Vec::new();
     for (alias, entry) in crate::registry::load(registry)?.projects {
         for (task, used) in entry.task_last_used {
@@ -586,9 +586,15 @@ fn recent_tasks(
         }
     }
     tasks.sort();
+    let now: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .try_into()?;
     Ok(tasks
         .into_iter()
-        .map(|(_, project, task)| (project, task))
+        .map(|(std::cmp::Reverse(used), project, task)| {
+            RecentTask::new((project, task), now.saturating_sub(used))
+        })
         .collect())
 }
 
