@@ -579,8 +579,19 @@ fn recent_tasks(
 ) -> Result<Vec<RecentTask>> {
     let mut tasks = Vec::new();
     for (alias, entry) in crate::registry::load(registry)?.projects {
+        if entry.task_last_used.is_empty() {
+            continue;
+        }
+        let repo =
+            crate::config::Project::discover_at(&crate::registry::expand(&entry.path)?, registry)
+                .with_context(|| format!("无法读取项目 {alias} 的登记信息"))?;
+        let registered = repo
+            .state()
+            .with_context(|| format!("无法读取项目 {alias} 的任务登记表"))?;
         for (task, used) in entry.task_last_used {
-            if current != Some((alias.as_str(), task.as_str())) {
+            if (task == "main" || registered.contains_key(&task))
+                && current != Some((alias.as_str(), task.as_str()))
+            {
                 tasks.push((std::cmp::Reverse(used), alias.clone(), task));
             }
         }

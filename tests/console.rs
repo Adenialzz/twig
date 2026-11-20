@@ -1911,6 +1911,9 @@ fn codex_completion_shortcut_from_navigation() {
 fn recent_picker_switches_projects_and_preserves_the_original_shell() {
     let f = Fixture::core();
     f.init();
+    f.twig(&["new", "demo", "removed", "--no-fetch", "--no-open"]);
+    f.twig(&["rm", "demo", "removed", "--keep-branch", "--yes"]);
+    assert!(fs::read_to_string(&f.registry).unwrap().contains("removed"));
     let other = f.temp.path().join("other");
     f.git(&[
         "clone",
@@ -1921,6 +1924,7 @@ fn recent_picker_switches_projects_and_preserves_the_original_shell() {
     ]);
     f.twig(&["add", "other", "--path", other.to_str().unwrap()]);
     f.twig(&["new", "other", "auth", "--no-fetch", "--no-open"]);
+    f.twig(&["stop", "other", "auth", "--yes"]);
     let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
     f.env(&mut command);
     command
@@ -1933,6 +1937,7 @@ fn recent_picker_switches_projects_and_preserves_the_original_shell() {
     p.send(b"\x17u\t");
     p.wait_screen("j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭");
     p.wait_task_row("› other auth", true);
+    p.wait_task_row("demo removed", false);
     p.wait_task_row("demo auth", false);
     p.send(b"uuuu\t");
     p.wait_task_row("other auth 1", true);
