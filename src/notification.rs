@@ -332,18 +332,96 @@ impl TaskPicker {
         tasks: &[UnreadTask],
         running: Option<&std::collections::BTreeSet<(String, String)>>,
     ) {
+        let screen = frame.area();
+        let width = screen.width.saturating_sub(2).min(76);
+        let height = screen.height.saturating_sub(2).min(16);
+        let area = Rect::new(
+            screen.x + (screen.width - width) / 2,
+            screen.y + (screen.height - height) / 2,
+            width,
+            height,
+        );
+        let (title, empty, footer, last_header) = if self.showing_recent {
+            (
+                " 未读任务  [最近任务] ",
+                self.recent_error.as_deref().unwrap_or("暂无其他最近任务"),
+                self.feedback
+                    .as_deref()
+                    .unwrap_or(" Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 · uu 标为未读 "),
+                "Codex 状态",
+            )
+        } else {
+            (
+                " [未读任务]  最近任务 ",
+                "暂无未读任务",
+                " Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 ",
+                "未读数",
+            )
+        };
+        let block = Block::default()
+            .title(title)
+            .title_bottom(footer)
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .style(Style::default().fg(Color::White).bg(Color::Black))
+            .border_style(Style::default().fg(Color::Yellow));
+        let inner = block.inner(area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(block, area);
+
+        let available = usize::from(inner.width).saturating_sub(4); // 行首光标和两个列间空格
+        let last_width = if self.showing_recent {
+            10
+        } else {
+            tasks
+                .iter()
+                .map(|t| t.count.to_string().len())
+                .max()
+                .unwrap_or(0)
+                .max(6)
+        }
+        .min(available);
+        let names_width = available - last_width;
+        let project_width = (names_width / 3).min(20);
+        let task_width = names_width - project_width;
+        let columns = |project: &str, task: &str, last: &str, style: Style, selected: bool| {
+            let marker = if selected { "› " } else { "  " };
+            Line::from(vec![
+                Span::raw(format!(
+                    "{marker}{} {} ",
+                    field(project, project_width, false),
+                    field(task, task_width, false)
+                )),
+                Span::styled(field(last, last_width, !self.showing_recent), style),
+            ])
+        };
+        let header = columns("项目", "任务", last_header, Style::default(), false);
+        frame.render_widget(
+            Paragraph::new(header).style(Style::default().add_modifier(Modifier::BOLD)),
+            inner.rows().next().unwrap_or_default(),
+        );
+
+        let body = Rect::new(
+            inner.x,
+            inner.y.saturating_add(1),
+            inner.width,
+            inner.height.saturating_sub(1),
+        );
+        let mut items = Vec::new();
+        let mut selected = None;
         if self.showing_recent {
-            let mut items = Vec::new();
-            let mut selected = None;
+            let separator = |label: &str| {
+                ListItem::new(Line::from(format!("── {label} ──")).centered())
+                    .style(Style::default().fg(Color::DarkGray))
+            };
             for (index, row) in self.recent.iter().enumerate() {
                 if row.boundary.is_none()
                     && (index == 0 || self.recent[index - 1].boundary.is_some())
                 {
-                    items.push(
-                        ListItem::new("── 更早 ──").style(Style::default().fg(Color::DarkGray)),
-                    );
+                    items.push(separator("更早"));
                 }
-                if index == self.recent_index {
+                let active = index == self.recent_index;
+                if active {
                     selected = Some(items.len());
                 }
                 let (project, task) = &row.key;
@@ -352,56 +430,55 @@ impl TaskPicker {
                 } else {
                     task
                 };
-                let mut line = Line::from(format!("{project} / {label}"));
-                if running.is_some_and(|tasks| tasks.contains(&row.key)) {
-                    line.push_span(" · ");
-                    line.push_span(Span::styled(
-                        "Codex 运行中",
-                        Style::default().fg(Color::Cyan),
-                    ));
-                }
-                items.push(ListItem::new(line));
+                let status = if running.is_some_and(|tasks| tasks.contains(&row.key)) {
+                    "运行中"
+                } else {
+                    ""
+                };
+                items.push(ListItem::new(columns(
+                    project,
+                    label,
+                    status,
+                    Style::default().fg(Color::Cyan),
+                    active,
+                )));
                 if let Some(label) = row.boundary
                     && self.recent.get(index + 1).and_then(|next| next.boundary) != Some(label)
                 {
-                    items.push(
-                        ListItem::new(format!("── {label} ──"))
-                            .style(Style::default().fg(Color::DarkGray)),
-                    );
+                    items.push(separator(label));
                 }
             }
-            draw_task_list(
-                frame,
-                " 未读任务  [最近任务] ",
-                self.recent_error.as_deref().unwrap_or("暂无其他最近任务"),
-                items,
-                selected,
-                self.feedback
-                    .as_deref()
-                    .unwrap_or(" Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 · uu 标为未读 "),
-            );
+        } else {
+            selected = self.unread_index(tasks);
+            for (index, task) in tasks.iter().enumerate() {
+                items.push(ListItem::new(columns(
+                    &task.notice.project,
+                    &task.notice.task,
+                    &task.count.to_string(),
+                    Style::default(),
+                    selected == Some(index),
+                )));
+            }
+        }
+        if items.is_empty() {
+            frame.render_widget(Paragraph::new(empty), body);
             return;
         }
-        let items = tasks
-            .iter()
-            .map(|task| {
-                let clean =
-                    |text: &str| text.chars().filter(|c| !c.is_control()).collect::<String>();
-                ListItem::new(format!(
-                    "{} / {} / 未读 {}",
-                    clean(&task.notice.project),
-                    clean(&task.notice.task),
-                    task.count
-                ))
-            })
-            .collect::<Vec<_>>();
-        draw_task_list(
-            frame,
-            " [未读任务]  最近任务 ",
-            "暂无未读任务",
-            items,
-            self.unread_index(tasks),
-            " Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 ",
+        let items = items.into_iter().enumerate().map(|(index, item)| {
+            if Some(index) == selected {
+                item.style(Style::default().fg(Color::Yellow))
+            } else {
+                item
+            }
+        });
+        frame.render_stateful_widget(
+            List::new(items).highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            body,
+            &mut ListState::default().with_selected(selected),
         );
     }
 
@@ -414,55 +491,28 @@ impl TaskPicker {
     }
 }
 
-fn draw_task_list(
-    frame: &mut Frame,
-    title: &str,
-    empty: &str,
-    items: Vec<ListItem>,
-    selected: Option<usize>,
-    footer: &str,
-) {
-    let screen = frame.area();
-    let width = screen.width.saturating_sub(2).min(76);
-    let height = screen.height.saturating_sub(2).min(16);
-    let area = Rect::new(
-        screen.x + (screen.width - width) / 2,
-        screen.y + (screen.height - height) / 2,
-        width,
-        height,
-    );
-    let block = Block::default()
-        .title(title)
-        .title_bottom(footer)
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .style(Style::default().fg(Color::White).bg(Color::Black))
-        .border_style(Style::default().fg(Color::Yellow));
-    frame.render_widget(Clear, area);
-    if items.is_empty() {
-        frame.render_widget(Paragraph::new(empty).block(block), area);
-        return;
-    }
-    let items = items.into_iter().enumerate().map(|(index, item)| {
-        if Some(index) == selected {
-            item.style(Style::default().fg(Color::Yellow))
-        } else {
-            item
+fn field(value: &str, width: usize, right_aligned: bool) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let mut text: String = value.chars().filter(|c| !c.is_control()).collect();
+    if text.width() > width {
+        let mut used = 0;
+        text = text
+            .chars()
+            .take_while(|c| {
+                used += c.width().unwrap_or(0);
+                used < width
+            })
+            .collect();
+        if width > 0 {
+            text.push('…');
         }
-    });
-    let mut state = ListState::default().with_selected(selected);
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(block)
-            .highlight_symbol("› ")
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        area,
-        &mut state,
-    );
+    }
+    let padding = " ".repeat(width.saturating_sub(text.width()));
+    if right_aligned {
+        format!("{padding}{text}")
+    } else {
+        format!("{text}{padding}")
+    }
 }
 
 #[cfg(test)]
@@ -497,11 +547,12 @@ mod picker_tests {
             }
             screen.push('\n');
         }
+        let screen = screen.split_whitespace().collect::<Vec<_>>().join(" ");
         let mut rest = screen.as_str();
         for label in [
             "task0",
             "近一天",
-            "› demo / task1",
+            "› demo task1",
             "近三天",
             "task2",
             "近一周",
@@ -519,6 +570,38 @@ mod picker_tests {
     }
 
     #[test]
+    fn picker_centers_time_labels_and_reserves_status_column_on_resize() {
+        let key = ("long-project-name".into(), "长任务名称".repeat(10));
+        let running = [key.clone()].into_iter().collect();
+        let mut picker = TaskPicker::new(Ok(vec![RecentTask::new(key, 0)]));
+        picker.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &[]);
+        for width in [38, 65, 100] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| picker.draw(frame, &[], Some(&running)))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let pos = |symbol| {
+                (0..20)
+                    .find_map(|y| {
+                        (0..width)
+                            .find(|&x| buf[(x, y)].symbol() == symbol)
+                            .map(|x| (x, y))
+                    })
+                    .unwrap()
+            };
+            // 标题中也有「最近」，在分隔行核对宽度为六列的「近一天」。
+            let (_, y) = pos("天");
+            let start = (0..width)
+                .find(|&col| buf[(col, y)].symbol() == "近")
+                .unwrap();
+            assert!((i32::from(start) * 2 + 6 - i32::from(width)).abs() <= 1);
+            assert_eq!(pos("C").0, pos("运").0);
+            assert_eq!(pos("…").1, pos("运").1);
+        }
+    }
+
+    #[test]
     fn recent_running_status_keeps_cyan_on_both_row_backgrounds() {
         let tasks = vec![("demo".into(), "one".into()), ("demo".into(), "two".into())];
         let running = tasks.iter().cloned().collect();
@@ -532,7 +615,7 @@ mod picker_tests {
             .draw(|frame| picker.draw(frame, &[], Some(&running)))
             .unwrap();
         let cells = &terminal.backend().buffer().content;
-        for symbol in ["C", "运", "行", "中"] {
+        for symbol in ["运", "行", "中"] {
             let colors: Vec<_> = cells
                 .iter()
                 .filter(|cell| cell.symbol() == symbol)

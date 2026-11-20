@@ -2319,11 +2319,14 @@ mod tests {
                 .draw(|frame| picker.draw(frame, &[], running.as_ref()))
                 .unwrap();
             text(terminal.backend().buffer())
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
         };
-        let active = "› beta / 主工作目录 · Codex 运行中";
+        let active = "› beta 主工作目录 运行中";
         assert!(draw(&app.snapshot).contains(active));
         app.snapshot.threads[1].status = json!({"type":"idle"});
-        assert!(!draw(&app.snapshot).contains("Codex 运行中"));
+        assert!(!draw(&app.snapshot).contains("运行中"));
         app.snapshot.threads.push(
             serde_json::from_value(json!({
                 "id":"child", "cwd":"/beta", "parentThreadId":"beta-full-id",
@@ -2337,15 +2340,15 @@ mod tests {
         assert!(draw(&app.snapshot).contains(active));
         app.snapshot.codex_checked = Some(Instant::now() - Duration::from_secs(30));
         let stale = draw(&app.snapshot);
-        assert!(!stale.contains("Codex 运行中"));
-        assert!(stale.contains("› beta / 主工作目录"));
+        assert!(!stale.contains("运行中"));
+        assert!(stale.contains("› beta 主工作目录"));
         app.snapshot.codex_checked = Some(Instant::now());
         app.snapshot.codex_error = Some("offline".into());
-        assert!(!draw(&app.snapshot).contains("Codex 运行中"));
+        assert!(!draw(&app.snapshot).contains("运行中"));
         app.snapshot.codex_error = None;
         app.snapshot.threads.last_mut().unwrap().status =
             json!({"type":"active","activeFlags":["waitingOnApproval"]});
-        assert!(!draw(&app.snapshot).contains("Codex 运行中"));
+        assert!(!draw(&app.snapshot).contains("运行中"));
     }
 
     #[test]
