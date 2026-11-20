@@ -1931,7 +1931,7 @@ fn recent_picker_switches_projects_and_preserves_the_original_shell() {
     p.wait_screen("demo · 全局 Codex");
     p.send(b"recent_marker=still_here\r");
     p.send(b"\x17u\t");
-    p.wait_screen("j/k 选择 · Enter 进入 · Esc 关闭");
+    p.wait_screen("j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭");
     p.wait_task_row("› other auth", true);
     p.wait_task_row("demo auth", false);
     p.send(b"uuuu\t");
@@ -1944,7 +1944,7 @@ fn recent_picker_switches_projects_and_preserves_the_original_shell() {
     p.send(b"\x17u\t\r");
     p.wait_screen("other · 全局 Codex");
     p.send(b"\x17u\t");
-    p.wait_screen("j/k 选择 · Enter 进入 · Esc 关闭");
+    p.wait_screen("j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭");
     p.wait_task_row("› demo auth", true);
     p.send(b"\r");
     p.wait_screen("demo · 全局 Codex");
@@ -1953,7 +1953,7 @@ fn recent_picker_switches_projects_and_preserves_the_original_shell() {
     p.send(b"\x17d");
     p.wait_screen("主工作目录");
     p.send(b"\x17u\t");
-    p.wait_screen("j/k 选择 · Enter 进入 · Esc 关闭");
+    p.wait_screen("j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭");
     p.wait_task_row("› demo auth", true);
     p.send(b"\x17u");
     p.wait_screen_absent("最近任务");

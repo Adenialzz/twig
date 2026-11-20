@@ -194,7 +194,7 @@ pub struct TaskPicker {
     recent: Vec<RecentTask>,
     recent_error: Option<String>,
     recent_index: usize,
-    mark_prefix: bool,
+    pending_repeat: Option<char>,
     feedback: Option<String>,
     showing_recent: bool,
     prefix: bool,
@@ -239,6 +239,9 @@ fn list_key(key: KeyEvent, prefix: &mut bool, index: Option<usize>, len: usize) 
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => ListAction::Select((index + 1).min(len - 1)),
         KeyCode::Char('k') | KeyCode::Up => ListAction::Select(index.saturating_sub(1)),
+        KeyCode::Char('G') if (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
+            ListAction::Select(len - 1)
+        }
         KeyCode::Enter => ListAction::Open(index),
         _ => ListAction::Stay,
     }
@@ -273,20 +276,26 @@ impl TaskPicker {
             return PickerAction::Stay;
         }
         self.feedback = None;
-        if self.showing_recent
-            && !self.prefix
-            && key.code == KeyCode::Char('u')
+        let previous = self.pending_repeat.take();
+        let mut first = false;
+        if !self.prefix
             && key.modifiers.is_empty()
+            && let KeyCode::Char(c) = key.code
+            && (c == 'g' || (c == 'u' && self.showing_recent))
         {
-            if !std::mem::take(&mut self.mark_prefix) {
-                self.mark_prefix = true;
-            } else if let Some(row) = self.recent.get(self.recent_index) {
-                let (project, task) = row.key.clone();
-                return PickerAction::Mark(project, task);
+            if previous != Some(c) {
+                self.pending_repeat = Some(c);
+                return PickerAction::Stay;
             }
-            return PickerAction::Stay;
+            if c == 'u' {
+                if let Some(row) = self.recent.get(self.recent_index) {
+                    let (project, task) = row.key.clone();
+                    return PickerAction::Mark(project, task);
+                }
+                return PickerAction::Stay;
+            }
+            first = true;
         }
-        self.mark_prefix = false;
         if key.kind == KeyEventKind::Press && key.code == KeyCode::Tab && !self.prefix {
             self.showing_recent = !self.showing_recent;
             return PickerAction::Stay;
@@ -296,7 +305,12 @@ impl TaskPicker {
         } else {
             (self.unread_index(tasks), tasks.len())
         };
-        match list_key(key, &mut self.prefix, index, len) {
+        let action = if first && len > 0 {
+            ListAction::Select(0)
+        } else {
+            list_key(key, &mut self.prefix, index, len)
+        };
+        match action {
             ListAction::Close => PickerAction::Close,
             ListAction::Open(i) if self.showing_recent => {
                 let (project, task) = self.recent[i].key.clone();
@@ -345,16 +359,16 @@ impl TaskPicker {
             (
                 " 未读任务  [最近任务] ",
                 self.recent_error.as_deref().unwrap_or("暂无其他最近任务"),
-                self.feedback
-                    .as_deref()
-                    .unwrap_or(" Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 · uu 标为未读 "),
+                self.feedback.as_deref().unwrap_or(
+                    " Tab 切换 · j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭 · uu 未读 ",
+                ),
                 "Codex 状态",
             )
         } else {
             (
                 " [未读任务]  最近任务 ",
                 "暂无未读任务",
-                " Tab 切换 · j/k 选择 · Enter 进入 · Esc 关闭 ",
+                " Tab 切换 · j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭 ",
                 "未读数",
             )
         };
@@ -519,6 +533,39 @@ fn field(value: &str, width: usize, right_aligned: bool) -> String {
 mod picker_tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn gg_and_g_select_first_and_last_tasks_in_each_tab() {
+        let tasks = vec![task("one"), task("two"), task("three")];
+        let mut picker = TaskPicker::new(Ok(tasks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                RecentTask::new(
+                    ("demo".into(), t.notice.task.clone()),
+                    i as u64 * 86_400_000,
+                )
+            })
+            .collect()));
+        picker.sync(&tasks);
+        for recent in [false, true] {
+            if recent {
+                picker.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &tasks);
+            }
+            for (c, expected) in [('G', "three"), ('g', "three"), ('g', "one")] {
+                assert!(matches!(
+                    picker.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), &tasks),
+                    PickerAction::Stay
+                ));
+                let selected = if recent {
+                    &picker.recent[picker.recent_index].key.1
+                } else {
+                    &picker.selected.as_ref().unwrap().task
+                };
+                assert_eq!(selected, expected);
+            }
+        }
+    }
 
     #[test]
     fn recent_boundaries_follow_tasks_and_selection_skips_separators() {
