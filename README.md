@@ -102,7 +102,8 @@ twig agent send --project myapp --task fix/login --message '排查登录失败�
 | Console 普通导航 | `?` | 分组帮助；底栏随焦点显示常用按键 |
 | 终端工作台 | `Ctrl-W d` | 返回 Console，保留任务进程 |
 | Console / 工作台 | `Ctrl-W f` | 跳转当前通知对应的任务或主控；无卡片时不操作 |
-| Console / 工作台 | `Ctrl-W u` | 打开未读任务列表 |
+| Console 项目栏、任务栏 / 最近任务标签 | `uu` | 将选中任务标为未读 |
+| Console / 工作台 | `Ctrl-W u` | 打开任务列表（Tab 切换未读 / 最近） |
 | Agent | `Enter` / `Alt-Enter` | 发送 / 换行 |
 | Agent | `Ctrl-C` | 有输入时清空，无输入时退出 Twig |
 

@@ -53,6 +53,7 @@ pub struct Completion {
 struct Unread {
     task: UnreadTask,
     claude_count: usize,
+    manual: bool,
     latest: u64,
 }
 
@@ -77,18 +78,25 @@ impl Notifications {
         self.sequence = 0;
         for event in &state.unread {
             if let Some(task) = &event.task {
-                self.receive(task.clone(), None);
-                if !self.known.insert(event.id.clone()) {
-                    self.queue.pop_back();
+                let manual = event.id.starts_with("manual:");
+                let notice = self.add_unread(task.clone(), manual);
+                if !manual && self.known.insert(event.id.clone()) {
+                    self.queue.push_back(notice);
                 }
             }
         }
     }
 
+    #[cfg(test)]
     pub fn receive(&mut self, event: Completion, viewed: Option<(&str, &Path)>) {
         if viewed.is_some_and(|(project, path)| project == event.project && path == event.path) {
             return;
         }
+        let notice = self.add_unread(event, false);
+        self.queue.push_back(notice);
+    }
+
+    fn add_unread(&mut self, event: Completion, manual: bool) -> CompletionNotice {
         self.sequence += 1;
         let notice = CompletionNotice {
             claude: event.claude,
@@ -105,12 +113,14 @@ impl Notifications {
                     count: 0,
                 },
                 claude_count: 0,
+                manual: false,
                 latest: self.sequence,
             });
         unread.task.count += 1;
         unread.claude_count += usize::from(event.claude.is_some());
         unread.latest = self.sequence;
-        self.queue.push_back(notice);
+        unread.manual |= manual;
+        notice
     }
 
     pub fn tick(&mut self, now: Instant) {
@@ -151,6 +161,12 @@ impl Notifications {
         unread.into_iter().map(|item| item.task.clone()).collect()
     }
 
+    pub fn manually_marked(&self, project: &str, path: &Path) -> bool {
+        self.unread
+            .get(&(project.to_owned(), path.to_owned()))
+            .is_some_and(|item| item.manual)
+    }
+
     pub fn source_count(&self, project: &str, path: Option<&Path>, claude: bool) -> usize {
         self.unread
             .iter()
@@ -159,7 +175,7 @@ impl Notifications {
                 if claude {
                     unread.claude_count
                 } else {
-                    unread.task.count - unread.claude_count
+                    unread.task.count - unread.claude_count - usize::from(unread.manual)
                 }
             })
             .sum()

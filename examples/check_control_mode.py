@@ -81,7 +81,7 @@ class Frontend:
             preexec_fn=setup,
             # 剪贴板验收只捕获 OSC 52，不碰真实系统剪贴板或外层 tmux。
             env={**{k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")},
-                 "TERM": "xterm-256color", "SSH_CONNECTION": "twig-pty-test"},
+                 "HOME": str(Path(socket).parent), "TERM": "xterm-256color", "SSH_CONNECTION": "twig-pty-test"},
         )
 
     def send(self, text):
@@ -170,6 +170,21 @@ def main():
             first = Frontend(binary, socket)
             clients.append(first)
             first.wait("READY>")
+            config = Path(root) / ".tmux.conf"
+            config.write_text("set -w @reload_test first\nset -w @reload_test second\n")
+            original_pid = mux("display-message", "-p", "#{pane_pid}")
+            first.send(b"\x17r")
+            first.wait("tmux.conf 已重载")
+            assert mux("show-options", "-wqv", "@reload_test").strip() == b"second"
+            first.wait("READY>")
+            first.send(b"printf 'RELOAD_%s\\n' OK\r")
+            first.wait("RELOAD_OK")
+            config.unlink()
+            first.send(b"\x17r")
+            first.wait("重载 tmux.conf 失败")
+            first.send(b"printf 'MISSING_CONFIG_%s\\n' OK\r")
+            first.wait("MISSING_CONFIG_OK")
+            assert mux("display-message", "-p", "#{pane_pid}") == original_pid
             first.send(f"vim -Nu NONE -n {shlex.quote(str(target))}\r".encode())
             first.wait("ORIGINAL_MARKER")
             first.send(b"GoBEFORE_DETACH\x1b")

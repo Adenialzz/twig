@@ -181,7 +181,7 @@ fn codex_stale(app: &App) -> bool {
 /// 底栏左侧的按键提示，随焦点和待完成的前缀变化。
 fn key_hints(app: &App) -> String {
     if app.pane_prefix {
-        return "Ctrl-W → h 项目 · l 任务 · j 详情 · k 任务 · u 未读 · f 跳转通知 · Esc 取消"
+        return "Ctrl-W → h 项目 · l 任务 · j 详情 · k 任务 · u 未读/最近 · f 通知 · Esc 取消"
             .into();
     }
     if app.delete_prefix {
@@ -409,7 +409,8 @@ const HELP: [(&str, &[(&str, &str)]); 5] = [
         "通知",
         &[
             ("Ctrl-W f", "跳转当前通知对应的任务或主控"),
-            ("Ctrl-W u", "未读任务列表；Enter 进入，Esc 关闭"),
+            ("uu", "将选中的任务标为未读"),
+            ("Ctrl-W u", "Tab 切换未读 / 最近，Enter 进入，Esc 关闭"),
         ],
     ),
 ];
@@ -473,6 +474,50 @@ fn codex_root<'a>(
         current = ancestor;
     }
     Some(current.id.as_str())
+}
+
+fn codex_groups<'a>(
+    snapshot: &'a data::Snapshot,
+    sessions: impl IntoIterator<Item = &'a crate::codex::Thread>,
+) -> impl Iterator<Item = &'a crate::codex::Thread> {
+    let mut groups = std::collections::BTreeMap::new();
+    for thread in sessions {
+        if let Some(root) = codex_root(snapshot, thread) {
+            let representative = groups.entry(root).or_insert(thread);
+            if (thread.priority(), &thread.id) < (representative.priority(), &representative.id) {
+                *representative = thread;
+            }
+        }
+    }
+    groups.into_values()
+}
+
+pub(super) fn fresh_codex(snapshot: &data::Snapshot) -> bool {
+    snapshot.codex_error.is_none()
+        && snapshot.codex_checked.is_some()
+        && !is_stale(snapshot.codex_checked)
+}
+
+pub(super) fn running_tasks(
+    snapshot: &data::Snapshot,
+) -> std::collections::BTreeSet<(String, String)> {
+    let mut sessions = std::collections::BTreeMap::<_, Vec<_>>::new();
+    for thread in &snapshot.threads {
+        if let Some((project, path)) = snapshot.associations.get(&thread.id) {
+            sessions.entry((project, path)).or_default().push(thread);
+        }
+    }
+    let mut running = std::collections::BTreeSet::new();
+    for repo in &snapshot.repos {
+        for task in &repo.tasks {
+            if let Some(threads) = sessions.remove(&(&repo.name, &task.path))
+                && codex_groups(snapshot, threads).any(|thread| thread.label() == "运行中")
+            {
+                running.insert((repo.name.clone(), task.name.clone()));
+            }
+        }
+    }
+    running
 }
 
 fn active_codex_groups(snapshot: &data::Snapshot, project: &str) -> usize {
@@ -685,6 +730,9 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 &task.name
             }))];
+            if app.notifications.manually_marked(project, &task.path) {
+                name.push(unread(1));
+            }
             let codex_unread = app
                 .notifications
                 .source_count(project, Some(&task.path), false);
@@ -707,16 +755,7 @@ fn tasks(frame: &mut Frame, area: Rect, app: &App) {
                 }),
             );
             let mut codex_counts = std::collections::BTreeMap::new();
-            let mut groups = std::collections::BTreeMap::<_, &crate::codex::Thread>::new();
-            for thread in sessions {
-                if let Some(root) = codex_root(&app.snapshot, thread) {
-                    let representative = groups.entry(root).or_insert(*thread);
-                    if thread.priority() < representative.priority() {
-                        *representative = thread;
-                    }
-                }
-            }
-            for thread in groups.values() {
+            for thread in codex_groups(&app.snapshot, sessions.iter().copied()) {
                 let entry = codex_counts
                     .entry((thread.priority(), thread.label()))
                     .or_insert((0, status_style(thread, stale)));
@@ -2260,6 +2299,56 @@ mod tests {
         app.snapshot.threads.last_mut().unwrap().status = json!({"type":"idle"});
         app.monitor_idle = true;
         assert!(text(&render(&app, 100, 30, monitor)).contains("Scout"));
+    }
+
+    #[test]
+    fn recent_picker_updates_running_labels_without_moving_selection() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use twig_cli::notification::{RecentTask, TaskPicker};
+        let mut app = fixture();
+        let mut picker = TaskPicker::new(Ok(vec![
+            RecentTask::new(("alpha".into(), "main".into()), 0),
+            RecentTask::new(("beta".into(), "main".into()), 0),
+        ]));
+        picker.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &[]);
+        picker.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &[]);
+        let mut terminal = Terminal::new(TestBackend::new(85, 20)).unwrap();
+        let mut draw = |snapshot: &data::Snapshot| {
+            let running = fresh_codex(snapshot).then(|| running_tasks(snapshot));
+            terminal
+                .draw(|frame| picker.draw(frame, &[], running.as_ref()))
+                .unwrap();
+            text(terminal.backend().buffer())
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let active = "› beta 主工作目录 运行中";
+        assert!(draw(&app.snapshot).contains(active));
+        app.snapshot.threads[1].status = json!({"type":"idle"});
+        assert!(!draw(&app.snapshot).contains("运行中"));
+        app.snapshot.threads.push(
+            serde_json::from_value(json!({
+                "id":"child", "cwd":"/beta", "parentThreadId":"beta-full-id",
+                "status":{"type":"active","activeFlags":[]}
+            }))
+            .unwrap(),
+        );
+        app.snapshot
+            .associations
+            .insert("child".into(), ("beta".into(), "/beta".into()));
+        assert!(draw(&app.snapshot).contains(active));
+        app.snapshot.codex_checked = Some(Instant::now() - Duration::from_secs(30));
+        let stale = draw(&app.snapshot);
+        assert!(!stale.contains("运行中"));
+        assert!(stale.contains("› beta 主工作目录"));
+        app.snapshot.codex_checked = Some(Instant::now());
+        app.snapshot.codex_error = Some("offline".into());
+        assert!(!draw(&app.snapshot).contains("运行中"));
+        app.snapshot.codex_error = None;
+        app.snapshot.threads.last_mut().unwrap().status =
+            json!({"type":"active","activeFlags":["waitingOnApproval"]});
+        assert!(!draw(&app.snapshot).contains("运行中"));
     }
 
     #[test]

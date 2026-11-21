@@ -441,6 +441,27 @@ impl Pty {
     fn wait_screen_absent(&mut self, needle: &str) {
         self.wait_for(needle, true, false);
     }
+    fn wait_task_row(&mut self, columns: &str, present: bool) {
+        let start = Instant::now();
+        loop {
+            self.read_output();
+            let screen = self.screen_text();
+            if screen.lines().any(|line| {
+                line.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(columns)
+            }) == present
+            {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(12),
+                "等待任务行 {columns} 可见={present} 超时：{screen}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     fn screen_text(&self) -> String {
         use alacritty_terminal::{
             Term,
@@ -1887,6 +1908,107 @@ fn codex_completion_shortcut_from_navigation() {
 }
 
 #[test]
+fn recent_picker_switches_projects_and_preserves_the_original_shell() {
+    let f = Fixture::core();
+    f.init();
+    f.twig(&["new", "demo", "removed", "--no-fetch", "--no-open"]);
+    f.twig(&["rm", "demo", "removed", "--keep-branch", "--yes"]);
+    assert!(fs::read_to_string(&f.registry).unwrap().contains("removed"));
+    let other = f.temp.path().join("other");
+    f.git(&[
+        "clone",
+        "--local",
+        "--single-branch",
+        ".",
+        other.to_str().unwrap(),
+    ]);
+    f.twig(&["add", "other", "--path", other.to_str().unwrap()]);
+    f.twig(&["new", "other", "auth", "--no-fetch", "--no-open"]);
+    f.twig(&["stop", "other", "auth", "--yes"]);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_twig"));
+    f.env(&mut command);
+    command
+        .arg("--config")
+        .arg(&f.registry)
+        .args(["open", "demo", "auth"]);
+    let mut p = Pty::spawn(command);
+    p.wait_screen("demo · 全局 Codex");
+    p.send(b"recent_marker=still_here\r");
+    p.send(b"\x17u\t");
+    p.wait_screen("j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭");
+    p.wait_task_row("› other auth", true);
+    p.wait_task_row("demo removed", false);
+    p.wait_task_row("demo auth", false);
+    p.send(b"uuuu\t");
+    p.wait_task_row("other auth 1", true);
+    let registry = fs::read(&f.registry).unwrap();
+    p.send(b"\x1b");
+    p.wait_screen_absent("最近任务");
+    p.wait_screen_absent("j/k 选择");
+    assert_eq!(registry, fs::read(&f.registry).unwrap());
+    p.send(b"\x17u\t\r");
+    p.wait_screen("other · 全局 Codex");
+    p.send(b"\x17u\t");
+    p.wait_screen("j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭");
+    p.wait_task_row("› demo auth", true);
+    p.send(b"\r");
+    p.wait_screen("demo · 全局 Codex");
+    p.send(b"printf 'RETURNED_%s\\n' \"$recent_marker\"\r");
+    p.wait_screen("RETURNED_still_here");
+    p.send(b"\x17d");
+    p.wait_screen("主工作目录");
+    p.send(b"\x17u\t");
+    p.wait_screen("j/k 选择 · gg/G 首尾 · Enter 进入 · Esc 关闭");
+    p.wait_task_row("› demo auth", true);
+    p.send(b"\x17u");
+    p.wait_screen_absent("最近任务");
+    p.wait_screen_absent("j/k 选择");
+    p.send(b"\x17u");
+    p.wait_screen("[未读任务]");
+    p.send(b"\tj");
+    p.wait_task_row("› other auth", true);
+    p.send(b"\t");
+    p.wait_screen("暂无未读任务");
+    p.send(b"\t");
+    p.wait_task_row("› other auth", true);
+    p.send(b"\r");
+    p.wait_screen("other · 全局 Codex");
+    p.send(b"\x17d");
+    p.wait_screen("主工作目录");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+}
+
+#[test]
+fn manual_unread_survives_restart_and_clears_on_enter() {
+    let f = Fixture::core();
+    f.init();
+    let mut p = f.terminal(false);
+    p.wait_screen("主工作目录");
+    p.send(b"2/auth\r1uu");
+    p.send(b"2uu");
+    p.send(b"\x17u");
+    p.wait_task_row("demo auth 1", true);
+    p.send(b"\x17uq");
+    assert!(p.wait_exit().success());
+
+    let mut p = f.terminal(false);
+    p.wait_screen("主工作目录");
+    p.send(b"\x17u");
+    p.wait_task_row("demo auth 1", true);
+    p.send(b"\r");
+    p.wait_screen("demo · 全局 Codex");
+    p.send(b"printf 'RAW_%s\\n' uu\r");
+    p.wait_screen("RAW_uu");
+    p.send(b"\x17u");
+    p.wait_screen("暂无未读任务");
+    p.send(b"\x17u\x17d");
+    p.wait_screen("主工作目录");
+    p.send(b"q");
+    assert!(p.wait_exit().success());
+}
+
+#[test]
 fn unread_picker_from_workbench() {
     completion_shortcut(false, true, false);
 }
@@ -2077,12 +2199,12 @@ fn completion_shortcut(from_navigation: bool, use_picker: bool, restart: bool) {
         // 卡片到期后仍能选择未读；取消不会清除记录。
         thread::sleep(Duration::from_secs(9));
         p.send(b"\x17u");
-        p.wait_screen("demo / auth / 未读 1");
+        p.wait_task_row("demo auth 1", true);
         p.send(b"\x1b");
-        p.wait_screen_absent("demo / auth / 未读 1");
+        p.wait_task_row("demo auth 1", false);
         p.clear_output();
         p.send(b"\x17u");
-        p.wait_screen("demo / auth / 未读 1");
+        p.wait_task_row("demo auth 1", true);
         p.send(b"jk\x1b[B\x1b[A\r");
     } else {
         p.send(b"\x17f");
@@ -3303,7 +3425,7 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
     p = f.terminal(false);
     p.wait("auth");
     p.send(b"\x17u");
-    p.wait_screen("demo / auth / 未读 1");
+    p.wait_task_row("demo auth 1", true);
     // 重启恢复未读，但不重播旧卡片；通过未读列表进入。
     p.send(b"\r");
     p.wait(" · 全局 Codex ");
@@ -3324,9 +3446,9 @@ fn delivered_agent_messages_notify_without_daemon_and_jump_to_task() {
     p.wait("Agent*");
     p.wait("Agent 收到新消息");
     p.send(b"\x17u");
-    p.wait_screen("demo / auth / 未读 1");
+    p.wait_task_row("demo auth 1", true);
     p.send(b"\x17u");
-    p.wait_screen_absent("demo / auth / 未读 1");
+    p.wait_task_row("demo auth 1", false);
     p.send(b"\t");
     p.wait("YOLO");
     p.send(b"\t");
@@ -3376,7 +3498,7 @@ fn claude_state_changes_notify_and_jump_without_hooks_or_agent_control() {
     save("idle");
     p.wait("Claude 状态变化");
     p.send(b"\x17u");
-    p.wait_screen("demo / auth / 未读 1");
+    p.wait_task_row("demo auth 1", true);
     p.send(b"\x17u\x17f");
     p.wait(" · 全局 Codex ");
     p.send(b"\x17u");

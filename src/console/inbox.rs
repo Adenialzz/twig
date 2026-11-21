@@ -61,6 +61,31 @@ mod tests {
     }
 
     #[test]
+    fn manual_marks_stay_silent_and_old_receipts_cannot_clear_a_new_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let client = Inbox::remote(&config, "client".into()).unwrap();
+        let disk = Inbox::new(&config).unwrap();
+        let task = event("example", true).task.unwrap();
+        client.mark_unread(task.clone()).unwrap();
+        let first = client.load().unwrap().unread[0].id.clone();
+        client.mark_unread(task.clone()).unwrap();
+        let mut notices = Notifications::default();
+        notices.sync(&client.load().unwrap());
+        notices.tick(Instant::now());
+        assert!(notices.current().is_none());
+        assert_eq!(notices.count("demo", None), 1);
+        assert_eq!(notices.source_count("demo", None, false), 0);
+        assert!(notices.manually_marked("demo", &task.path));
+        client.read_task("demo", &task.path).unwrap();
+        client.mark_unread(task).unwrap();
+        disk.discard(&HashSet::from([first.clone()])).unwrap();
+        let restored = disk.load().unwrap();
+        assert_eq!(restored.unread.len(), 1);
+        assert_ne!(restored.unread[0].id, first);
+    }
+
+    #[test]
     fn offline_read_receipts_persist_and_preserve_unobserved_events() {
         let temp = tempfile::tempdir().unwrap();
         let config = temp.path().join("config.toml");
@@ -465,6 +490,44 @@ impl Inbox {
             serde_json::to_writer(&mut file, &state)?;
             file.as_file().sync_all()?;
             file.persist(&self.path)?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_unread(&self, task: Completion) -> Result<()> {
+        // 与订阅串行，防止较早的 RPC 快照覆盖本次写入。离线也写同一份未读记录。
+        let _sync = self
+            .remote
+            .as_ref()
+            .map(|remote| remote.sync_lock.lock().unwrap());
+        let mut cache = self
+            .remote
+            .as_ref()
+            .map(|remote| remote.cache.lock().unwrap());
+        let disk = Self {
+            path: self.path.clone(),
+            remote: None,
+        };
+        let mut unread = Vec::new();
+        disk.update(|state| {
+            if !state.unread.iter().any(|event| {
+                event
+                    .task
+                    .as_ref()
+                    .is_some_and(|old| old.project == task.project && old.path == task.path)
+            }) {
+                state.unread.push(Event {
+                    id: format!("manual:{}", crate::agent::message_id()),
+                    thread: String::new(),
+                    task: Some(task),
+                });
+            }
+            if cache.is_some() {
+                unread = state.unread.clone();
+            }
+        })?;
+        if let Some(cache) = &mut cache {
+            cache.state.unread = unread;
         }
         Ok(())
     }
